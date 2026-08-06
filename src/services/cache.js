@@ -28,8 +28,15 @@ export async function initCache() {
       console.log(`📦 Loaded ${cachedNaps.length} NAPs from disk cache.`);
     } else {
       console.log('📦 No disk cache found. Running initial sync with Smart OLT...');
-      await syncCacheWithSmartOlt();
+      try {
+        await syncCacheWithSmartOlt();
+      } catch (syncErr) {
+        console.error('❌ Initial sync with Smart OLT failed:', syncErr.message);
+      }
     }
+
+    // Auto-seed coordinates from local CSV file
+    applyCsvCoordinatesToCache();
 
     // Auto-sync every 15 minutes in the background
     setInterval(async () => {
@@ -267,4 +274,75 @@ function saveCacheToDisk() {
       console.error('❌ Failed to write cache file to disk:', err.message);
     }
   }, SAVE_DEBOUNCE_MS);
+}
+
+// Custom parser to split CSV lines respecting double quotes
+function parseCsvLine(line) {
+  const cols = [];
+  let current = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const char = line[i];
+    if (char === '"') {
+      inQuotes = !inQuotes;
+    } else if (char === ',' && !inQuotes) {
+      cols.push(current.trim());
+      current = '';
+    } else {
+      current += char;
+    }
+  }
+  cols.push(current.trim());
+  return cols;
+}
+
+/**
+ * Reads coordinates from coordinates_mymaps.csv and seeds the cache NAPs that don't have coordinates.
+ */
+export function applyCsvCoordinatesToCache() {
+  const csvPath = path.resolve('src/public/coordenadas_mymaps.csv');
+  if (!fs.existsSync(csvPath)) {
+    console.log('⚠️ coordenadas_mymaps.csv not found, skipping coordinates auto-seed.');
+    return;
+  }
+
+  try {
+    const text = fs.readFileSync(csvPath, 'utf8');
+    const lines = text.split(/\r?\n/);
+    const coordsMap = {};
+
+    for (let i = 1; i < lines.length; i++) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      const cols = parseCsvLine(line);
+      if (cols.length < 4) continue;
+      const name = cols[1].trim().toUpperCase();
+      const lat = parseFloat(cols[2]);
+      const lng = parseFloat(cols[3]);
+      if (name && !isNaN(lat) && !isNaN(lng) && lat !== 0 && lng !== 0) {
+        coordsMap[name] = { latitude: lat, longitude: lng };
+      }
+    }
+
+    let updatedCount = 0;
+    cachedNaps.forEach((nap) => {
+      if (nap.latitude === null || nap.longitude === null) {
+        const match = coordsMap[nap.name.trim().toUpperCase()];
+        if (match) {
+          nap.latitude = match.latitude;
+          nap.longitude = match.longitude;
+          updatedCount++;
+        }
+      }
+    });
+
+    if (updatedCount > 0) {
+      console.log(`📍 Auto-seeded ${updatedCount} NAPs coordinates from coordenadas_mymaps.csv`);
+      fs.writeFileSync(cacheFile, JSON.stringify(cachedNaps, null, 2), 'utf8');
+    } else {
+      console.log('ℹ️ All NAPs already have coordinates or no matching NAP names were found in CSV.');
+    }
+  } catch (err) {
+    console.error('❌ Error applying CSV coordinates to cache:', err.message);
+  }
 }
