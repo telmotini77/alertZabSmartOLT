@@ -1,4 +1,7 @@
 import express from 'express';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { findOnuBySn, findOnusByAddressQuery, findOnusByPort, getOnuStatus } from '../services/smartOlt.js';
 import { sendMessage, replyToMessage } from '../services/telegram.js';
 import { extractSerialNumber, extractNapBox, parseStatusInfo, extractEventTime, formatDateTime, extractBoardAndPort } from '../utils/parser.js';
@@ -1020,5 +1023,25 @@ async function processPortAlert(payload, board, port) {
   
   console.log(`[Port Alert] Successfully sent port summary for Board ${board} Port ${port} in ${totalChunks} messages. Affected: ${offlineCount}`);
 }
+
+// GET /webhook/debug - Debug environment paths
+router.get('/debug', (req, res) => {
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname = path.dirname(__filename);
+  const cacheDir = path.resolve(__dirname, '../../data');
+  const cacheFile = path.join(cacheDir, 'nap_cache.json');
+  const csvPath = path.resolve(__dirname, '../public/coordenadas_mymaps.csv');
+
+  res.json({
+    cwd: process.cwd(),
+    __dirname,
+    cacheDir,
+    cacheFile,
+    cacheFileExists: fs.existsSync(cacheFile),
+    csvPath,
+    csvPathExists: fs.existsSync(csvPath),
+    cachedNapsCount: getCachedNaps().length
+  });
+});
 
 export default router;
