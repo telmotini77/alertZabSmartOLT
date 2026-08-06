@@ -10,6 +10,7 @@ RUN npm ci --only=production
 
 # Bundle app source
 COPY src ./src
+COPY data ./data
 
 # Expose server port
 EXPOSE 3000
