@@ -772,6 +772,19 @@ export async function handleTelegramMessage(message) {
   if (!text) return;
 
   const upperText = text.toUpperCase();
+  if (upperText.startsWith('/ID')) {
+    try {
+      await replyToMessage(
+        chatId,
+        messageId,
+        `🆔 <b>ID de este chat:</b> <code>${chatId}</code>\n<b>Tipo:</b> ${message.chat.type || 'desconocido'}`
+      );
+    } catch (err) {
+      console.error('Error handling /id command:', err.message);
+    }
+    return;
+  }
+
   if (upperText.startsWith('/SYNC') || upperText.startsWith('/FALLAS') || upperText.startsWith('/STATUS_FALLAS')) {
     try {
       await replyToMessage(chatId, messageId, '🔄 Iniciando sincronización de fallas activas con Zabbix y Smart OLT. Por favor espere...');
