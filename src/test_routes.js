@@ -1,6 +1,4 @@
 import express from 'express';
-import { handleTelegramMessage } from './routes/webhook.js';
-
 // We will mock globalThis.fetch to intercept Smart OLT and Telegram requests
 const originalFetch = globalThis.fetch;
 
@@ -277,6 +275,7 @@ globalThis.fetch = async (url, options) => {
 process.env.NODE_ENV = 'test'; // Enforce test environment for faster de-bounce timers
 process.env.SMARTOLT_SUBDOMAIN = 'testcompany';
 process.env.SMARTOLT_API_KEY = 'test_key';
+process.env.SMARTOLT_REQUIRE_CORROBORATION = 'true';
 process.env.TELEGRAM_BOT_TOKEN = '123456:test_token';
 process.env.TELEGRAM_CHAT_ID = '-100987654321';
 process.env.TELEGRAM_MODE = 'webhook'; // Webhook mode is easier to test as it disables the long poll loop
@@ -547,7 +546,9 @@ try {
 
   console.log('Requests made during Telegram bot listener update:');
   fetchLog.forEach(log => {
-    console.log(`- ${log.method} ${log.url}`);
+    // Never print credentials embedded in Telegram Bot API URLs.
+    const safeUrl = log.url.replace(/(https:\/\/api\.telegram\.org\/bot)[^/]+/i, '$1[REDACTED]');
+    console.log(`- ${log.method} ${safeUrl}`);
     if (log.body) console.log(`  Body:`, JSON.stringify(log.body));
   });
 

@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "update-coords": "node src/utils/update_olt_coordinates.js"
+    "update-coords": "node src/utils/update_olt_coordinates.js",
+    "test": "node src/test_parser.js && node src/test_map_api.js && node src/test_routes.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5",

@@ -11,6 +11,10 @@ import { getActiveTriggers } from '../services/zabbix.js';
 
 const router = express.Router();
 const DEFAULT_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+// Keep strict cross-validation by default. Set SMARTOLT_REQUIRE_CORROBORATION=false
+// when Smart OLT is unavailable and Zabbix alerts must still be delivered.
+const REQUIRE_SMARTOLT_CORROBORATION =
+  (process.env.SMARTOLT_REQUIRE_CORROBORATION || 'true').trim().toLowerCase() !== 'false';
 
 // GET /webhook/naps - Returns current status of all NAPs
 router.get('/naps', (req, res) => {
@@ -165,9 +169,9 @@ export async function syncActiveProblems(targetChatId = DEFAULT_CHAT_ID) {
       const hostText = trigger.hosts ? trigger.hosts.map(h => `${h.name} ${h.host}`).join(' ') : '';
       const fullText = `${trigger.description} ${hostText}`;
       const sn = extractSerialNumber(fullText);
-      
+
       const zabbixTime = formatDateTime(new Date(Number(trigger.lastchange) * 1000));
-      
+
       if (!sn) {
         reports.push(`⚠️ <b>Alerta Zabbix Genérica (Sin SN):</b>\n• <b>Evento:</b> ${trigger.description}\n• <b>Hora Zabbix:</b> <code>${zabbixTime}</code>\n• <b>Host:</b> ${trigger.hosts ? trigger.hosts.map(h => h.name).join(', ') : 'N/A'}`);
         continue;
@@ -488,22 +492,27 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
   // Corroboration verification
   if (category === 'power_fail' || category === 'loss') {
     if (!smartOltEnriched || !onu) {
-      console.log(`[Corroboration Blocked] Event category "${category}" for SN "${sn}" was not enriched with Smart OLT. Skipping Telegram notification.`);
-      return { sn, enriched: false, sent: false, reason: 'Not enriched' };
+      if (REQUIRE_SMARTOLT_CORROBORATION) {
+        console.log(`[Corroboration Blocked] Event category "${category}" for SN "${sn}" was not enriched with Smart OLT. Skipping Telegram notification.`);
+        return { sn, enriched: false, sent: false, reason: 'Not enriched' };
+      }
+      console.warn(`[Smart OLT fallback] Sending ${category} alert for SN "${sn}" using Zabbix data only.`);
     }
     
-    // Corroborate status mismatch
-    const isZabbixProblem = eventStatus === 'PROBLEM';
-    const isOltOnline = (onu.status || '').toLowerCase() === 'online' || (onu.status || '').toLowerCase() === 'active';
-    
-    if (isZabbixProblem && isOltOnline) {
-      console.log(`[Corroboration Blocked] State mismatch: Zabbix reports PROBLEM but Smart OLT reports ONU as Online/Active for SN "${sn}". Skipping Telegram notification.`);
-      return { sn, enriched: true, sent: false, reason: 'State mismatch (Zabbix PROBLEM, OLT Online)' };
-    }
-    
-    if (!isZabbixProblem && !isOltOnline) {
-      console.log(`[Corroboration Blocked] State mismatch: Zabbix reports OK but Smart OLT reports ONU as Offline/Down for SN "${sn}". Skipping Telegram notification.`);
-      return { sn, enriched: true, sent: false, reason: 'State mismatch (Zabbix OK, OLT Offline)' };
+    // Compare states only when Smart OLT returned an ONU to compare against.
+    if (smartOltEnriched && onu) {
+      const isZabbixProblem = eventStatus === 'PROBLEM';
+      const isOltOnline = (onu.status || '').toLowerCase() === 'online' || (onu.status || '').toLowerCase() === 'active';
+
+      if (isZabbixProblem && isOltOnline) {
+        console.log(`[Corroboration Blocked] State mismatch: Zabbix reports PROBLEM but Smart OLT reports ONU as Online/Active for SN "${sn}". Skipping Telegram notification.`);
+        return { sn, enriched: true, sent: false, reason: 'State mismatch (Zabbix PROBLEM, OLT Online)' };
+      }
+
+      if (!isZabbixProblem && !isOltOnline) {
+        console.log(`[Corroboration Blocked] State mismatch: Zabbix reports OK but Smart OLT reports ONU as Offline/Down for SN "${sn}". Skipping Telegram notification.`);
+        return { sn, enriched: true, sent: false, reason: 'State mismatch (Zabbix OK, OLT Offline)' };
+      }
     }
   }
 
@@ -884,9 +893,9 @@ export async function handleTelegramMessage(message) {
     }
 
     if (!smartOltEnriched) {
-      // For power_fail or loss signal, do NOT reply if it's not corroborated (e.g. Smart OLT down or ONU not found)
+      // Strict mode suppresses loss/power alerts unless Smart OLT corroborates them.
       const statusInfoForFallback = parseStatusInfo(text);
-      if (statusInfoForFallback.category === 'power_fail' || statusInfoForFallback.category === 'loss') {
+      if (REQUIRE_SMARTOLT_CORROBORATION && (statusInfoForFallback.category === 'power_fail' || statusInfoForFallback.category === 'loss')) {
         console.log(`[Corroboration Blocked] Bot: Power fail or Loss signal not enriched. Skipping fallback reply.`);
         return;
       }
