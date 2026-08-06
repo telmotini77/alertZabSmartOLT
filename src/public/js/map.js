@@ -697,6 +697,7 @@ function parseAndPreviewFile(file) {
 
 /**
  * Parse Google Earth KML XML structure.
+ * Supports both standard <coordinates> and MyMaps ExtendedData/SimpleData formats.
  */
 function parseKml(text) {
   const parser = new DOMParser();
@@ -706,23 +707,47 @@ function parseKml(text) {
 
   for (let i = 0; i < placemarks.length; i++) {
     const p = placemarks[i];
-    const nameNode = p.getElementsByTagName('name')[0];
-    const name = nameNode ? nameNode.textContent.trim() : '';
+    let name = '';
+    let lat = NaN;
+    let lng = NaN;
 
-    const coordNode = p.getElementsByTagName('coordinates')[0];
-    if (!coordNode) continue;
-
-    const coordStr = coordNode.textContent.trim();
-    // Split on space, comma or tab
-    const parts = coordStr.split(/[\s,]+/);
-
-    // KML format is longitude,latitude,altitude
-    if (parts.length >= 2) {
-      const lng = parseFloat(parts[0]);
-      const lat = parseFloat(parts[1]);
-      if (!isNaN(lat) && !isNaN(lng) && lat !== 0 && lng !== 0) {
-        results.push({ name, latitude: lat, longitude: lng });
+    // 1. Try to extract from SimpleData (ExtendedData)
+    const simpleDatas = p.getElementsByTagName('SimpleData');
+    if (simpleDatas.length > 0) {
+      for (let j = 0; j < simpleDatas.length; j++) {
+        const sd = simpleDatas[j];
+        const attrName = sd.getAttribute('name');
+        if (attrName === 'Nombre' || attrName === 'name') {
+          name = sd.textContent.trim();
+        } else if (attrName === 'Latitud' || attrName === 'latitude' || attrName === 'lat') {
+          lat = parseFloat(sd.textContent.trim());
+        } else if (attrName === 'Longitud' || attrName === 'longitude' || attrName === 'lng' || attrName === 'lon') {
+          lng = parseFloat(sd.textContent.trim());
+        }
       }
+    }
+
+    // 2. If name is not found in SimpleData, check standard <name> node
+    if (!name) {
+      const nameNode = p.getElementsByTagName('name')[0];
+      name = nameNode ? nameNode.textContent.trim() : '';
+    }
+
+    // 3. If lat/lng are not found, check standard <coordinates> node
+    if (isNaN(lat) || isNaN(lng)) {
+      const coordNode = p.getElementsByTagName('coordinates')[0];
+      if (coordNode) {
+        const coordStr = coordNode.textContent.trim();
+        const parts = coordStr.split(/[\s,]+/);
+        if (parts.length >= 2) {
+          lng = parseFloat(parts[0]);
+          lat = parseFloat(parts[1]);
+        }
+      }
+    }
+
+    if (name && !isNaN(lat) && !isNaN(lng) && lat !== 0 && lng !== 0) {
+      results.push({ name, latitude: lat, longitude: lng });
     }
   }
   return results;
@@ -730,32 +755,89 @@ function parseKml(text) {
 
 /**
  * Parse CSV files, looking for Name, Latitude, Longitude columns.
+ * Supports header-based column mapping dynamically.
  */
 function parseCsv(text) {
   const lines = text.split(/\r?\n/);
   const results = [];
+  if (lines.length === 0) return results;
 
-  lines.forEach((line) => {
-    const cols = line.split(/[,;\t]/);
-    if (cols.length < 3) return;
+  // Split helper respecting quotes
+  const splitLine = (line) => {
+    const cols = [];
+    let current = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
+      if (char === '"') {
+        inQuotes = !inQuotes;
+      } else if (char === ',' && !inQuotes) {
+        cols.push(current.trim());
+        current = '';
+      } else {
+        current += char;
+      }
+    }
+    cols.push(current.trim());
+    return cols;
+  };
 
-    // Assume order 1: name, latitude, longitude
-    const name = cols[0].replace(/['"]/g, '').trim();
-    const lat = parseFloat(cols[1]);
-    const lng = parseFloat(cols[2]);
+  // Detect column mapping if header exists
+  const firstLine = lines[0].toLowerCase();
+  let nameIdx = -1;
+  let latIdx = -1;
+  let lngIdx = -1;
 
-    if (!name || isNaN(lat) || isNaN(lng)) {
-      // Try order 2: latitude, longitude, name
-      const altLat = parseFloat(cols[0]);
-      const altLng = parseFloat(cols[1]);
-      const altName = cols[2].replace(/['"]/g, '').trim();
+  if (firstLine.includes('nombre') || firstLine.includes('name') || firstLine.includes('latitud') || firstLine.includes('latitude') || firstLine.includes('lat')) {
+    const headers = splitLine(lines[0]);
+    headers.forEach((h, idx) => {
+      const headerName = h.toLowerCase().replace(/['"]/g, '').trim();
+      if (headerName === 'nombre' || headerName === 'name') {
+        nameIdx = idx;
+      } else if (headerName === 'latitud' || headerName === 'latitude' || headerName === 'lat') {
+        latIdx = idx;
+      } else if (headerName === 'longitud' || headerName === 'longitude' || headerName === 'lng' || headerName === 'lon') {
+        lngIdx = idx;
+      }
+    });
+  }
 
-      if (!altName || isNaN(altLat) || isNaN(altLng)) return;
-      results.push({ name: altName, latitude: altLat, longitude: altLng });
+  const startLine = (nameIdx !== -1 || latIdx !== -1 || lngIdx !== -1) ? 1 : 0;
+
+  for (let i = startLine; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+
+    const cols = splitLine(line);
+    if (cols.length < 3) continue;
+
+    let name = '';
+    let lat = NaN;
+    let lng = NaN;
+
+    if (nameIdx !== -1 && latIdx !== -1 && lngIdx !== -1) {
+      name = cols[nameIdx] ? cols[nameIdx].replace(/['"]/g, '').trim() : '';
+      lat = parseFloat(cols[latIdx]);
+      lng = parseFloat(cols[lngIdx]);
     } else {
+      // Fallback defaults
+      // Try default order 1: name, latitude, longitude
+      name = cols[0].replace(/['"]/g, '').trim();
+      lat = parseFloat(cols[1]);
+      lng = parseFloat(cols[2]);
+
+      if (!name || isNaN(lat) || isNaN(lng)) {
+        // Try default order 2: latitude, longitude, name
+        lat = parseFloat(cols[0]);
+        lng = parseFloat(cols[1]);
+        name = cols[2].replace(/['"]/g, '').trim();
+      }
+    }
+
+    if (name && !isNaN(lat) && !isNaN(lng) && lat !== 0 && lng !== 0) {
       results.push({ name, latitude: lat, longitude: lng });
     }
-  });
+  }
 
   return results;
 }
