@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mapa de Cajas NAP en Tiempo Real | Smart OLT & Zabbix</title>
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <!-- FontAwesome for Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+  <!-- Custom CSS -->
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <header class="sidebar-header">
+        <div class="logo">
+          <i class="fa-solid fa-network-wired logo-icon"></i>
+          <h1>Zabbix & Smart OLT</h1>
+        </div>
+        <p class="subtitle">Monitor de Cajas NAP en Tiempo Real</p>
+      </header>
+
+      <!-- Connection Status indicator -->
+      <div id="connection-status" class="status-badge connecting">
+        <span class="dot"></span>
+        <span class="status-text">Conectando WebSocket...</span>
+      </div>
+
+      <!-- Quick Stats Card -->
+      <section class="stats-panel">
+        <h2>Resumen de Red</h2>
+        <div class="stats-grid">
+          <div class="stat-card online">
+            <span class="stat-num" id="stat-ok-count">0</span>
+            <span class="stat-label">Estables</span>
+          </div>
+          <div class="stat-card partial">
+            <span class="stat-num" id="stat-partial-count">0</span>
+            <span class="stat-label">Parciales</span>
+          </div>
+          <div class="stat-card offline">
+            <span class="stat-num" id="stat-down-count">0</span>
+            <span class="stat-label">Caídas</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Search Box -->
+      <div class="search-container">
+        <i class="fa-solid fa-magnifying-glass search-icon"></i>
+        <input type="text" id="nap-search" placeholder="Buscar caja NAP o cliente...">
+      </div>
+
+      <!-- NAPs list -->
+      <section class="naps-panel">
+        <div class="naps-panel-header">
+          <h2>Listado de Cajas NAP</h2>
+          <button id="btn-import-trigger" class="btn-import-icon" title="Importar coordenadas masivamente (KML / CSV)">
+            <i class="fa-solid fa-file-import"></i> Importar GPS
+          </button>
+        </div>
+        <div class="naps-scroll-container">
+          <ul id="naps-list" class="naps-list">
+            <!-- Dynamic NAPs will be inserted here -->
+            <li class="loading-item">Cargando NAPs...</li>
+          </ul>
+        </div>
+      </section>
+    </aside>
+
+    <!-- Map Container -->
+    <main class="map-wrapper">
+      <div id="map"></div>
+      
+      <!-- Geolocation float button -->
+      <button id="btn-geolocation" class="btn-geolocation-float" title="Centrar en mi ubicación">
+        <i class="fa-solid fa-crosshairs"></i>
+      </button>
+      
+      <!-- Manual Placement Help Bar -->
+      <div id="placement-overlay" class="placement-overlay hidden">
+        <div class="placement-message">
+          <i class="fa-solid fa-location-crosshairs fa-spin"></i>
+          <span>Modo Edición: Haz clic en el mapa para posicionar <b><span id="placement-nap-name">NAP-XXX</span></b></span>
+        </div>
+        <button id="cancel-placement" class="btn-cancel">Cancelar</button>
+      </div>
+    </main>
+  </div>
+
+  <!-- Import KML/CSV Modal -->
+  <div id="import-modal" class="modal hidden">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2><i class="fa-solid fa-file-import logo-icon"></i> Importar Coordenadas</h2>
+        <button id="btn-close-modal" class="btn-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-desc">
+          Sube un archivo de Google Earth (<strong>.kml</strong>) o una lista (<strong>.csv</strong>) para ubicar tus cajas NAP de forma masiva según su nombre.
+        </p>
+        
+        <div class="dropzone" id="dropzone">
+          <i class="fa-solid fa-cloud-arrow-up dropzone-icon"></i>
+          <p>Arrastra tu archivo KML o CSV aquí o haz clic para buscar</p>
+          <input type="file" id="file-input" accept=".kml,.csv" class="hidden-file-input">
+        </div>
+        
+        <!-- Import Preview / Summary -->
+        <div id="import-preview" class="import-preview hidden">
+          <h3>Resumen del Archivo</h3>
+          <div class="preview-stats">
+            <div class="preview-stat-card">
+              <span class="preview-stat-num" id="preview-total-read">0</span>
+              <span class="preview-stat-label">Leídos</span>
+            </div>
+            <div class="preview-stat-card matched">
+              <span class="preview-stat-num" id="preview-matched">0</span>
+              <span class="preview-stat-label">Coincidentes</span>
+            </div>
+          </div>
+          <div class="preview-log-container">
+            <ul id="preview-log" class="preview-log"></ul>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-cancel-import" class="btn-cancel">Cancelar</button>
+        <button id="btn-apply-import" class="btn-primary" disabled>Aplicar Coordenadas</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Leaflet JS -->
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <!-- Custom JS -->
+  <script src="js/map.js"></script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+{
+  "name": "api-zasmaolt",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Integration API between Zabbix, Smart OLT, and Telegram",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "ws": "^8.18.0"
+  }
+}

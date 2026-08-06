@@ -1,0 +1,12 @@
+services:
+  api:
+    build: .
+    container_name: zabbix-smartolt-api
+    restart: always
+    ports:
+      - "${PORT:-3010}:${PORT:-3010}"
+    env_file:
+      - .env
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1

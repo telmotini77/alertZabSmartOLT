@@ -1,0 +1,926 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Developer Portal | Zabbix & Smart OLT Integration</title>
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+  <!-- FontAwesome -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" />
+  
+  <style>
+    :root {
+      --bg-dark: #0b0f19;
+      --bg-sidebar: #070a13;
+      --bg-card: #131a2c;
+      --bg-code: #090d16;
+      --accent: #0ea5e9;
+      --accent-glow: rgba(14, 165, 233, 0.15);
+      --text-main: #f1f5f9;
+      --text-muted: #94a3b8;
+      --border: #1e293b;
+      --success: #10b981;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: 'Outfit', sans-serif;
+      background-color: var(--bg-dark);
+      color: var(--text-main);
+      display: flex;
+      min-height: 100vh;
+      line-height: 1.6;
+    }
+
+    /* Sidebar Navigation */
+    .sidebar {
+      width: 300px;
+      background-color: var(--bg-sidebar);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      position: fixed;
+      top: 0;
+      bottom: 0;
+      left: 0;
+      z-index: 10;
+    }
+
+    .sidebar-header {
+      padding: 2rem 1.5rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .logo-container {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .logo-icon {
+      font-size: 1.75rem;
+      color: var(--accent);
+      text-shadow: 0 0 10px var(--accent);
+    }
+
+    .logo-title {
+      font-weight: 800;
+      font-size: 1.35rem;
+      background: linear-gradient(to right, var(--text-main), var(--accent));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .sidebar-menu {
+      list-style: none;
+      padding: 1.5rem 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+      overflow-y: auto;
+      flex-grow: 1;
+    }
+
+    .menu-section-title {
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      margin-top: 1.5rem;
+      margin-bottom: 0.5rem;
+      padding-left: 0.5rem;
+    }
+
+    .menu-link {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.65rem 1rem;
+      color: var(--text-muted);
+      text-decoration: none;
+      border-radius: 0.5rem;
+      transition: all 0.3s ease;
+      font-size: 0.95rem;
+      font-weight: 500;
+    }
+
+    .menu-link:hover, .menu-link.active {
+      color: var(--text-main);
+      background-color: var(--bg-card);
+    }
+
+    .menu-link.active {
+      color: var(--accent);
+      background-color: var(--accent-glow);
+      border-left: 3px solid var(--accent);
+      border-top-left-radius: 0;
+      border-bottom-left-radius: 0;
+    }
+
+    /* Main Content Layout */
+    .main-content {
+      margin-left: 300px;
+      padding: 4rem 5rem;
+      flex-grow: 1;
+      max-width: 1300px;
+    }
+
+    section {
+      margin-bottom: 5rem;
+      scroll-margin-top: 4rem;
+    }
+
+    h1.page-title {
+      font-size: 3rem;
+      font-weight: 800;
+      margin-bottom: 1rem;
+      letter-spacing: -0.02em;
+    }
+
+    .lead {
+      font-size: 1.25rem;
+      color: var(--text-muted);
+      margin-bottom: 3rem;
+    }
+
+    h2 {
+      font-size: 2rem;
+      font-weight: 700;
+      margin-bottom: 1.5rem;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 0.5rem;
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      color: var(--text-main);
+    }
+
+    h2 i {
+      color: var(--accent);
+    }
+
+    h3 {
+      font-size: 1.4rem;
+      font-weight: 600;
+      margin-top: 2rem;
+      margin-bottom: 1rem;
+      color: var(--accent);
+    }
+
+    h4 {
+      font-size: 1.1rem;
+      font-weight: 600;
+      margin-top: 1.5rem;
+      margin-bottom: 0.5rem;
+      color: var(--text-main);
+    }
+
+    p {
+      color: var(--text-muted);
+      margin-bottom: 1.5rem;
+      font-size: 1rem;
+    }
+
+    ul, ol {
+      margin-bottom: 1.5rem;
+      margin-left: 2rem;
+      color: var(--text-muted);
+    }
+
+    li {
+      margin-bottom: 0.5rem;
+    }
+
+    /* Grid layout for file descriptions */
+    .cards-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+      gap: 1.5rem;
+      margin-bottom: 3rem;
+    }
+
+    .card {
+      background-color: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 0.75rem;
+      padding: 1.75rem;
+      transition: all 0.3s ease;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+      position: relative;
+    }
+
+    .card:hover {
+      transform: translateY(-4px);
+      box-shadow: 0 12px 24px -10px rgba(14, 165, 233, 0.3);
+      border-color: var(--accent);
+    }
+
+    .card-header {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .card-icon {
+      font-size: 1.25rem;
+      color: var(--accent);
+      background-color: var(--accent-glow);
+      padding: 0.5rem;
+      border-radius: 0.5rem;
+    }
+
+    .card-title {
+      font-weight: 700;
+      font-size: 1.15rem;
+    }
+
+    .card-path {
+      font-family: 'Fira Code', monospace;
+      font-size: 0.8rem;
+      color: var(--accent);
+    }
+
+    .card-desc {
+      font-size: 0.9rem;
+      color: var(--text-muted);
+    }
+
+    /* API Tables */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 1.5rem;
+      margin-bottom: 3rem;
+      background-color: var(--bg-card);
+      border-radius: 0.75rem;
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }
+
+    th, td {
+      padding: 1.2rem;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+
+    th {
+      background-color: rgba(30, 41, 59, 0.6);
+      color: var(--text-main);
+      font-weight: 600;
+      font-size: 0.95rem;
+    }
+
+    td {
+      font-size: 0.95rem;
+      color: var(--text-muted);
+      vertical-align: top;
+    }
+
+    td code {
+      background-color: rgba(15, 23, 42, 0.8);
+      padding: 0.2rem 0.4rem;
+      border-radius: 0.25rem;
+      font-family: 'Fira Code', monospace;
+      font-size: 0.8rem;
+      color: var(--accent);
+    }
+
+    tr:hover td {
+      color: var(--text-main);
+      background-color: rgba(30, 41, 59, 0.3);
+    }
+
+    /* Code Snippet Pre-blocks */
+    pre {
+      background-color: var(--bg-code);
+      border: 1px solid var(--border);
+      border-radius: 0.75rem;
+      padding: 1.5rem;
+      overflow-x: auto;
+      margin-bottom: 2.5rem;
+      font-family: 'Fira Code', monospace;
+      font-size: 0.85rem;
+      color: #7dd3fc;
+    }
+
+    /* Callouts styling */
+    .callout {
+      background-color: rgba(14, 165, 233, 0.03);
+      border-left: 4px solid var(--accent);
+      border-radius: 0.5rem;
+      padding: 1.5rem;
+      margin-bottom: 2.5rem;
+    }
+
+    .callout.callout-warning {
+      background-color: rgba(245, 158, 11, 0.03);
+      border-left-color: var(--warning);
+    }
+
+    .callout-title {
+      font-weight: 700;
+      color: var(--text-main);
+      margin-bottom: 0.5rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .callout.callout-warning .callout-title i {
+      color: var(--warning);
+    }
+
+    .callout-title i {
+      color: var(--accent);
+    }
+
+    .callout-content {
+      color: var(--text-muted);
+      font-size: 0.95rem;
+    }
+
+    /* Badges */
+    .badge {
+      display: inline-block;
+      padding: 0.25rem 0.6rem;
+      border-radius: 0.25rem;
+      font-size: 0.75rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+    }
+
+    .badge-get {
+      background-color: rgba(16, 185, 129, 0.15);
+      color: var(--success);
+    }
+
+    .badge-post {
+      background-color: rgba(14, 165, 233, 0.15);
+      color: var(--accent);
+    }
+
+    .badge-required {
+      background-color: rgba(239, 68, 68, 0.15);
+      color: var(--danger);
+      font-size: 0.65rem;
+    }
+
+    /* SVG flowchart alignment */
+    .flowchart-container {
+      background-color: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 0.75rem;
+      padding: 2.5rem;
+      display: flex;
+      justify-content: center;
+      margin-bottom: 3rem;
+    }
+
+    .flowchart-svg {
+      width: 100%;
+      max-width: 900px;
+      height: auto;
+    }
+
+    /* Step-by-step alert lifecycle */
+    .step-list {
+      list-style: none;
+      margin-left: 0;
+      margin-bottom: 3rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+    }
+
+    .step-item {
+      background-color: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 0.75rem;
+      padding: 1.5rem;
+      display: flex;
+      gap: 1.25rem;
+    }
+
+    .step-num {
+      background-color: var(--accent-glow);
+      color: var(--accent);
+      font-weight: 800;
+      font-size: 1.25rem;
+      width: 2.5rem;
+      height: 2.5rem;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      border: 1px solid var(--accent);
+    }
+
+    .step-content h4 {
+      margin-top: 0;
+      font-size: 1.15rem;
+      margin-bottom: 0.25rem;
+    }
+
+    footer {
+      margin-top: 8rem;
+      border-top: 1px solid var(--border);
+      padding: 3rem 0;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 0.9rem;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Navigation Sidebar -->
+  <aside class="sidebar">
+    <div class="sidebar-header">
+      <div class="logo-container">
+        <i class="fa-solid fa-code logo-icon"></i>
+        <h1 class="logo-title">Developer Portal</h1>
+      </div>
+    </div>
+    
+    <ul class="sidebar-menu">
+      <li><a href="#introduccion" class="menu-link active"><i class="fa-solid fa-circle-info"></i> Introducción</a></li>
+      <li><a href="#arquitectura" class="menu-link"><i class="fa-solid fa-sitemap"></i> Arquitectura de Flujo</a></li>
+      <li><a href="#ciclo-vida" class="menu-link"><i class="fa-solid fa-rotate"></i> Ciclo de Vida del Evento</a></li>
+      
+      <li class="menu-section-title">Componentes Internos</li>
+      <li><a href="#servicios" class="menu-link"><i class="fa-solid fa-server"></i> Catálogo de Servicios</a></li>
+      <li><a href="#rutas" class="menu-link"><i class="fa-solid fa-route"></i> API Endpoints</a></li>
+      <li><a href="#utilidades" class="menu-link"><i class="fa-solid fa-screwdriver-wrench"></i> Expresiones Regulares</a></li>
+      
+      <li class="menu-section-title">Lógicas Críticas</li>
+      <li><a href="#corroboracion" class="menu-link"><i class="fa-solid fa-shield-halved"></i> Reglas de Corroboración</a></li>
+      <li><a href="#fechas" class="menu-link"><i class="fa-solid fa-clock"></i> Husos Horarios & Formatos</a></li>
+      
+      <li class="menu-section-title">Configuración</li>
+      <li><a href="#setup" class="menu-link"><i class="fa-solid fa-sliders"></i> Despliegue & .env</a></li>
+      <li><a href="#zabbix-config" class="menu-link"><i class="fa-solid fa-sliders"></i> Configuración Zabbix</a></li>
+    </ul>
+  </aside>
+
+  <!-- Main Content Container -->
+  <main class="main-content">
+    
+    <!-- Section: Introduction -->
+    <section id="introduccion">
+      <h1 class="page-title">Middleware Zabbix & Smart OLT</h1>
+      <p class="lead">Manual técnico detallado del integrador. Este middleware recibe alertas de conectividad de Zabbix, consulta parámetros físicos directos en Smart OLT, filtra falsos positivos por mismatch y envía tarjetas HTML enriquecidas a Telegram y mapas interactivos.</p>
+      
+      <div class="callout">
+        <div class="callout-title"><i class="fa-solid fa-circle-info"></i> Propósito del Sistema</div>
+        <div class="callout-content">
+          Zabbix detecta caídas de hosts de forma lógica mediante pings o SNMP. Sin embargo, no conoce la topología de fibra óptica (puerto PON, slot, caja NAP o dirección del cliente). Este middleware actúa como puente resolviendo en milisegundos las referencias físicas y geográficas en la base de datos de Smart OLT antes de reportar.
+        </div>
+      </div>
+      
+      <h2><i class="fa-solid fa-folder-open"></i> Directorio y Responsabilidad de Archivos</h2>
+      <p>Organización modular del código en el espacio de trabajo:</p>
+      
+      <div class="cards-grid">
+        <div class="card">
+          <div class="card-header">
+            <i class="fa-solid fa-gears card-icon"></i>
+            <span class="card-title">Entrypoint</span>
+          </div>
+          <span class="card-path">src/index.js</span>
+          <span class="card-desc">Carga variables de entorno, monta el servidor Express HTTP en el puerto especificado, acopla el WebSocket Server para transmisiones visuales y programa tareas cron (cada 30 min) para re-sincronizar el caché.</span>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <i class="fa-solid fa-route card-icon"></i>
+            <span class="card-title">Enrutamiento</span>
+          </div>
+          <span class="card-path">src/routes/webhook.js</span>
+          <span class="card-desc">Implementa los controladores REST. Integra el de-bouncer temporal para evitar alertas por cortes breves de energía y los filtros de validación cruzada.</span>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <i class="fa-solid fa-cloud-bolt card-icon"></i>
+            <span class="card-title">Servicio Smart OLT</span>
+          </div>
+          <span class="card-path">src/services/smartOlt.js</span>
+          <span class="card-desc">Interpola con los endpoints API de Smart OLT. Resuelve búsquedas por SN, busca ONUs en cascada en una misma NAP para alertas globales y obtiene logs directos de los estados PON.</span>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <i class="fa-solid fa-database card-icon"></i>
+            <span class="card-title">Caché y Base de Datos</span>
+          </div>
+          <span class="card-path">src/services/cache.js</span>
+          <span class="card-desc">Genera el archivo local <code>nap_cache.json</code> para almacenar coordenadas geográficas de las cajas NAP calculadas de forma ponderada según las ubicaciones de sus clientes.</span>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <i class="fa-solid fa-circle-nodes card-icon"></i>
+            <span class="card-title">Servicio Zabbix API</span>
+          </div>
+          <span class="card-path">src/services/zabbix.js</span>
+          <span class="card-desc">Cliente JSON-RPC para interactuar con la base de datos de Zabbix. Autentica dinámicamente y expone consultas para barrer todos los incidentes activos bajo demanda.</span>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <i class="fa-solid fa-brands fa-telegram card-icon"></i>
+            <span class="card-title">Servicio Telegram</span>
+          </div>
+          <span class="card-path">src/services/telegram.js</span>
+          <span class="card-desc">Wrapper del API de Telegram. Habilita el envío de mensajes HTML nativos y gestiona las solicitudes de respuesta del Bot tanto en modo polling como webhook.</span>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <i class="fa-solid fa-circle-dot card-icon"></i>
+            <span class="card-title">WebSocket Server</span>
+          </div>
+          <span class="card-path">src/services/websocket.js</span>
+          <span class="card-desc">Permite conexiones TCP bidireccionales con navegadores web para actualizar el mapa interactivo de cajas NAP de manera inmediata ante cualquier cambio de estado.</span>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <i class="fa-solid fa-magnifying-glass-chart card-icon"></i>
+            <span class="card-title">Parser de Texto</span>
+          </div>
+          <span class="card-path">src/utils/parser.js</span>
+          <span class="card-desc">Módulo central para procesar strings provenientes de Zabbix y Telegram, aislando números de serie, identificando nombres de cajas NAP y normalizando horas a UTC-5.</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Section: Architecture -->
+    <section id="arquitectura">
+      <h2><i class="fa-solid fa-sitemap"></i> Diagrama de Flujo del Sistema</h2>
+      <p>Esta ilustración representa el flujo lógico cuando se activa una alarma en Zabbix, se contrasta con Smart OLT y se envía la alerta correspondiente:</p>
+      
+      <div class="flowchart-container">
+        <svg viewBox="0 0 900 350" class="flowchart-svg">
+          <defs>
+            <marker id="arrow-blue" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#0ea5e9" />
+            </marker>
+            <marker id="arrow-gray" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155" />
+            </marker>
+          </defs>
+
+          <!-- Nodes -->
+          <rect x="10" y="130" width="130" height="60" rx="8" fill="#131a2c" stroke="#1e293b" stroke-width="2"/>
+          <text x="75" y="165" fill="#f1f5f9" font-size="12" font-weight="bold" text-anchor="middle">Zabbix Trigger</text>
+
+          <rect x="200" y="130" width="160" height="60" rx="8" fill="#0b0f19" stroke="#0ea5e9" stroke-width="2"/>
+          <text x="280" y="165" fill="#f1f5f9" font-size="12" font-weight="bold" text-anchor="middle">/webhook/zabbix</text>
+
+          <rect x="420" y="30" width="160" height="60" rx="8" fill="#131a2c" stroke="#1e293b" stroke-width="2"/>
+          <text x="500" y="65" fill="#f1f5f9" font-size="12" font-weight="bold" text-anchor="middle">Smart OLT API</text>
+
+          <rect x="420" y="230" width="160" height="60" rx="8" fill="#131a2c" stroke="#1e293b" stroke-width="2"/>
+          <text x="500" y="265" fill="#f1f5f9" font-size="12" font-weight="bold" text-anchor="middle">Zabbix JSON-RPC</text>
+
+          <rect x="680" y="130" width="180" height="60" rx="8" fill="#131a2c" stroke="#10b981" stroke-width="2"/>
+          <text x="770" y="165" fill="#f1f5f9" font-size="12" font-weight="bold" text-anchor="middle">Telegram Channel</text>
+
+          <!-- Links -->
+          <line x1="140" y1="160" x2="200" y2="160" stroke="#334155" stroke-width="2" marker-end="url(#arrow-gray)"/>
+          
+          <path d="M 280 130 L 280 60 L 420 60" fill="none" stroke="#0ea5e9" stroke-width="2" marker-end="url(#arrow-blue)"/>
+          <text x="320" y="50" fill="#0ea5e9" font-size="10">Consultar ONU (SN)</text>
+
+          <path d="M 280 190 L 280 260 L 420 260" fill="none" stroke="#334155" stroke-width="2" marker-end="url(#arrow-gray)"/>
+          <text x="320" y="250" fill="#94a3b8" font-size="10">Sync masivo /sync</text>
+
+          <line x1="360" y1="160" x2="680" y2="160" stroke="#10b981" stroke-width="2" marker-end="url(#arrow-blue)"/>
+          <text x="520" y="150" fill="#10b981" font-size="11" font-weight="bold" text-anchor="middle">Enviar Alerta Enriquecida</text>
+        </svg>
+      </div>
+    </section>
+
+    <!-- Section: Event Lifecycle -->
+    <section id="ciclo-vida">
+      <h2><i class="fa-solid fa-rotate"></i> Ciclo de Vida del Evento</h2>
+      <p>Descripción cronológica de cómo procesa la API una alerta individual enviada por Zabbix:</p>
+      
+      <ol class="step-list">
+        <li class="step-item">
+          <div class="step-num">1</div>
+          <div class="step-content">
+            <h4>Recepción del Payload</h4>
+            <p>Zabbix envía una petición POST HTTP a <code>/webhook/zabbix</code> conteniendo un objeto JSON con el nombre del evento, la severidad, el estado (PROBLEM u OK) y el texto descriptivo del trigger.</p>
+          </div>
+        </li>
+        <li class="step-item">
+          <div class="step-num">2</div>
+          <div class="step-content">
+            <h4>Extracción del Serial Number (SN) y la Hora</h4>
+            <p>La API analiza el texto en busca de un número de serie GPON de 12 o 16 caracteres hex. Simultáneamente, extrae la marca de tiempo exacta del inicio de la falla provista por Zabbix o, en su defecto, calcula el instante UTC-5.</p>
+          </div>
+        </li>
+        <li class="step-item">
+          <div class="step-num">3</div>
+          <div class="step-content">
+            <h4>Debouncing (Si aplica a fallas de energía)</h4>
+            <p>Si el evento es clasificado como pérdida de energía (Power Fail) y su estado es PROBLEM, la API retiene la alerta por 5 minutos (configurable vía <code>POWER_ALERT_DELAY_MINS</code>). Si en ese lapso ingresa un evento OK para el mismo SN, la alerta se cancela evitando spam por micro-cortes.</p>
+          </div>
+        </li>
+        <li class="step-item">
+          <div class="step-num">4</div>
+          <div class="step-content">
+            <h4>Validación y Corroboración Cruzada con Smart OLT</h4>
+            <p>El middleware busca el SN en Smart OLT. Si el dispositivo no existe en Smart OLT, o si existe una discrepancia lógica de estado (ej: Zabbix dice PROBLEM pero Smart OLT dice Online), el evento se clasifica como <strong>mismatch</strong> y se aborta el envío del mensaje a Telegram.</p>
+          </div>
+        </li>
+        <li class="step-item">
+          <div class="step-num">5</div>
+          <div class="step-content">
+            <h4>Generación de Reporte y Envío a Telegram / WebSockets</h4>
+            <p>Si la alerta supera los filtros, se ejecuta un mapeo de la caja NAP correspondiente, se verifica el estado actual de los demás clientes de esa caja para identificar si se trata de un corte individual o un incidente masivo, y se despacha una tarjeta HTML formateada a Telegram. Adicionalmente, se actualiza el panel web vía WebSockets.</p>
+          </div>
+        </li>
+      </ol>
+    </section>
+
+    <!-- Section: Services Catalog -->
+    <section id="servicios">
+      <h2><i class="fa-solid fa-server"></i> Catálogo de Servicios</h2>
+      <p>Detalle de métodos, firmas y responsabilidades de los servicios principales:</p>
+      
+      <h3>Smart OLT API Client (`src/services/smartOlt.js`)</h3>
+      <p>Se encarga de interactuar con la API REST externa expuesta por Smart OLT. Requiere <code>SMARTOLT_SUBDOMAIN</code> y <code>SMARTOLT_API_KEY</code>.</p>
+      
+      <h4>Métodos expuestos:</h4>
+      <ul>
+        <li><code>findOnuBySn(sn)</code>: Obtiene detalles estáticos de la ONU (Cliente, Dirección, Slot, Puerto, NAP asignada).
+          <pre>const onu = await findOnuBySn('HWTC12345678');</pre>
+        </li>
+        <li><code>getOnuStatus(externalId)</code>: Consulta en la OLT el estado dinámico actual, potencia de Rx y razón de la última desconexión.
+          <pre>const status = await getOnuStatus('12345');</pre>
+        </li>
+        <li><code>findOnusByAddressQuery(query)</code>: Devuelve la lista de clientes asociados a una dirección o término de búsqueda (ej. caja NAP).
+          <pre>const onus = await findOnusByAddressQuery('NAP-04-A');</pre>
+        </li>
+        <li><code>findOnusByPort(oltId, board, port, fallbackOltName)</code>: Retorna las ONUs conectadas al mismo puerto físico para calcular el punto de corte en cascada de fibra.</li>
+      </ul>
+
+      <h3>Zabbix RPC Client (`src/services/zabbix.js`)</h3>
+      <p>Gestiona la consulta del histórico y estado actual de eventos lógicos de Zabbix. Requiere <code>ZABBIX_API_URL</code> y un <code>ZABBIX_API_TOKEN</code> válido.</p>
+      
+      <h4>Métodos expuestos:</h4>
+      <ul>
+        <li><code>authenticate()</code>: Negocia un token de sesión JSON-RPC si se utilizan credenciales clásicas de Zabbix.</li>
+        <li><code>getActiveTriggers()</code>: Llama al método <code>trigger.get</code> filtrando por estado PROBLEM (<code>value: 1</code>) para barrer y consolidar la red.</li>
+      </ul>
+      <pre>
+// Ejemplo de llamada interna JSON-RPC
+const response = await fetch(url, {
+  method: 'POST',
+  body: JSON.stringify({
+    jsonrpc: '2.0',
+    method: 'trigger.get',
+    params: {
+      output: ['triggerid', 'description', 'priority', 'lastchange'],
+      selectHosts: ['hostid', 'host', 'name'],
+      filter: { value: 1, status: 0 },
+      monitored: true
+    },
+    auth: token,
+    id: 1
+  })
+});</pre>
+    </section>
+
+    <!-- Section: API Endpoints -->
+    <section id="rutas">
+      <h2><i class="fa-solid fa-route"></i> API Endpoints</h2>
+      <p>Definiciones HTTP expuestas por el middleware para su integración:</p>
+
+      <h3>1. Webhook de Eventos Zabbix</h3>
+      <p><strong>Endpoint:</strong> <code>POST /webhook/zabbix</code></p>
+      <p>Este endpoint es invocado de manera directa por las acciones de alertas de Zabbix ante transiciones PROBLEM u OK.</p>
+      
+      <h4>JSON Payload (Ejemplo):</h4>
+      <pre>{
+  "event_name": "ONU FHTT8c3a91bf: Loss of Signal",
+  "host_name": "OLT-CENTRAL",
+  "event_severity": "High",
+  "event_status": "PROBLEM",
+  "clock": 1722123456
+}</pre>
+      
+      <h4>Respuestas:</h4>
+      <ul>
+        <li><code>200 OK</code>: Retorna <code>{ "status": "success", "sent": true, "sn": "FHTT8C3A91BF", "enriched": true }</code> si se enriqueció y envió correctamente.</li>
+        <li><code>200 OK (Ignorado)</code>: Retorna <code>{ "status": "ignored", "sent": false, "reason": "State mismatch..." }</code> si se bloqueó por corroboración de OLT.</li>
+        <li><code>200 OK (Encolado)</code>: Retorna <code>{ "status": "queued", "message": "Power failure alert queued..." }</code> si aplica de-bounce de energía.</li>
+      </ul>
+
+      <h3>2. Sincronización Manual de Fallas Activas</h3>
+      <p><strong>Endpoint:</strong> <code>GET /webhook/zabbix/sync</code></p>
+      <p>Realiza un barrido masivo consultando la API de Zabbix para extraer todas las fallas vivas, cruzar sus SNs con Smart OLT y enviar un resumen consolidado a Telegram.</p>
+      <h4>Parámetros Query String:</h4>
+      <ul>
+        <li><code>chat_id</code> (opcional): Telegram Chat ID alternativo a reportar.</li>
+      </ul>
+
+      <h3>3. Coordenadas de Cajas NAP</h3>
+      <p><strong>Endpoint:</strong> <code>POST /webhook/naps/coordinates</code></p>
+      <p>Actualiza la geolocalización de una caja NAP específica en el caché y propaga el cambio vía WebSockets.</p>
+      <h4>JSON Payload (Ejemplo):</h4>
+      <pre>{
+  "name": "NAP-04-A",
+  "latitude": -12.046374,
+  "longitude": -77.042793
+}</pre>
+    </section>
+
+    <!-- Section: RegEx Parsers -->
+    <section id="utilidades">
+      <h2><i class="fa-solid fa-screwdriver-wrench"></i> Expresiones Regulares & Normalización</h2>
+      <p>El parser [parser.js](file:///c:/Users/USUARIO/Desktop/api_zaSmaOlt/src/utils/parser.js) normaliza y filtra datos no estructurados:</p>
+      
+      <h3>1. Extracción de Números de Serie</h3>
+      <p>El sistema admite seriales directos de 12 caracteres o cadenas hexadecimales de 16 caracteres (comunes en alertas de red por SNMP traps), convirtiendo los primeros 8 caracteres (identificador del vendedor en ASCII) y concatenando la porción hexadecimal restante:</p>
+      <ul>
+        <li>Regex estándar GPON: <code>/\b([A-Z0-9]{4}[0-9A-Fa-f]{8})\b/i</code></li>
+        <li>Regex hexadecimal (16-char): <code>/\b([0-9A-Fa-f]{16})\b/i</code> (Ej: <code>4857544338423232</code> &rarr; <code>HWTC38423232</code>)</li>
+      </ul>
+
+      <h3>2. Extracción de Cajas NAP</h3>
+      <p>Localiza identificadores en direcciones o descripciones mediante:</p>
+      <pre>const NAP_REGEX = /(NAP[-_.\s]*\d+(?:[-_.\s]*[A-Z0-9]{1,2})?\b|caja\s+NAP[-_.\s]*\d+\b)/i;</pre>
+    </section>
+
+    <!-- Section: Corroboration -->
+    <section id="corroboracion">
+      <h2><i class="fa-solid fa-shield-halved"></i> Lógica de Corroboración</h2>
+      <p>La lógica de corroboración previene falsas notificaciones. Compara el estado del evento reportado por Zabbix contra el estado real de la base de datos viva de Smart OLT:</p>
+      
+      <table>
+        <thead>
+          <tr>
+            <th>Alerta Zabbix</th>
+            <th>Estado OLT</th>
+            <th>Acción Realizada</th>
+            <th>Razón Técnica</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>PROBLEM</code> (LOS/Power Fail)</td>
+            <td><code>Offline</code></td>
+            <td><strong style="color: var(--success);">ENVIAR ALERTA</strong></td>
+            <td>Ambos sistemas coinciden. Alerta corroborada.</td>
+          </tr>
+          <tr>
+            <td><code>PROBLEM</code> (LOS/Power Fail)</td>
+            <td><code>Online</code> / <code>Active</code></td>
+            <td><strong style="color: var(--danger);">BLOQUEAR ENVÍO</strong></td>
+            <td>mismatch. El cliente se restableció rápido o fue una falsa alarma de Zabbix.</td>
+          </tr>
+          <tr>
+            <td><code>OK</code> (Recuperación)</td>
+            <td><code>Online</code> / <code>Active</code></td>
+            <td><strong style="color: var(--success);">ENVIAR ALERTA</strong></td>
+            <td>Servicio operativo. Se confirma la recuperación del cliente.</td>
+          </tr>
+          <tr>
+            <td><code>OK</code> (Recuperación)</td>
+            <td><code>Offline</code></td>
+            <td><strong style="color: var(--danger);">BLOQUEAR ENVÍO</strong></td>
+            <td>mismatch. Zabbix infirió recuperación pero la OLT confirma que sigue offline.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- Section: DateTimes -->
+    <section id="fechas">
+      <h2><i class="fa-solid fa-clock"></i> Gestión de Fecha/Hora y Huso Horario (UTC-5)</h2>
+      <p>Dado que el servidor middleware puede correr en entornos de nube con marcas de tiempo UTC, se implementa una lógica de conversión manual estricta para garantizar que el reporte en Telegram refleje siempre la hora local de operación de **Bogotá/Quito/Lima (UTC-5)** sin depender de configuraciones regionales del sistema operativo:</p>
+      
+      <pre>
+export function formatDateTime(date) {
+  // Resta exactamente 5 horas en milisegundos
+  const offsetMs = -5 * 60 * 60 * 1000;
+  const adjusted = new Date(date.getTime() + offsetMs);
+  
+  const yyyy = adjusted.getUTCFullYear();
+  const mm = String(adjusted.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(adjusted.getUTCDate()).padStart(2, '0');
+  const hh = String(adjusted.getUTCHours()).padStart(2, '0');
+  const min = String(adjusted.getUTCMinutes()).padStart(2, '0');
+  const ss = String(adjusted.getUTCSeconds()).padStart(2, '0');
+  
+  return `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss}`;
+}</pre>
+    </section>
+
+    <!-- Section: Setup -->
+    <section id="setup">
+      <h2><i class="fa-solid fa-sliders"></i> Despliegue y Variables `.env`</h2>
+      <p>Configuración recomendada para inicializar el middleware en producción:</p>
+      
+      <pre>
+# Puerto de escucha del middleware HTTP
+PORT=3010
+
+# Smart OLT Credentials
+SMARTOLT_SUBDOMAIN=subdominio_empresa
+SMARTOLT_API_KEY=ae287af051d349a6...
+
+# Telegram Bot Credentials
+TELEGRAM_BOT_TOKEN=8854254866:AAGR9Ujz0a...
+TELEGRAM_CHAT_ID=-100987654321
+BOT_USERNAME=@mi_bot_telegram
+
+# Zabbix API Credentials
+ZABBIX_API_URL=http://tu-zabbix.com/api_jsonrpc.php
+ZABBIX_API_TOKEN=token_generado_en_zabbix
+
+# Retardo en minutos para evaluar el de-bounce de alertas de energía
+POWER_ALERT_DELAY_MINS=5</pre>
+    </section>
+
+    <!-- Section: Zabbix Action Configuration -->
+    <section id="zabbix-config">
+      <h2><i class="fa-solid fa-sliders"></i> Configuración de Alertas en Zabbix</h2>
+      <p>Para integrar Zabbix, crea una acción de alerta que envíe un Webhook a la API. Configura el script en el panel de Zabbix (Administration &rarr; Media Types) con el siguiente código JavaScript:</p>
+      
+      <pre>
+try {
+    var params = JSON.parse(value),
+        req = new HttpRequest(),
+        resp;
+
+    req.addHeader('Content-Type': 'application/json');
+    resp = req.post('http://tu-middleware-url:3010/webhook/zabbix', JSON.stringify({
+        event_name: params.event_name,
+        host_name: params.host_name,
+        event_severity: params.event_severity,
+        event_status: params.event_status,
+        clock: params.event_clock
+    }));
+
+    if (req.getStatus() !== 200) {
+        throw 'Error al enviar webhook';
+    }
+
+    return 'OK';
+} catch (error) {
+    Zabbix.log(3, 'Webhook error: ' + error);
+    throw error;
+}</pre>
+    </section>
+
+    <footer>
+      <p>&copy; 2026. Documentación Técnica del Integrador Zabbix & Smart OLT. Todos los derechos reservados.</p>
+    </footer>
+
+  </main>
+
+  <script>
+    // Smooth scrolling menu link highlighter
+    const menuLinks = document.querySelectorAll('.menu-link');
+    const sections = document.querySelectorAll('section');
+
+    window.addEventListener('scroll', () => {
+      let currentSection = '';
+      sections.forEach(sec => {
+        const top = sec.offsetTop;
+        const height = sec.clientHeight;
+        if (pageYOffset >= (top - 180)) {
+          currentSection = sec.getAttribute('id');
+        }
+      });
+
+      menuLinks.forEach(link => {
+        link.classList.remove('active');
+        if (link.getAttribute('href').slice(1) === currentSection) {
+          link.classList.add('active');
+        }
+      });
+    });
+  </script>
+</body>
+</html>

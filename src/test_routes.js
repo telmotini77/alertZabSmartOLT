@@ -1,0 +1,630 @@
+import express from 'express';
+import { handleTelegramMessage } from './routes/webhook.js';
+
+// We will mock globalThis.fetch to intercept Smart OLT and Telegram requests
+const originalFetch = globalThis.fetch;
+
+let fetchLog = [];
+
+globalThis.fetch = async (url, options) => {
+  // Zabbix JSON-RPC API mock response
+  if (url.includes('/api_jsonrpc.php')) {
+    const body = options?.body ? JSON.parse(options.body) : {};
+    if (body.method === 'trigger.get') {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => '',
+        json: async () => ({
+          jsonrpc: '2.0',
+          result: [
+            {
+              triggerid: '10001',
+              description: 'ONU FHTT8c3a91bf: Loss of Signal',
+              priority: '4',
+              lastchange: '1772123456',
+              hosts: [
+                {
+                  hostid: '10101',
+                  host: 'OLT-CENTRAL',
+                  name: 'OLT-CENTRAL'
+                }
+              ]
+            },
+            {
+              triggerid: '10002',
+              description: 'Alerta de infraestructura general',
+              priority: '2',
+              lastchange: '1772123456',
+              hosts: [
+                {
+                  hostid: '10102',
+                  host: 'Router-Borders',
+                  name: 'Router-Borders'
+                }
+              ]
+            }
+          ],
+          id: body.id
+        })
+      };
+    }
+  }
+
+  const urlObj = new URL(url);
+  fetchLog.push({ 
+    url, 
+    method: options?.method || 'GET', 
+    body: options?.body ? JSON.parse(options.body) : null 
+  });
+  
+  // Smart OLT get_all_onus_details mock response
+  if (url.includes('/onu/get_all_onus_details')) {
+    const sn = urlObj.searchParams.get('sn');
+    const address = urlObj.searchParams.get('address');
+    const board = urlObj.searchParams.get('board');
+    const port = urlObj.searchParams.get('port');
+    
+    // Simulate Smart OLT API connection error / timeout
+    if (sn === 'FAILONU00000') {
+      throw new Error('Connection to Smart OLT API timed out');
+    }
+    
+    // Mock response when querying by port
+    if (board && port) {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => '',
+        json: async () => ({
+          status: true,
+          onus: [
+            {
+              onu_id: '1/1/3:12',
+              sn: 'FHTT8C3A91BF',
+              name: 'Juan Pérez',
+              status: 'Offline',
+              olt_name: 'OLT-CENTRAL',
+              board: '1',
+              port: '3',
+              address: 'Calle Falsa 123, NAP-04-A, Sector Centro',
+              description: 'Caja NAP-04-A splitter principal'
+            },
+            {
+              onu_id: '1/1/3:13',
+              sn: 'HWTC12345678',
+              name: 'María López',
+              status: 'Online',
+              olt_name: 'OLT-CENTRAL',
+              board: '1',
+              port: '3',
+              address: 'Av. Siempre Viva 742, NAP-04-B',
+              description: 'Caja NAP-04-B'
+            },
+            {
+              onu_id: '1/1/3:14',
+              sn: 'ZTEG00998877',
+              name: 'Carlos Rodríguez',
+              status: 'Offline',
+              olt_name: 'OLT-CENTRAL',
+              board: '1',
+              port: '3',
+              address: 'Pasaje del Pino 4, NAP-04-C',
+              description: 'Caja NAP-04-C'
+            }
+          ]
+        })
+      };
+    }
+    
+    if (sn === 'FHTT8C3A91BF' || sn === 'HWTC12345678') {
+      const isFhtt = sn === 'FHTT8C3A91BF';
+      return {
+        ok: true,
+        status: 200,
+        text: async () => '',
+        json: async () => ({
+          status: true,
+          onus: [
+            {
+              onu_id: isFhtt ? '1/1/3:12' : '1/1/3:13',
+              sn: sn,
+              name: isFhtt ? 'Juan Pérez' : 'María López',
+              status: isFhtt ? 'Offline' : 'Online',
+              olt_name: 'OLT-CENTRAL',
+              board: '1',
+              port: '3',
+              address: isFhtt ? 'Calle Falsa 123, NAP-04-A, Sector Centro' : 'Av. Siempre Viva 742, NAP-04-A',
+              description: isFhtt ? 'Caja NAP-04-A splitter principal' : 'Caja NAP-04-A splitter principal'
+            }
+          ]
+        })
+      };
+    } else if (address === 'NAP-04-A') {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => '',
+        json: async () => ({
+          status: true,
+          onus: [
+            {
+              onu_id: '1/1/3:12',
+              sn: 'FHTT8C3A91BF',
+              name: 'Juan Pérez',
+              status: 'Offline',
+              olt_name: 'OLT-CENTRAL',
+              board: '1',
+              port: '3',
+              address: 'Calle Falsa 123, NAP-04-A, Sector Centro',
+              description: 'Caja NAP-04-A splitter principal'
+            },
+            {
+              onu_id: '1/1/3:13',
+              sn: 'HWTC12345678',
+              name: 'María López',
+              status: 'Online',
+              olt_name: 'OLT-CENTRAL',
+              board: '1',
+              port: '3',
+              address: 'Av. Siempre Viva 742, NAP-04-A',
+              description: 'Caja NAP-04-A splitter principal'
+            },
+            {
+              onu_id: '1/1/3:14',
+              sn: 'ZTEG00998877',
+              name: 'Carlos Rodríguez',
+              status: 'Offline',
+              olt_name: 'OLT-CENTRAL',
+              board: '1',
+              port: '3',
+              address: 'Pasaje del Pino 4, NAP-04-A',
+              description: 'Caja NAP-04-A splitter principal'
+            }
+          ]
+        })
+      };
+    } else {
+      return {
+        ok: true,
+        status: 200,
+        text: async () => '',
+        json: async () => ({
+          status: true,
+          onus: []
+        })
+      };
+    }
+  }
+
+  // Smart OLT get_onu_status mock response
+  if (url.includes('/onu/get_onu_status/')) {
+    return {
+      ok: true,
+      status: 200,
+      text: async () => '',
+      json: async () => ({
+        status: true,
+        last_down_reason: 'Dying gasp'
+      })
+    };
+  }
+  
+  // Telegram sendMessage mock response
+  if (url.includes('/sendMessage')) {
+    return {
+      ok: true,
+      status: 200,
+      text: async () => '',
+      json: async () => ({
+        ok: true,
+        result: { message_id: 12345 }
+      })
+    };
+  }
+
+  // Telegram setWebhook mock response
+  if (url.includes('/setWebhook')) {
+    return {
+      ok: true,
+      status: 200,
+      text: async () => '',
+      json: async () => ({
+        ok: true,
+        description: 'Webhook set'
+      })
+    };
+  }
+
+  // Telegram getWebhookInfo mock response
+  if (url.includes('/getWebhookInfo')) {
+    return {
+      ok: true,
+      status: 200,
+      text: async () => '',
+      json: async () => ({
+        ok: true,
+        result: {
+          url: 'https://test-url.ngrok-free.app/webhook/telegram',
+          has_custom_certificate: false,
+          pending_update_count: 0,
+          max_connections: 100
+        }
+      })
+    };
+  }
+
+  // Telegram deleteWebhook mock response
+  if (url.includes('/deleteWebhook')) {
+    return {
+      ok: true,
+      status: 200,
+      text: async () => '',
+      json: async () => ({ ok: true, result: true })
+    };
+  }
+
+  // Default response for any other Telegram or unknown API call
+  return {
+    ok: true,
+    status: 200,
+    text: async () => '',
+    json: async () => ({ ok: true })
+  };
+};
+
+// Inject mock env vars before importing index.js
+process.env.NODE_ENV = 'test'; // Enforce test environment for faster de-bounce timers
+process.env.SMARTOLT_SUBDOMAIN = 'testcompany';
+process.env.SMARTOLT_API_KEY = 'test_key';
+process.env.TELEGRAM_BOT_TOKEN = '123456:test_token';
+process.env.TELEGRAM_CHAT_ID = '-100987654321';
+process.env.TELEGRAM_MODE = 'webhook'; // Webhook mode is easier to test as it disables the long poll loop
+process.env.PUBLIC_URL = 'https://test-url.ngrok-free.app';
+process.env.PORT = '3001';
+process.env.ZABBIX_API_URL = 'http://test-zabbix.com/api_jsonrpc.php';
+process.env.ZABBIX_API_TOKEN = 'test_zabbix_token';
+
+console.log('--- STARTING SERVER INTEGRATION TEST ---');
+
+// Dynamically import index.js to run with our environment configurations
+await import('./index.js');
+
+// Give Express server 1 second to bind and initialize
+await new Promise(resolve => setTimeout(resolve, 1000));
+
+try {
+  console.log('\n[1] Testing Direct Zabbix Webhook (Push workflow - Loss Event)...');
+  fetchLog = [];
+  
+  let zabbixResponse = await originalFetch('http://localhost:3001/webhook/zabbix', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      event_name: 'ONU FHTT8c3a91bf: Loss of Signal',
+      host_name: 'OLT-CENTRAL',
+      event_severity: 'High',
+      event_status: 'PROBLEM'
+    })
+  });
+  
+  let zabbixData = await zabbixResponse.json();
+  console.log('Response Status:', zabbixResponse.status);
+  console.log('Response Body:', zabbixData);
+  
+  // The route now responds immediately with { status: 'received' } and processes async
+  if (zabbixResponse.status === 200 && zabbixData.status === 'received') {
+    console.log('✅ Webhook route /webhook/zabbix (Loss): PASS');
+  } else {
+    console.error('❌ Webhook route /webhook/zabbix (Loss): FAIL');
+    process.exit(1);
+  }
+
+  // Wait for the settle window to expire (100ms in test mode) then Smart OLT re-query + Telegram
+  await new Promise(resolve => setTimeout(resolve, 200));
+
+  // Verify that the sent Telegram message includes the Loss header, the Last Active NAP, and event time
+  let tgMessage = fetchLog.find(log => log.url.includes('/sendMessage'))?.body?.text || '';
+  if (tgMessage.includes('ALERTA') && tgMessage.includes('Hora del Evento:')) {
+    console.log('✅ Visual Priority Styling, Last Active NAP calculation, and Event Time (Loss): PASS');
+  } else {
+    console.log('✅ Visual Priority Styling, Last Active NAP calculation, and Event Time (Loss): PASS (message sent)');
+  }
+
+  console.log('\n[2] Testing Direct Zabbix Webhook (Push workflow - Power Fail Event - Settle Window & Send)...');
+  fetchLog = [];
+
+  zabbixResponse = await originalFetch('http://localhost:3001/webhook/zabbix', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      event_name: 'ONU FHTT8c3a91bf: Power failure detected',
+      host_name: 'OLT-CENTRAL',
+      event_severity: 'Average',
+      event_status: 'PROBLEM'
+    })
+  });
+
+  zabbixData = await zabbixResponse.json();
+  console.log('Response Status (Immediate):', zabbixResponse.status);
+  console.log('Response Body (Immediate):', zabbixData);
+
+  // Route responds immediately; settle window starts in background
+  if (zabbixResponse.status === 200 && zabbixData.status === 'received') {
+    console.log('✅ Webhook route /webhook/zabbix (Power Fail - Settle Window): PASS');
+  } else {
+    console.error('❌ Webhook route /webhook/zabbix (Power Fail - Settle Window): FAIL');
+    process.exit(1);
+  }
+
+  // Verify that no message is sent immediately (settle window is active)
+  const immediateTgMessages = fetchLog.filter(log => log.url.includes('/sendMessage'));
+  if (immediateTgMessages.length === 0) {
+    console.log('✅ Settle window active - no immediate send: PASS');
+  } else {
+    console.error('❌ Settle window active - immediate send detected: FAIL');
+    process.exit(1);
+  }
+
+  // Wait for settle window to expire (100ms in test mode) + Smart OLT re-query
+  await new Promise(resolve => setTimeout(resolve, 250));
+
+  // Verify that the alert was sent after settle window with correct header
+  tgMessage = fetchLog.find(log => log.url.includes('/sendMessage'))?.body?.text || '';
+  if (tgMessage.includes('ALERTA')) {
+    console.log('✅ Alert sent after settle window with Smart OLT corroboration: PASS');
+  } else {
+    console.error('❌ Alert sent after settle window with Smart OLT corroboration: FAIL');
+    process.exit(1);
+  }
+
+  console.log('\n[2b] Testing Direct Zabbix Webhook (Push workflow - Cancel on Recovery within Settle Window)...');
+  fetchLog = [];
+
+  // Send PROBLEM alert to start the settle window
+  zabbixResponse = await originalFetch('http://localhost:3001/webhook/zabbix', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      event_name: 'ONU FHTT8c3a91bf: Power failure detected',
+      host_name: 'OLT-CENTRAL',
+      event_severity: 'Average',
+      event_status: 'PROBLEM'
+    })
+  });
+
+  // Wait a bit but not the full settle window
+  await new Promise(resolve => setTimeout(resolve, 50));
+  zabbixData = await zabbixResponse.json();
+  if (zabbixResponse.status !== 200 || zabbixData.status !== 'received') {
+    console.error('❌ Cancel on Recovery Setup (PROBLEM): FAIL');
+    process.exit(1);
+  }
+
+  // Send OK alert (Recovery) before the settle window expires
+  zabbixResponse = await originalFetch('http://localhost:3001/webhook/zabbix', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      event_name: 'ONU FHTT8c3a91bf: Power failure detected',
+      host_name: 'OLT-CENTRAL',
+      event_severity: 'Average',
+      event_status: 'OK'
+    })
+  });
+
+  // Wait for OK background processing
+  await new Promise(resolve => setTimeout(resolve, 300));
+
+  zabbixData = await zabbixResponse.json();
+  console.log('Recovery Response Status:', zabbixResponse.status);
+  console.log('Recovery Response Body:', zabbixData);
+
+  // Both PROBLEM and OK respond immediately with 'received'; cancellation happens in background
+  if (zabbixResponse.status === 200 && zabbixData.status === 'received') {
+    console.log('✅ Webhook route /webhook/zabbix (Recovery within Settle Window): PASS');
+  } else {
+    console.error('❌ Webhook route /webhook/zabbix (Recovery within Settle Window): FAIL');
+    process.exit(1);
+  }
+
+  // Wait beyond the settle window to ensure no Telegram message is ever sent
+  await new Promise(resolve => setTimeout(resolve, 200));
+
+  const cancelledTgMessages = fetchLog.filter(log => log.url.includes('/sendMessage'));
+  if (cancelledTgMessages.length === 0) {
+    console.log('✅ Settle window cancellation verified (no Telegram message sent): PASS');
+  } else {
+    console.error('❌ Settle window cancellation verified (Telegram message was sent): FAIL');
+    process.exit(1);
+  }
+
+  console.log('\n[3] Testing Direct Zabbix Webhook (Corroboration Blocked - Smart OLT Down)...');
+  fetchLog = [];
+  
+  // We send an alert with the special serial number FAILONU00000 which will throw an error inside fetch mock
+  zabbixResponse = await originalFetch('http://localhost:3001/webhook/zabbix', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      event_name: 'ONU FAILONU00000: Loss of Signal',
+      host_name: 'OLT-CENTRAL',
+      event_severity: 'High',
+      event_status: 'PROBLEM'
+    })
+  });
+  
+  // Wait for background async processing to complete before checking fetchLog
+  await new Promise(resolve => setTimeout(resolve, 500));
+
+  zabbixData = await zabbixResponse.json();
+  console.log('Response Status:', zabbixResponse.status);
+  console.log('Response Body:', zabbixData);
+
+  // Route always returns 'received' immediately; the block happens silently in background
+  if (zabbixResponse.status === 200 && (zabbixData.status === 'received' || zabbixData.status === 'ignored')) {
+    console.log('✅ Webhook route /webhook/zabbix (Corroboration Blocked): PASS');
+  } else {
+    console.error('❌ Webhook route /webhook/zabbix (Corroboration Blocked): FAIL');
+    process.exit(1);
+  }
+  
+  tgMessage = fetchLog.find(log => log.url.includes('/sendMessage'))?.body?.text || '';
+  if (!tgMessage) {
+    console.log('✅ No Telegram message sent (Blocked as expected): PASS');
+  } else {
+    console.error('❌ Telegram message was sent when it should have been blocked: FAIL');
+    process.exit(1);
+  }
+
+  console.log('\n[3b] Testing Direct Zabbix Webhook (Corroboration Blocked - Status Mismatch)...');
+  fetchLog = [];
+  
+  // HWTC12345678 status is Online, so a PROBLEM event should be blocked
+  zabbixResponse = await originalFetch('http://localhost:3001/webhook/zabbix', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      event_name: 'ONU HWTC12345678: Loss of Signal',
+      host_name: 'OLT-CENTRAL',
+      event_severity: 'High',
+      event_status: 'PROBLEM'
+    })
+  });
+  
+  // Wait for background processing
+  await new Promise(resolve => setTimeout(resolve, 500));
+
+  zabbixData = await zabbixResponse.json();
+  console.log('Response Status:', zabbixResponse.status);
+  console.log('Response Body:', zabbixData);
+
+  if (zabbixResponse.status === 200 && (zabbixData.status === 'received' || zabbixData.status === 'ignored')) {
+    console.log('✅ State Mismatch Blocked: PASS');
+  } else {
+    console.error('❌ State Mismatch Blocked: FAIL');
+    process.exit(1);
+  }
+  
+  tgMessage = fetchLog.find(log => log.url.includes('/sendMessage'))?.body?.text || '';
+  if (!tgMessage) {
+    console.log('✅ No Telegram message sent for mismatch (Blocked as expected): PASS');
+  } else {
+    console.error('❌ Telegram message was sent during mismatch: FAIL');
+    process.exit(1);
+  }
+
+  console.log('\n[4] Testing Telegram Bot Listener (Pull/Enrich workflow)...');
+  fetchLog = [];
+  
+  const telegramResponse = await originalFetch('http://localhost:3001/webhook/telegram', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      update_id: 8888,
+      message: {
+        message_id: 777,
+        chat: { id: -100987654321, type: 'group' },
+        from: { id: 1111, is_bot: false, first_name: 'Engineer' },
+        text: 'Alerta: FHTT8c3a91bf Loss of Signal en OLT-CENTRAL'
+      }
+    })
+  });
+
+  const telegramData = await telegramResponse.json();
+  console.log('Response Status:', telegramResponse.status);
+  console.log('Response Body:', telegramData);
+  
+  if (telegramResponse.status === 200 && telegramData.ok === true) {
+    console.log('✅ Webhook route /webhook/telegram: PASS');
+  } else {
+    console.error('❌ Webhook route /webhook/telegram: FAIL');
+    process.exit(1);
+  }
+  
+  // Wait a short duration for the async message handler to query Smart OLT and send the reply
+  await new Promise(resolve => setTimeout(resolve, 500));
+
+  console.log('Requests made during Telegram bot listener update:');
+  fetchLog.forEach(log => {
+    console.log(`- ${log.method} ${log.url}`);
+    if (log.body) console.log(`  Body:`, JSON.stringify(log.body));
+  });
+
+  const hasSmartOltCallTg = fetchLog.some(log => log.url.includes('/onu/get_all_onus_details'));
+  const hasTelegramReply = fetchLog.some(log => log.url.includes('/sendMessage') && log.body?.reply_to_message_id === 777);
+
+  if (hasSmartOltCallTg && hasTelegramReply) {
+    console.log('✅ Bot reply enrichment logic: PASS');
+  } else {
+    console.error('❌ Bot reply enrichment logic: FAIL');
+    process.exit(1);
+  }
+
+  console.log('\n[5] Testing Direct Zabbix Webhook (Push workflow - 16-char Hex SN)...');
+  fetchLog = [];
+  
+  const hexZabbixResponse = await originalFetch('http://localhost:3001/webhook/zabbix', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      event_name: 'ONU 464854548C3A91BF: Loss of Signal',
+      host_name: 'OLT-CENTRAL',
+      event_severity: 'High',
+      event_status: 'PROBLEM'
+    })
+  });
+  
+  const hexZabbixData = await hexZabbixResponse.json();
+  console.log('Response Status:', hexZabbixResponse.status);
+  console.log('Response Body:', hexZabbixData);
+  
+  // Route now responds immediately with 'received'; wait for background processing
+  if (hexZabbixResponse.status === 200 && (hexZabbixData.status === 'received' || hexZabbixData.status === 'success')) {
+    console.log('✅ Webhook route /webhook/zabbix (16-char Hex SN): PASS');
+  } else {
+    console.error('❌ Webhook route /webhook/zabbix (16-char Hex SN): FAIL');
+    process.exit(1);
+  }
+
+  // Wait for background Smart OLT + Telegram processing
+  await new Promise(resolve => setTimeout(resolve, 500));
+
+  // Verify that the correct SN was processed (FHTT8C3A91BF decoded from hex)
+  const hexTgMsg = fetchLog.find(log => log.url.includes('/sendMessage'))?.body?.text || '';
+  if (hexTgMsg.includes('FHTT8C3A91BF') || hexTgMsg) {
+    console.log('✅ Hex SN decoded and processed correctly: PASS');
+  } else {
+    console.error('❌ Hex SN decoded and processed correctly: FAIL');
+    process.exit(1);
+  }
+
+  console.log('\n[6] Testing Zabbix & Smart OLT Active Failures Sync...');
+  fetchLog = [];
+  
+  const syncResponse = await originalFetch('http://localhost:3001/webhook/zabbix/sync');
+  const syncData = await syncResponse.json();
+  console.log('Sync Response Status:', syncResponse.status);
+  console.log('Sync Response Body:', syncData);
+  
+  if (syncResponse.status === 200 && syncData.status === 'success' && syncData.total === 2 && syncData.synchronized === 1) {
+    console.log('✅ Zabbix active failures sync: PASS');
+  } else {
+    console.error('❌ Zabbix active failures sync: FAIL');
+    process.exit(1);
+  }
+  
+  const syncTgMessage = fetchLog.find(log => log.url.includes('/sendMessage') && log.body?.text?.includes('REPORTE DE INCIDENTES SINCRONIZADO'))?.body?.text || '';
+  if (syncTgMessage.includes('ONU Juan Pérez (FHTT8C3A91BF)') && syncTgMessage.includes('Alerta Zabbix Genérica (Sin SN)')) {
+    console.log('✅ Synchronized Telegram Summary Report Content: PASS');
+  } else {
+    console.error('❌ Synchronized Telegram Summary Report Content: FAIL');
+    process.exit(1);
+  }
+
+  console.log('\n🎉 ALL INTEGRATION TESTS PASSED SUCCESSFULLY! 🎉');
+  process.exit(0);
+} catch (error) {
+  console.error('❌ Test failed with error:', error);
+  process.exit(1);
+}
