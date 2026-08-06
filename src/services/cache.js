@@ -1,13 +1,17 @@
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { fetchAllOnus } from './smartOlt.js';
 import { extractNapBox } from '../utils/parser.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // ─── Debounced async disk write ───────────────────────────────────────────────
 let _saveTimer = null;
 const SAVE_DEBOUNCE_MS = 2_000; // batch rapid updates into a single disk write
 
-const cacheDir  = path.resolve('data');
+const cacheDir  = path.resolve(__dirname, '../../data');
 const cacheFile = path.join(cacheDir, 'nap_cache.json');
 
 // Memory cache
@@ -300,7 +304,7 @@ function parseCsvLine(line) {
  * Reads coordinates from coordinates_mymaps.csv and seeds the cache NAPs that don't have coordinates.
  */
 export function applyCsvCoordinatesToCache() {
-  const csvPath = path.resolve('src/public/coordenadas_mymaps.csv');
+  const csvPath = path.resolve(__dirname, '../public/coordenadas_mymaps.csv');
   if (!fs.existsSync(csvPath)) {
     console.log('⚠️ coordenadas_mymaps.csv not found, skipping coordinates auto-seed.');
     return;
