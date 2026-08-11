@@ -7,7 +7,6 @@ let socket;
 let userMarker = null; // Pulsing GPS user location marker
 let activeStatusFilter = null;
 
-let darkLayer;
 let googleSatelliteLayer;
 
 // History State
@@ -57,18 +56,11 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 /**
- * Initialize the Leaflet map with a premium dark mode layer and Google Satellite Earth layer.
+ * Initialize the Leaflet map with Google Earth Satellite layer.
  */
 function initMap() {
   // Default center at [0,0] (will auto-adjust when data is loaded)
   map = L.map('map').setView([0, 0], 2);
-
-  // CartoDB Positron Dark theme tiles
-  darkLayer = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
-    subdomains: 'abcd',
-    maxZoom: 20
-  });
 
   // Google Satellite/Hybrid (Google Earth style with street names)
   googleSatelliteLayer = L.tileLayer('https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', {
@@ -76,15 +68,8 @@ function initMap() {
     maxZoom: 20
   });
 
-  // Add default dark theme
-  darkLayer.addTo(map);
-
-  // Layer control toggle (top-right switcher)
-  const baseMaps = {
-    "Mapa Oscuro": darkLayer,
-    "Google Earth Satélite": googleSatelliteLayer
-  };
-  L.control.layers(baseMaps, null, { position: 'topright' }).addTo(map);
+  // Add Google Earth layer
+  googleSatelliteLayer.addTo(map);
 
   // Add Scale Control (bottom-left)
   L.control.scale({ position: 'bottomleft' }).addTo(map);
