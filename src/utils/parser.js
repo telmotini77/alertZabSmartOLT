@@ -14,8 +14,10 @@ const HEX_SN_REGEX = /\b([0-9A-Fa-f]{16})\b/i;
 // Matches 16-character hex Serial Numbers with spaces (e.g. 48 57 54 43 38 42 32 32)
 const HEX_SPACE_SN_REGEX = /\b((?:[0-9A-Fa-f]{2}[-\s:]+){7}[0-9A-Fa-f]{2})\b/i;
 
-// Regex to capture NAP box identifiers (e.g., NAP-04-A, NAP_03, NAP 12, caja NAP 4)
-const NAP_REGEX = /(NAP[-_.\s]*\d+(?:[-_.\s]*[A-Z0-9]{1,2})?\b|caja\s+NAP[-_.\s]*\d+\b)/i;
+// Regexes to capture NAP box identifiers
+const EXPLICIT_NAP_REGEX = /(?:caja\s+)?nap\s*[:=\s-_]\s*([A-Za-z0-9]+(?:[-_./][A-Za-z0-9]+)*)/i;
+const NETWORK_CODE_NAP_REGEX = /\b([A-Z]{2}[-_]?\d{3,5}(?:[-_]\d+)?)\b/i;
+const GENERIC_NAP_REGEX = /\b(NAP[-_.\s]*\d+(?:[-_.\s]*[A-Z0-9]{1,3})?)\b/i;
 
 // Regex to capture GPON/EPON board and port (e.g., GPON 0/12/15, EPON 0/3/1)
 const BOARD_PORT_REGEX = /(?:GPON|EPON|PON)\s*\d+\/(\d+)\/(\d+)/i;
@@ -97,16 +99,43 @@ export function extractSerialNumber(text) {
 }
 
 /**
- * Extract NAP Box information from a text string (like ONU address or description).
+ * Extract NAP Box information from a text string (like ONU address, description, or comment).
+ * Handles formats such as:
+ * - "caja nap: sm-7030-1" -> "SM-7030-1"
+ * - "Caja NAP SM0201-5"   -> "SM0201-5"
+ * - "NAP: SM-7030-1"       -> "SM-7030-1"
+ * - "SM7038-1"             -> "SM7038-1"
+ * - "SH7004-2"             -> "SH7004-2"
+ * - "NAP-04-A"             -> "NAP-04-A"
+ * - "NAP 12"               -> "NAP-12"
  * @param {string} text - The address, description, or comment string to search
- * @returns {string|null} - Extracted NAP box name, or null if not found
+ * @returns {string|null} - Extracted NAP box name in uppercase, or null if not found
  */
 export function extractNapBox(text) {
-  if (!text) return null;
+  if (!text || typeof text !== 'string') return null;
   
-  const match = text.match(NAP_REGEX);
-  if (match) {
-    return match[1].toUpperCase().replace(/\s+/g, ' ').trim();
+  // 1. Try explicit "caja nap: <name>", "caja nap <name>", "nap: <name>"
+  const explicitMatch = text.match(/(?:caja\s+nap\s*[:=\s-_]*|nap\s*[:=]\s*)([A-Za-z0-9]+(?:[-_./][A-Za-z0-9]+)*)/i);
+  if (explicitMatch && explicitMatch[1]) {
+    const raw = explicitMatch[1].trim();
+    if (raw.length >= 2 && !/^(caja|box|puerto|port|onu|olt)$/i.test(raw)) {
+      if (/^\d+([A-Za-z0-9-_]*)$/.test(raw)) {
+        return `NAP-${raw.toUpperCase()}`;
+      }
+      return raw.toUpperCase().replace(/\s+/g, ' ');
+    }
+  }
+
+  // 2. Try standard network codes like SM0201-5, SM-7030-1, SH7038-1, SJ0101-1, etc.
+  const codeMatch = text.match(/\b([A-Z]{2}[-_]?\d{3,5}(?:[-_]\d+)?)\b/i);
+  if (codeMatch && codeMatch[1]) {
+    return codeMatch[1].toUpperCase().trim();
+  }
+
+  // 3. Try generic NAP-01, NAP_12, NAP 12 formats (capturing the NAP prefix)
+  const genericMatch = text.match(/\b(NAP[-_.\s]*\d+(?:[-_.\s]*[A-Z0-9]{1,3})?)\b/i);
+  if (genericMatch && genericMatch[1]) {
+    return genericMatch[1].toUpperCase().replace(/\s+/g, ' ').trim();
   }
   
   return null;

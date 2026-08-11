@@ -356,171 +356,191 @@ export async function sendCorrelatedPortReport(incident) {
  * Helper to generate a detailed NAP connectivity report.
  * If no NAP box is found in the ONU details, falls back to a clean individual customer report.
  */
+/**
+ * Helper to generate a detailed NAP connectivity report.
+ * If no NAP box is found in the ONU details, falls back to a clean individual customer report.
+ */
 async function generateNapReport(onu, eventStatus, severity, hostName, eventName, statusEmoji, statusLabel, priorityTitle, oltStatusReason = '', eventTime = '') {
-  // Extract NAP Box identifier
-  const napBox = extractNapBox(onu.address) || extractNapBox(onu.description);
+  // Extract NAP Box identifier from all possible fields
+  const napBox = (onu.odb_name ? onu.odb_name.trim() : '') || 
+                 (onu.odb ? onu.odb.trim() : '') || 
+                 extractNapBox(onu.address) || 
+                 extractNapBox(onu.description) || 
+                 extractNapBox(onu.name) || 
+                 extractNapBox(onu.zone);
+
   const publicUrl = (process.env.PUBLIC_URL || '').trim();
-  const napLink = (napBox && publicUrl) ? `<a href="${publicUrl}/?nap=${encodeURIComponent(napBox)}">${napBox}</a>` : (napBox || '');
   
+  // Search NAP in local cache for geographic coordinates
+  let coordsText = '';
+  let cachedNap = null;
+  if (napBox) {
+    cachedNap = getCachedNaps().find(n => n.name.toUpperCase() === napBox.toUpperCase());
+    if (cachedNap && cachedNap.latitude && cachedNap.longitude) {
+      const gmapsLink = `https://maps.google.com/?q=${cachedNap.latitude.toFixed(6)},${cachedNap.longitude.toFixed(6)}`;
+      coordsText = `\n📍 <b>Ubicación NAP:</b> <code>[${cachedNap.latitude.toFixed(6)}, ${cachedNap.longitude.toFixed(6)}]</code> | 🗺️ <a href="${gmapsLink}">Ver en Google Maps</a>`;
+    }
+  }
+
+  const napDisplay = napBox ? `<code>${napBox}</code>` : '<i>No identificada en el sistema</i>';
+  const napLink = (napBox && publicUrl) ? `<a href="${publicUrl}/?nap=${encodeURIComponent(napBox)}"><b>${napBox}</b></a>` : napDisplay;
+
+  // Build technical diagnostic explanation based on failure type
+  let techExplanation = '';
+  const reasonLower = (oltStatusReason || '').toLowerCase();
+  const isLoss = reasonLower.includes('los') || reasonLower.includes('signal') || reasonLower.includes('fibra') || parseStatusInfo(eventName).category === 'loss';
+  const isPower = reasonLower.includes('power') || reasonLower.includes('dying') || reasonLower.includes('gasp') || parseStatusInfo(eventName).category === 'power_fail';
+
+  if (eventStatus === 'OK') {
+    techExplanation = `\n💡 <b>Diagnóstico:</b> El enlace óptico y la alimentación eléctrica se encuentran estables. La ONU volvió a registrarse exitosamente en la OLT.`;
+  } else if (isLoss) {
+    techExplanation = `\n💡 <b>Diagnóstico Técnico:</b> Pérdida de potencia óptica (LOS). La ONU no recibe luz de la OLT.\n• <b>Causas probables:</b> Corte de acometida, rotura de fibra en troncal, conector desconectado o daño físico en la caja NAP.`;
+  } else if (isPower) {
+    techExplanation = `\n💡 <b>Diagnóstico Técnico:</b> Corte de energía eléctrica (Dying Gasp). La ONU se apagó por falta de suministro eléctrico.\n• <b>Causas probables:</b> Corte de luz en el sector/domicilio, desconexión de fuente de poder o daño en el transformador.`;
+  } else {
+    techExplanation = `\n💡 <b>Diagnóstico Técnico:</b> Interrupción de comunicación detectada entre la OLT y la ONU.`;
+  }
+
   if (!napBox) {
-    // If no NAP box was extracted, return standard individual client message
+    // Individual customer report without NAP
     return `
 ${priorityTitle}
 
-<b>Estado:</b> ${statusLabel}
-<b>Severidad:</b> ${severity}
-${eventTime ? `📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : ''}<b>OLT:</b> ${onu.olt_name || hostName}
-<b>Tarjeta/Slot:</b> ${onu.board || 'N/A'}  |  <b>Puerto PON:</b> ${onu.port || 'N/A'}  |  <b>ONU ID:</b> ${onu.onu_id || 'N/A'}
+📦 <b>Caja NAP:</b> <i>No identificada en el sistema</i>
+👤 <b>Cliente:</b> <b>${onu.name}</b>
+🔢 <b>Nro. de Serie (SN):</b> <code>${onu.sn}</code>
+🏠 <b>Dirección:</b> ${onu.address || 'No especificada'}
+🏢 <b>OLT:</b> ${onu.olt_name || hostName} | <b>Puerto PON:</b> Slot ${onu.board || 'N/A'} / Puerto ${onu.port || 'N/A'} | <b>ONU ID:</b> ${onu.onu_id || 'N/A'}
 
-👤 <b>Detalles del Cliente (Smart OLT):</b>
-• <b>Nombre/Cliente:</b> ${onu.name}
-• <b>Nro. Serie:</b> <code>${onu.sn}</code>
-• <b>Dirección:</b> ${onu.address || 'No especificada'}
-• <b>Caja NAP:</b> No identificada en el sistema
+⚡ <b>Detalle del Incidente:</b>
+• <b>Estado:</b> ${statusEmoji} <b>${statusLabel}</b> (${severity})
+${eventTime ? `• 📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : ''}${oltStatusReason ? `• 🔌 <b>Causa Reportada OLT:</b> <code>${oltStatusReason}</code>\n` : ''}${techExplanation}
 
 ℹ️ <i>Evento Zabbix: ${eventName}</i>
-`;
+`.trim();
   }
-  
-  console.log(`NAP Box detected: ${napBox}. Querying all ONUs on this NAP...`);
-  // Query other ONUs sharing the same NAP
+
+  // Query other ONUs on this NAP (prefer local memory cache if available)
   let onusOnNap = [];
   try {
-    onusOnNap = await findOnusByAddressQuery(napBox);
+    if (cachedNap && cachedNap.clients && cachedNap.clients.length > 0) {
+      onusOnNap = cachedNap.clients;
+    } else {
+      onusOnNap = await findOnusByAddressQuery(napBox);
+    }
   } catch (err) {
     console.error(`[Smart OLT error querying NAP ONUs]:`, err.message);
   }
-  
-  if (onusOnNap.length === 0) {
-    // Fallback if query fails or returns empty
+
+  if (!onusOnNap || onusOnNap.length === 0) {
     return `
 ${priorityTitle}
 
-<b>Estado:</b> ${statusLabel}
-<b>Severidad:</b> ${severity}
-<b>OLT:</b> ${onu.olt_name || hostName}
-<b>Tarjeta/Slot:</b> ${onu.board || 'N/A'}  |  <b>Puerto PON:</b> ${onu.port || 'N/A'}  |  <b>ONU ID:</b> ${onu.onu_id || 'N/A'}
+📦 <b>Caja NAP:</b> ${napLink}${coordsText}
+👤 <b>Cliente:</b> <b>${onu.name}</b>
+🔢 <b>Nro. de Serie (SN):</b> <code>${onu.sn}</code>
+🏠 <b>Dirección:</b> ${onu.address || 'No especificada'}
+🏢 <b>OLT:</b> ${onu.olt_name || hostName} | <b>Puerto PON:</b> Slot ${onu.board || 'N/A'} / Puerto ${onu.port || 'N/A'} | <b>ONU ID:</b> ${onu.onu_id || 'N/A'}
 
-👤 <b>Detalles del Cliente (Smart OLT):</b>
-• <b>Nombre/Cliente:</b> ${onu.name}
-• <b>Nro. Serie:</b> <code>${onu.sn}</code>
-• <b>Caja NAP:</b> <b>${napLink}</b> (No se pudieron cargar otros clientes de esta caja)
+⚡ <b>Detalle del Incidente:</b>
+• <b>Estado:</b> ${statusEmoji} <b>${statusLabel}</b> (${severity})
+${eventTime ? `• 📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : ''}${oltStatusReason ? `• 🔌 <b>Causa Reportada OLT:</b> <code>${oltStatusReason}</code>\n` : ''}${techExplanation}
 
 ℹ️ <i>Evento Zabbix: ${eventName}</i>
-`;
+`.trim();
   }
-  
-  // Calculate stats
+
+  // Calculate NAP statistics
   const totalClients = onusOnNap.length;
   const offlineOnus = onusOnNap.filter(o => {
     const s = (o.status || '').toLowerCase();
     return s !== 'online' && s !== 'active';
   });
-  
+
   const totalOffline = offlineOnus.length;
   const totalOnline = totalClients - totalOffline;
   const percentageDown = ((totalOffline / totalClients) * 100).toFixed(1);
-  
-  // Build the list of clients and their status
+
+  // Build client list with clear status emojis
   const clientLines = onusOnNap.map(o => {
-    const isThisOne = o.sn.toUpperCase() === onu.sn.toUpperCase();
-    const isOnline = (o.status || '').toLowerCase() === 'online' || (o.status || '').toLowerCase() === 'active';
-    const statusDot = isOnline ? '🟢' : '🔴';
-    
-    const nameLabel = isThisOne ? `<b>${o.name} [ESTE REPORTE]</b>` : o.name;
+    const isThisOne = (o.sn || '').toUpperCase() === (onu.sn || '').toUpperCase();
+    const isOnlineClient = (o.status || '').toLowerCase() === 'online' || (o.status || '').toLowerCase() === 'active';
+    const statusDot = isOnlineClient ? '🟢' : '🔴';
+    const nameLabel = isThisOne ? `<b>${o.name} [AFECTADO]</b>` : o.name;
     const snLabel = `<code>${o.sn}</code>`;
-    const statusLabelText = o.status || 'Offline';
-    
-    return `${statusDot} ${nameLabel} (${snLabel}) - <i>${statusLabelText}</i>`;
+    const statusLabelText = o.status || (isOnlineClient ? 'Online' : 'Offline');
+    return `  ${statusDot} ${nameLabel} (${snLabel}) - <i>${statusLabelText}</i>`;
   });
-  
+
   const napWarning = totalOffline === totalClients 
-    ? '⚠️ 🛑 <b>¡CAÍDA TOTAL DE LA CAJA NAP!</b> (Todos los clientes caídos)'
+    ? '🛑 <b>¡CAÍDA TOTAL DE LA CAJA NAP!</b> (Todos los clientes están sin servicio)'
     : totalOffline > 1 
-      ? '⚠️ <b>¡CAÍDA PARCIAL EN LA CAJA NAP!</b> (Múltiples clientes caídos)'
-      : 'ℹ️ <b>Incidente Individual</b> (Solo 1 cliente caído en esta NAP)';
+      ? `⚠️ <b>¡CAÍDA PARCIAL EN LA CAJA NAP!</b> (${totalOffline} de ${totalClients} clientes caídos)`
+      : 'ℹ️ <b>Incidente Individual</b> (Solo 1 cliente afectado; los demás clientes de la NAP tienen señal normal)';
 
   let lastActiveNapInfo = '';
-  if (eventStatus !== 'OK') {
-    const isLoss = parseStatusInfo(eventName).category === 'loss';
-    if (isLoss) {
-      try {
-        console.log(`Calculating last active NAP for OLT: ${onu.olt_name || hostName}, Board: ${onu.board}, Port: ${onu.port}`);
-        const onusOnPort = await findOnusByPort(onu.olt_id, onu.board, onu.port, onu.olt_name || hostName);
-        if (onusOnPort && onusOnPort.length > 0) {
-          const napGroups = {};
-          onusOnPort.forEach(o => {
-            const n = extractNapBox(o.address) || extractNapBox(o.description);
-            if (n) {
-              if (!napGroups[n]) {
-                napGroups[n] = { name: n, online: 0 };
-              }
-              const isOnline = (o.status || '').toLowerCase() === 'online' || (o.status || '').toLowerCase() === 'active';
-              if (isOnline) {
-                napGroups[n].online++;
-              }
-            }
-          });
-          
-          const uniqueNaps = Object.keys(napGroups);
-          // Sort NAPs naturally (e.g. NAP-2 before NAP-10) to reflect sequential layout
-          const sortedNaps = uniqueNaps.sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
-          
-          // Find the last NAP in sequential order that still has online clients
-          let lastActiveIdx = -1;
-          for (let i = sortedNaps.length - 1; i >= 0; i--) {
-            if (napGroups[sortedNaps[i]].online > 0) {
-              lastActiveIdx = i;
-              break;
-            }
+  if (eventStatus !== 'OK' && isLoss) {
+    try {
+      const onusOnPort = await findOnusByPort(onu.olt_id, onu.board, onu.port, onu.olt_name || hostName);
+      if (onusOnPort && onusOnPort.length > 0) {
+        const napGroups = {};
+        onusOnPort.forEach(o => {
+          const n = (o.odb_name ? o.odb_name.trim() : '') || extractNapBox(o.address) || extractNapBox(o.description);
+          if (n) {
+            if (!napGroups[n]) napGroups[n] = { name: n, online: 0, total: 0 };
+            napGroups[n].total++;
+            const isO = (o.status || '').toLowerCase() === 'online' || (o.status || '').toLowerCase() === 'active';
+            if (isO) napGroups[n].online++;
           }
-          
-          const activeNaps = sortedNaps.filter(n => napGroups[n].online > 0);
-          const inactiveNaps = sortedNaps.filter(n => napGroups[n].online === 0);
-          
-          if (lastActiveIdx !== -1) {
-            const lastActiveNap = sortedNaps[lastActiveIdx];
-            const nextInactiveNap = sortedNaps[lastActiveIdx + 1];
-            
-            let cutEstimation = '';
-            if (nextInactiveNap) {
-              cutEstimation = `\n📍 <b>Punto de corte estimado:</b> Entre <b>${lastActiveNap}</b> y <b>${nextInactiveNap}</b>`;
-            } else {
-              cutEstimation = `\n📍 <b>Punto de corte estimado:</b> Falla individual o posterior a <b>${lastActiveNap}</b>`;
-            }
-            
-            lastActiveNapInfo = `\n\n📶 <b>Última NAP con señal en el puerto:</b> <b>${lastActiveNap}</b>${cutEstimation}\n• NAPs activas: ${activeNaps.join(', ') || 'Ninguna'}\n${inactiveNaps.length > 0 ? `• NAPs sin señal: ${inactiveNaps.join(', ')}` : ''}`;
-          } else {
-            lastActiveNapInfo = `\n\n📶 <b>Última NAP con señal en el puerto:</b> <i>Ninguna (Caída total del puerto PON)</i>\n📍 <b>Punto de corte estimado:</b> Inicio del tendido (troncal) o puerto PON caído en la OLT.`;
+        });
+
+        const sortedNaps = Object.keys(napGroups).sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' }));
+        let lastActiveIdx = -1;
+        for (let i = sortedNaps.length - 1; i >= 0; i--) {
+          if (napGroups[sortedNaps[i]].online > 0) {
+            lastActiveIdx = i;
+            break;
           }
         }
-      } catch (err) {
-        console.error('Error calculating last active NAP:', err.message);
+
+        if (lastActiveIdx !== -1) {
+          const lastActiveNap = sortedNaps[lastActiveIdx];
+          const nextInactiveNap = sortedNaps[lastActiveIdx + 1];
+          const cutEstimation = nextInactiveNap 
+            ? `\n📍 <b>Punto de corte estimado en troncal:</b> Entre <b>${lastActiveNap}</b> y <b>${nextInactiveNap}</b>`
+            : `\n📍 <b>Punto de corte estimado:</b> Posterior a <b>${lastActiveNap}</b> (Falla de acometida individual)`;
+          lastActiveNapInfo = `\n\n📶 <b>Última NAP con señal en el puerto:</b> <b>${lastActiveNap}</b>${cutEstimation}`;
+        }
       }
+    } catch (err) {
+      console.error('Error calculating last active NAP:', err.message);
     }
   }
 
   return `
 ${priorityTitle}
-📦 <b>Caja NAP Afectada: ${napLink}</b>
 
-<b>Alerta:</b> ${statusEmoji} ${statusLabel} (${severity})
-${eventTime ? `📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : ''}${oltStatusReason ? `🔌 <b>Causa OLT:</b> <code>${oltStatusReason}</code>\n` : ''}<b>OLT:</b> ${onu.olt_name || hostName}
-<b>Puerto Físico:</b> Slot ${onu.board || 'N/A'} | Puerto PON ${onu.port || 'N/A'}
+📦 <b>Caja NAP:</b> ${napLink}${coordsText}
+👤 <b>Cliente:</b> <b>${onu.name}</b>
+🔢 <b>Nro. de Serie (SN):</b> <code>${onu.sn}</code>
+🏠 <b>Dirección:</b> ${onu.address || 'No especificada'}
+🏢 <b>OLT:</b> ${onu.olt_name || hostName} | <b>Puerto PON:</b> Slot ${onu.board || 'N/A'} / Puerto ${onu.port || 'N/A'} | <b>ONU ID:</b> ${onu.onu_id || 'N/A'}
 
-📊 <b>Resumen de Conectividad en la NAP:</b>
+⚡ <b>Detalle del Incidente:</b>
+• <b>Estado:</b> ${statusEmoji} <b>${statusLabel}</b> (${severity})
+${eventTime ? `• 📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : ''}${oltStatusReason ? `• 🔌 <b>Causa Reportada OLT:</b> <code>${oltStatusReason}</code>\n` : ''}${techExplanation}
+
+📊 <b>Estado de la Caja NAP (${napBox}):</b>
 • Total Clientes en esta NAP: <b>${totalClients}</b>
 • 🟢 Activos (Online): <b>${totalOnline}</b>
-• 🛑 Caídos (Offline): <b>${totalOffline}</b> (<b>${percentageDown}%</b> de afectación)
-
-🔍 <b>Análisis de Impacto:</b>
-${napWarning}${lastActiveNapInfo}
+• 🔴 Afectados (Offline): <b>${totalOffline}</b> (<b>${percentageDown}%</b>)
+• <b>Diagnóstico:</b> ${napWarning}${lastActiveNapInfo}
 
 👥 <b>Detalle de Clientes en esta NAP:</b>
 ${clientLines.join('\n')}
 
 ℹ️ <i>Evento Zabbix: ${eventName}</i>
-`;
+`.trim();
 }
 
 /**
@@ -890,6 +910,54 @@ export async function handleTelegramMessage(message) {
   if (!text) return;
 
   const upperText = text.toUpperCase();
+
+  if (upperText.startsWith('/START') || upperText.startsWith('/AYUDA') || upperText.startsWith('/HELP')) {
+    try {
+      const helpMsg = `🤖 <b>Asistente de Monitoreo Zabbix & Smart OLT</b>
+
+Comandos disponibles:
+• 🔍 <code>/buscar &lt;nombre / NAP / SN&gt;</code> - Busca clientes o cajas NAP por nombre o serie.
+• 📦 <code>/nap &lt;nombre NAP&gt;</code> - Consulta estado detallado de una caja NAP (ej: <code>/nap SM-7030-1</code>).
+• ⚠️ <code>/fallas</code> o <code>/sync</code> - Muestra las alertas y cortes activos en la red.
+• 🗺️ <code>/mapa</code> - Enlace directo al mapa de cajas NAP en tiempo real.
+• 🆔 <code>/id</code> - Muestra el ID de este chat de Telegram.
+
+<i>💡 También puedes escribir directamente el número de serie de una ONU (ej: <code>HWTC12345678</code>) o el nombre de una caja NAP para consultar su información al instante.</i>`;
+      await replyToMessage(chatId, messageId, helpMsg);
+    } catch (err) {
+      console.error('Error handling /ayuda command:', err.message);
+    }
+    return;
+  }
+
+  if (upperText.startsWith('/MAPA')) {
+    try {
+      const publicUrl = (process.env.PUBLIC_URL || '').trim();
+      const mapMsg = publicUrl 
+        ? `🗺️ <b>Monitor de Cajas NAP en Tiempo Real</b>\n\nAccede al mapa interactivo aquí:\n🔗 <a href="${publicUrl}">${publicUrl}</a>`
+        : `🗺️ <b>Monitor de Cajas NAP:</b> <code>PUBLIC_URL</code> no configurado en el servidor.`;
+      await replyToMessage(chatId, messageId, mapMsg);
+    } catch (err) {
+      console.error('Error handling /mapa command:', err.message);
+    }
+    return;
+  }
+
+  if (upperText.startsWith('/BUSCAR') || upperText.startsWith('/NAP') || upperText.startsWith('/INFO')) {
+    try {
+      const query = text.replace(/^\/(buscar|nap|info)\s*/i, '').trim();
+      if (!query) {
+        await replyToMessage(chatId, messageId, 'ℹ️ Por favor ingresa el texto a buscar.\nEjemplos:\n• <code>/buscar SM-7030-1</code>\n• <code>/buscar Juan Perez</code>\n• <code>/buscar HWTC12345678</code>');
+        return;
+      }
+      await handleSearchQuery(chatId, messageId, query);
+    } catch (err) {
+      console.error('Error handling /buscar command:', err.message);
+      await replyToMessage(chatId, messageId, `❌ Error al buscar: ${err.message}`);
+    }
+    return;
+  }
+
   if (upperText.startsWith('/ID')) {
     try {
       await replyToMessage(
@@ -1133,26 +1201,31 @@ async function processPortAlert(payload, board, port) {
     let reportText = `🚨🔴 <b>CAÍDA MASIVA DE PUERTO GPON (Parte ${i + 1}/${totalChunks})</b>\n\n`;
     
     if (i === 0) {
-      reportText += `<b>Puerto Afectado:</b> Tarjeta ${board} | Puerto PON ${port}\n`;
-      reportText += `<b>OLT:</b> ${hostName}\n`;
+      reportText += `🏢 <b>OLT:</b> ${hostName}\n`;
+      reportText += `🔌 <b>Puerto PON Afectado:</b> Slot ${board} | Puerto PON ${port}\n`;
       reportText += `📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n\n`;
       reportText += `📊 <b>Resumen de Afectación:</b>\n`;
       reportText += `• Total Clientes en el Puerto: <b>${totalClients}</b>\n`;
-      reportText += `• Clientes Caídos (Offline): <b>${offlineCount}</b> (<b>${percentage}%</b>)\n`;
+      reportText += `• 🔴 Clientes Caídos (Offline): <b>${offlineCount}</b> (<b>${percentage}%</b> de afectación)\n`;
+      reportText += `• 🟢 Clientes Operativos (Online): <b>${totalClients - offlineCount}</b>\n`;
     }
     
-    reportText += `\n👥 <b>Detalle de Clientes (Mostrando ${chunkOnus.length} clientes):</b>\n`;
+    reportText += `\n👥 <b>Afectación Desglosada por Caja NAP:</b>\n`;
     
     // Group this chunk by NAP
     const chunkNaps = {};
     chunkOnus.forEach(o => {
-      const nap = extractNapBox(o.address) || extractNapBox(o.description) || 'NAP Desconocida';
+      const nap = (o.odb_name ? o.odb_name.trim() : '') || (o.odb ? o.odb.trim() : '') || extractNapBox(o.address) || extractNapBox(o.description) || extractNapBox(o.name) || 'NAP Desconocida';
       if (!chunkNaps[nap]) chunkNaps[nap] = [];
       chunkNaps[nap].push(o);
     });
     
     for (const [nap, clients] of Object.entries(chunkNaps)) {
-      reportText += `\n📦 <b>${nap}</b> (${clients.length} clientes):\n`;
+      const cachedNap = getCachedNaps().find(n => n.name.toUpperCase() === nap.toUpperCase());
+      const mapLink = (cachedNap && cachedNap.latitude && cachedNap.longitude) 
+        ? ` (<a href="https://maps.google.com/?q=${cachedNap.latitude},${cachedNap.longitude}">GPS</a>)` 
+        : '';
+      reportText += `\n📦 <b>Caja NAP: ${nap}</b>${mapLink} - <b>${clients.length} cliente(s) caído(s):</b>\n`;
       clients.forEach(c => {
         reportText += `  🔴 ${c.name} (<code>${c.sn}</code>)\n`;
       });
@@ -1162,6 +1235,122 @@ async function processPortAlert(payload, board, port) {
   }
   
   console.log(`[Port Alert] Successfully sent port summary for Board ${board} Port ${port} in ${totalChunks} messages. Affected: ${offlineCount}`);
+}
+
+/**
+ * Helper to handle interactive search queries from Telegram users (/buscar, /nap, /info).
+ */
+async function handleSearchQuery(chatId, messageId, query) {
+  const cleanQuery = query.trim();
+  const upperQuery = cleanQuery.toUpperCase();
+  const cachedNaps = getCachedNaps();
+
+  // 1. Check if query matches a NAP Box name (exact or partial)
+  const matchedNap = cachedNaps.find(n => n.name.toUpperCase() === upperQuery) ||
+                     cachedNaps.find(n => n.name.toUpperCase().includes(upperQuery));
+
+  if (matchedNap) {
+    const publicUrl = (process.env.PUBLIC_URL || '').trim();
+    const napLink = publicUrl ? `<a href="${publicUrl}/?nap=${encodeURIComponent(matchedNap.name)}"><b>${matchedNap.name}</b></a>` : `<b>${matchedNap.name}</b>`;
+    
+    let coordsText = '<i>Sin coordenadas GPS registradas</i>';
+    if (matchedNap.latitude && matchedNap.longitude) {
+      const gmaps = `https://maps.google.com/?q=${matchedNap.latitude.toFixed(6)},${matchedNap.longitude.toFixed(6)}`;
+      coordsText = `<code>[${matchedNap.latitude.toFixed(6)}, ${matchedNap.longitude.toFixed(6)}]</code> | 🗺️ <a href="${gmaps}">Ver en Google Maps</a>`;
+    }
+
+    const statusEmoji = matchedNap.status === 'online' ? '🟢' : (matchedNap.status === 'partial' ? '⚠️' : '🔴');
+    const statusLabel = matchedNap.status === 'online' ? 'Estable / Online' : (matchedNap.status === 'partial' ? 'Parcialmente Afectada' : 'Caída Total');
+
+    const clientLines = (matchedNap.clients || []).map(c => {
+      const isOnline = (c.status || '').toLowerCase() === 'online' || (c.status || '').toLowerCase() === 'active';
+      const dot = isOnline ? '🟢' : '🔴';
+      return `  ${dot} ${c.name} (<code>${c.sn}</code>) - <i>${c.status || 'Offline'}</i>`;
+    });
+
+    const reply = `
+📦 <b>Información de Caja NAP: ${matchedNap.name}</b>
+
+🏢 <b>OLT:</b> ${matchedNap.olt_name || 'ROUTER-FTTH'}
+🔌 <b>Puerto PON:</b> Slot ${matchedNap.board || '0'} / Puerto ${matchedNap.port || '0'}
+📍 <b>Ubicación:</b> ${coordsText}
+📊 <b>Estado de la NAP:</b> ${statusEmoji} <b>${statusLabel}</b>
+
+👥 <b>Abonados Conectados (${matchedNap.totalClients} total):</b>
+• 🟢 Activos (Online): <b>${matchedNap.onlineClients}</b>
+• 🔴 Caídos (Offline): <b>${matchedNap.offlineClients}</b>
+
+📋 <b>Detalle de Clientes en esta NAP:</b>
+${clientLines.length > 0 ? clientLines.join('\n') : '<i>No hay clientes registrados en esta NAP.</i>'}
+`.trim();
+
+    await replyToMessage(chatId, messageId, reply);
+    return;
+  }
+
+  // 2. Check if query matches a Client SN or Name in cache
+  let matchedClient = null;
+  let clientNap = null;
+  for (const nap of cachedNaps) {
+    if (nap.clients) {
+      const c = nap.clients.find(cl => (cl.sn || '').toUpperCase() === upperQuery || (cl.name || '').toUpperCase().includes(upperQuery));
+      if (c) {
+        matchedClient = c;
+        clientNap = nap;
+        break;
+      }
+    }
+  }
+
+  if (matchedClient && clientNap) {
+    const isOnline = (matchedClient.status || '').toLowerCase() === 'online' || (matchedClient.status || '').toLowerCase() === 'active';
+    const statusDot = isOnline ? '🟢' : '🔴';
+
+    let coordsText = '';
+    if (clientNap.latitude && clientNap.longitude) {
+      const gmaps = `https://maps.google.com/?q=${clientNap.latitude.toFixed(6)},${clientNap.longitude.toFixed(6)}`;
+      coordsText = `\n📍 <b>Coordenadas NAP:</b> <code>[${clientNap.latitude.toFixed(6)}, ${clientNap.longitude.toFixed(6)}]</code> | 🗺️ <a href="${gmaps}">Ver en Google Maps</a>`;
+    }
+
+    const reply = `
+👤 <b>Información de Cliente: ${matchedClient.name}</b>
+
+🔢 <b>Nro. de Serie (SN):</b> <code>${matchedClient.sn}</code>
+📊 <b>Estado Actual:</b> ${statusDot} <b>${matchedClient.status || (isOnline ? 'Online' : 'Offline')}</b>
+📦 <b>Caja NAP:</b> <code>${clientNap.name}</code>${coordsText}
+🏢 <b>OLT:</b> ${clientNap.olt_name} | <b>Puerto:</b> Slot ${clientNap.board} / PON ${clientNap.port}
+`.trim();
+
+    await replyToMessage(chatId, messageId, reply);
+    return;
+  }
+
+  // 3. Fallback: try querying Smart OLT directly
+  try {
+    const snMatch = extractSerialNumber(cleanQuery);
+    if (snMatch) {
+      const onu = await findOnuBySn(snMatch);
+      if (onu) {
+        const napBox = (onu.odb_name ? onu.odb_name.trim() : '') || extractNapBox(onu.address) || extractNapBox(onu.description) || 'No identificada';
+        const isOnline = (onu.status || '').toLowerCase() === 'online' || (onu.status || '').toLowerCase() === 'active';
+        const reply = `
+👤 <b>Cliente Encontrado en Smart OLT: ${onu.name}</b>
+
+🔢 <b>Nro. de Serie (SN):</b> <code>${onu.sn}</code>
+📊 <b>Estado:</b> ${isOnline ? '🟢 Online' : '🔴 Offline'}
+📦 <b>Caja NAP:</b> <code>${napBox}</code>
+🏠 <b>Dirección:</b> ${onu.address || 'No especificada'}
+🏢 <b>OLT:</b> ${onu.olt_name || 'OLT Principal'} | <b>Puerto PON:</b> Slot ${onu.board || '0'} / Puerto ${onu.port || '0'} | <b>ONU ID:</b> ${onu.onu_id || '0'}
+`.trim();
+        await replyToMessage(chatId, messageId, reply);
+        return;
+      }
+    }
+  } catch (err) {
+    console.error('Error during fallback search query:', err.message);
+  }
+
+  await replyToMessage(chatId, messageId, `⚠️ No se encontraron cajas NAP ni clientes que coincidan con "<b>${cleanQuery}</b>".\n\n<i>Prueba buscando por nombre de cliente, serie (ej: <code>HWTC12345678</code>) o nombre de NAP (ej: <code>SM-7030-1</code>).</i>`);
 }
 
 // GET /webhook/debug - Debug environment paths
