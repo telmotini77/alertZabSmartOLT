@@ -63,6 +63,7 @@ const mockOnus = [
 // Set process env variables
 process.env.SMARTOLT_SUBDOMAIN = 'testcompany';
 process.env.SMARTOLT_API_KEY = 'test_key';
+process.env.NAP_CACHE_FILE = path.resolve('data/.nap_cache.test.json');
 
 // Mock global fetch to intercept Smart OLT request
 globalThis.fetch = async (url) => {
@@ -81,8 +82,9 @@ globalThis.fetch = async (url) => {
 
 console.log('--- STARTING MAP AND CACHE UNIT TESTS ---');
 
-// Load cache service after mocking fetch
-import { initCache, getCachedNaps, updateOnuStatusInCache, syncCacheWithSmartOlt, updateNapCoordinates } from './services/cache.js';
+// Load cache service after configuring the isolated test cache path.
+const { getCachedNaps, updateOnuStatusInCache, syncCacheWithSmartOlt, updateNapCoordinates } =
+  await import('./services/cache.js');
 
 async function runTests() {
   try {
@@ -162,7 +164,7 @@ async function runTests() {
     console.log('✅ Manual coordinates update: PASS');
 
     // Clean up cache file generated during test
-    const cacheFile = path.resolve('src/data/nap_cache.json');
+    const cacheFile = process.env.NAP_CACHE_FILE;
     if (fs.existsSync(cacheFile)) {
       fs.unlinkSync(cacheFile);
     }

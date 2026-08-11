@@ -15,6 +15,13 @@ const DEFAULT_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 // when Smart OLT is unavailable and Zabbix alerts must still be delivered.
 const REQUIRE_SMARTOLT_CORROBORATION =
   (process.env.SMARTOLT_REQUIRE_CORROBORATION || 'true').trim().toLowerCase() !== 'false';
+const PORT_CORRELATION_ENABLED =
+  (process.env.PORT_CORRELATION_ENABLED || 'true').trim().toLowerCase() !== 'false';
+
+const getPositiveNumber = (value, fallback) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
 
 // GET /webhook/naps - Returns current status of all NAPs
 router.get('/naps', (req, res) => {
@@ -251,6 +258,100 @@ const getSettleMs = () => {
   return (!isNaN(secs) && secs >= 0) ? secs * 1_000 : 30_000; // default 30s
 };
 
+// Zabbix often reports one event per ONU even when the underlying incident is a
+// PON-port outage. Keep a short, per-port buffer so the final notification can
+// report the real impact instead of flooding Telegram with individual alerts.
+const pendingPortIncidents = new Map();
+
+const getPortCorrelationMs = () =>
+  getPositiveNumber(process.env.PORT_CORRELATION_WINDOW_SECS, 15) * 1_000;
+
+const isOnline = (onu) => ['online', 'active'].includes(String(onu?.status || '').toLowerCase());
+
+function portIncidentKey(onu, payload) {
+  const olt = String(onu.olt_id || onu.olt_name || payload.host_name || payload.host || 'unknown').toLowerCase();
+  return `${olt}:${onu.board}:${onu.port}`;
+}
+
+function cancelPendingPortIncidentForOnu(sn) {
+  const normalizedSn = String(sn || '').toUpperCase();
+  for (const [key, incident] of pendingPortIncidents) {
+    incident.sns.delete(normalizedSn);
+    if (incident.sns.size === 0) {
+      clearTimeout(incident.timeoutId);
+      pendingPortIncidents.delete(key);
+    }
+  }
+}
+
+function queuePortIncident(payload, onu, oltStatusReason = '') {
+  if (!PORT_CORRELATION_ENABLED || onu?.board === undefined || onu?.port === undefined) return false;
+
+  const key = portIncidentKey(onu, payload);
+  let incident = pendingPortIncidents.get(key);
+  if (!incident) {
+    incident = {
+      payload,
+      onu,
+      oltStatusReason,
+      sns: new Set(),
+      timeoutId: null
+    };
+    pendingPortIncidents.set(key, incident);
+  }
+
+  incident.sns.add(String(onu.sn || payload.onu_sn || '').toUpperCase());
+  incident.payload = payload;
+  incident.onu = onu;
+  incident.oltStatusReason = oltStatusReason || incident.oltStatusReason;
+  clearTimeout(incident.timeoutId);
+  incident.timeoutId = setTimeout(() => {
+    pendingPortIncidents.delete(key);
+    sendCorrelatedPortReport(incident).catch(err => {
+      console.error(`[Port correlation] Failed for ${key}:`, err.message);
+    });
+  }, getPortCorrelationMs());
+
+  console.log(`[Port correlation] Queued ${incident.sns.size} ONU event(s) for ${key}.`);
+  return true;
+}
+
+export async function sendCorrelatedPortReport(incident) {
+  const { payload, onu, sns, oltStatusReason } = incident;
+  const targetChatId = payload.chat_id || DEFAULT_CHAT_ID;
+  const hostName = onu.olt_name || payload.host_name || payload.host || 'OLT Desconocida';
+  const onusOnPort = await findOnusByPort(onu.olt_id || null, onu.board, onu.port, hostName);
+  const offlineOnus = onusOnPort.filter(candidate => !isOnline(candidate));
+  const totalClients = onusOnPort.length;
+  const offlineCount = offlineOnus.length;
+  const percentage = totalClients ? ((offlineCount / totalClients) * 100).toFixed(1) : 'N/A';
+  const minOffline = getPositiveNumber(process.env.PORT_OUTAGE_MIN_OFFLINE, 3);
+  const minPercentage = getPositiveNumber(process.env.PORT_OUTAGE_MIN_PERCENT, 30);
+  const isPortOutage = offlineCount >= minOffline && Number(percentage) >= minPercentage;
+  const zabbixSns = [...sns].filter(Boolean);
+  const offlineDetail = offlineOnus.slice(0, 20)
+    .map(candidate => `• 🔴 ${candidate.name || 'Sin nombre'} (<code>${candidate.sn || 'N/A'}</code>)`)
+    .join('\n') || '• Smart OLT aún no reporta ONUs Offline.';
+  const title = isPortOutage
+    ? '🚨🔴 <b>POSIBLE CAÍDA DE PUERTO OLT CORROBORADA</b>'
+    : '⚠️ <b>INCIDENTE PARCIAL EN PUERTO OLT CORROBORADO</b>';
+
+  const report = `${title}\n\n` +
+    `<b>OLT:</b> ${hostName}\n` +
+    `<b>Puerto afectado:</b> Tarjeta ${onu.board} | PON ${onu.port}\n` +
+    `<b>Eventos detectados por Zabbix:</b> ${zabbixSns.length}\n` +
+    `<b>ONUs reportadas por Zabbix:</b> ${zabbixSns.map(sn => `<code>${sn}</code>`).join(', ') || 'N/A'}\n` +
+    `<b>Validación Smart OLT:</b> ${offlineCount}/${totalClients} ONUs Offline (${percentage}%)\n` +
+    (oltStatusReason ? `<b>Última causa OLT:</b> ${oltStatusReason}\n` : '') +
+    `📅 <b>Hora del evento:</b> <code>${extractEventTime(payload)}</code>\n\n` +
+    `<b>Detalle Smart OLT:</b>\n${offlineDetail}` +
+    (offlineCount > 20 ? `\n<i>…y ${offlineCount - 20} ONUs más.</i>` : '') +
+    `\n\n<i>Correlación Zabbix + Smart OLT completada en ${getPortCorrelationMs() / 1000}s.</i>`;
+
+  await sendMessage(targetChatId, report);
+  console.log(`[Port correlation] Sent report for ${hostName}, board ${onu.board}, port ${onu.port}. Offline: ${offlineCount}/${totalClients}.`);
+}
+
 /**
  * Helper to generate a detailed NAP connectivity report.
  * If no NAP box is found in the ONU details, falls back to a clean individual customer report.
@@ -425,7 +526,7 @@ ${clientLines.join('\n')}
 /**
  * Helper to process and send a Zabbix alert to Telegram (reusable for immediate & delayed alerts).
  */
-export async function processAndSendAlert(payload, prefetchedOnu = null, prefetchedOltStatusReason = '') {
+export async function processAndSendAlert(payload, prefetchedOnu = null, prefetchedOltStatusReason = '', options = {}) {
   const eventName = payload.event_name || payload.trigger_name || '';
   const triggerDesc = payload.trigger_description || '';
   const hostName = payload.host_name || payload.host || 'OLT Desconocida';
@@ -571,8 +672,10 @@ ${triggerDesc ? `\n<i>Descripción: ${triggerDesc}</i>` : ''}
 `;
   }
 
-  await sendMessage(targetChatId, enrichedText.trim());
-  return { sn, enriched: smartOltEnriched, sent: true };
+  if (!options.suppressSend) {
+    await sendMessage(targetChatId, enrichedText.trim());
+  }
+  return { sn, enriched: smartOltEnriched, sent: !options.suppressSend };
 }
 
 /**
@@ -636,9 +739,13 @@ async function processZabbixAlert(payload) {
         // Recovery arrived before the settle window expired → cancel the pending alert
         clearTimeout(pendingAlerts.get(cleanSn).timeoutId);
         pendingAlerts.delete(cleanSn);
+        cancelPendingPortIncidentForOnu(cleanSn);
         console.log(`[Recovery] SN ${cleanSn}: recovered before Smart OLT settle window — alert cancelled.`);
         return;
       }
+      // A recovery inside the port-correlation window removes this ONU from
+      // the pending consolidated report.
+      cancelPendingPortIncidentForOnu(cleanSn);
     }
     // No pending alert → settle window already passed, alert was already sent.
     // Process recovery immediately so the engineer knows service is restored.
@@ -723,11 +830,22 @@ async function processZabbixAlert(payload) {
       console.error(`[Settle] SN ${cleanSn}: Smart OLT query failed after settle — ${err.message}`);
     }
 
-    // ── Compare & send ───────────────────────────────────────────────────────
+    // ── Compare and either queue a port report or send an individual fallback ─
     try {
-      const result = await processAndSendAlert(payload, freshOnu, freshOltStatusReason);
+      const canCorrelatePort = PORT_CORRELATION_ENABLED && freshOnu && !isOnline(freshOnu) &&
+        freshOnu.board !== undefined && freshOnu.port !== undefined;
+      const result = await processAndSendAlert(
+        payload,
+        freshOnu,
+        freshOltStatusReason,
+        { suppressSend: canCorrelatePort }
+      );
       if (result.sent === false) {
-        console.log(`[Settle] Alert suppressed for SN ${cleanSn}: ${result.reason}`);
+        if (canCorrelatePort && result.enriched) {
+          queuePortIncident(payload, freshOnu, freshOltStatusReason);
+        } else {
+          console.log(`[Settle] Alert suppressed for SN ${cleanSn}: ${result.reason || 'No corroborated output'}`);
+        }
       } else {
         console.log(`[Settle] Alert sent for SN ${cleanSn} after Smart OLT corroboration.`);
       }

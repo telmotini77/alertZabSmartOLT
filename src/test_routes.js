@@ -1,4 +1,6 @@
 import express from 'express';
+import fs from 'fs';
+
 // We will mock globalThis.fetch to intercept Smart OLT and Telegram requests
 const originalFetch = globalThis.fetch;
 
@@ -276,6 +278,8 @@ process.env.NODE_ENV = 'test'; // Enforce test environment for faster de-bounce 
 process.env.SMARTOLT_SUBDOMAIN = 'testcompany';
 process.env.SMARTOLT_API_KEY = 'test_key';
 process.env.SMARTOLT_REQUIRE_CORROBORATION = 'true';
+process.env.PORT_CORRELATION_ENABLED = 'false';
+process.env.NAP_CACHE_FILE = 'data/.nap_cache.routes.test.json';
 process.env.TELEGRAM_BOT_TOKEN = '123456:test_token';
 process.env.TELEGRAM_CHAT_ID = '-100987654321';
 process.env.TELEGRAM_MODE = 'webhook'; // Webhook mode is easier to test as it disables the long poll loop
@@ -624,6 +628,9 @@ try {
   }
 
   console.log('\n🎉 ALL INTEGRATION TESTS PASSED SUCCESSFULLY! 🎉');
+  if (fs.existsSync(process.env.NAP_CACHE_FILE)) {
+    fs.unlinkSync(process.env.NAP_CACHE_FILE);
+  }
   process.exit(0);
 } catch (error) {
   console.error('❌ Test failed with error:', error);

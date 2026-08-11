@@ -11,8 +11,13 @@ const __dirname = path.dirname(__filename);
 let _saveTimer = null;
 const SAVE_DEBOUNCE_MS = 2_000; // batch rapid updates into a single disk write
 
-const cacheDir  = path.resolve(__dirname, '../../data');
-const cacheFile = path.join(cacheDir, 'nap_cache.json');
+const defaultCacheFile = path.resolve(__dirname, '../../data/nap_cache.json');
+// Tests and maintenance jobs can use an isolated cache without touching the
+// production map data.
+const cacheFile = process.env.NAP_CACHE_FILE
+  ? path.resolve(process.env.NAP_CACHE_FILE)
+  : defaultCacheFile;
+const cacheDir = path.dirname(cacheFile);
 
 // Memory cache
 let cachedNaps = [];
