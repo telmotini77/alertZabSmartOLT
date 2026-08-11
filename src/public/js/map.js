@@ -412,6 +412,12 @@ function setupWebSocket() {
         handleNapUpdate(payload.data);
       } else if (payload.event === 'status_history_event' && payload.data) {
         handleNewHistoryEvent(payload.data);
+      } else if (payload.event === 'status_history_deleted' && payload.data) {
+        handleDeletedHistoryEvent(payload.data.id);
+      } else if (payload.event === 'status_history_cleared' && payload.data) {
+        handleClearedHistoryEvent(payload.data.mode);
+      } else if (payload.event === 'status_history_updated' && payload.data) {
+        handleUpdatedHistoryEvent(payload.data);
       }
     } catch (err) {
       console.error('❌ Error parsing WebSocket message:', err);
@@ -1088,6 +1094,8 @@ function setupHistoryDrawer() {
     }
   });
 
+  const clearBtn = document.getElementById('btn-clear-history');
+
   if (closeBtn && drawer) {
     closeBtn.addEventListener('click', () => {
       drawer.classList.add('hidden');
@@ -1103,6 +1111,19 @@ function setupHistoryDrawer() {
           if (icon) icon.classList.remove('fa-spin');
         }, 600);
       });
+    });
+  }
+
+  if (clearBtn) {
+    clearBtn.addEventListener('click', () => {
+      const pendingCount = historyData.filter(i => !i.resolved).length;
+      const msg = pendingCount > 0
+        ? `¿Qué deseas borrar del historial?\n\n• Cancelar: No hacer nada\n• Aceptar: Se eliminarán los eventos del historial.`
+        : '¿Estás seguro de que deseas limpiar el historial de notificaciones?';
+      
+      if (confirm(msg)) {
+        clearHistoryNotifications('all');
+      }
     });
   }
 
@@ -1129,7 +1150,7 @@ function setupHistoryDrawer() {
 async function loadHistoryData() {
   const historyList = document.getElementById('history-list');
   try {
-    const res = await fetch('/webhook/history?limit=150');
+    const res = await fetch('/webhook/history?limit=500');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     historyData = data.history || [];
@@ -1149,7 +1170,15 @@ async function loadHistoryData() {
 function updateHistoryBadge() {
   const badge = document.getElementById('history-badge');
   if (badge) {
-    badge.textContent = historyData.length;
+    const pendingCount = historyData.filter(i => !i.resolved).length;
+    badge.textContent = pendingCount > 0 ? pendingCount : historyData.length;
+    if (pendingCount > 0) {
+      badge.style.background = '#EF4444';
+      badge.style.color = '#FFFFFF';
+    } else {
+      badge.style.background = 'var(--accent-color)';
+      badge.style.color = 'var(--bg-primary)';
+    }
   }
 }
 
@@ -1157,8 +1186,18 @@ function updateHistoryBadge() {
  * Handle a real-time incoming status history event from WebSocket.
  */
 function handleNewHistoryEvent(newEvent) {
+  // If recovery event, mark matching previous items as resolved
+  if (newEvent.failureType === 'recovery' && newEvent.sn) {
+    const targetSn = newEvent.sn.toUpperCase();
+    historyData.forEach(item => {
+      if (item.sn && item.sn.toUpperCase() === targetSn) {
+        item.resolved = true;
+      }
+    });
+  }
+
   historyData.unshift(newEvent);
-  if (historyData.length > 250) historyData.pop();
+  if (historyData.length > 5000) historyData.pop();
   
   updateHistoryBadge();
   renderHistoryList();
@@ -1175,6 +1214,97 @@ function handleNewHistoryEvent(newEvent) {
 }
 
 /**
+ * Handle single history item deleted via WebSocket.
+ */
+function handleDeletedHistoryEvent(id) {
+  historyData = historyData.filter(item => item.id !== id);
+  updateHistoryBadge();
+  renderHistoryList();
+}
+
+/**
+ * Handle cleared history via WebSocket.
+ */
+function handleClearedHistoryEvent(mode) {
+  if (mode === 'resolved') {
+    historyData = historyData.filter(item => !item.resolved);
+  } else {
+    historyData = [];
+  }
+  updateHistoryBadge();
+  renderHistoryList();
+}
+
+/**
+ * Handle updated/resolved history item via WebSocket.
+ */
+function handleUpdatedHistoryEvent(updated) {
+  const index = historyData.findIndex(item => item.id === updated.id);
+  if (index !== -1) {
+    historyData[index] = updated;
+    updateHistoryBadge();
+    renderHistoryList();
+  }
+}
+
+/**
+ * Delete a specific notification from history via API.
+ */
+async function deleteHistoryNotification(id) {
+  try {
+    const res = await fetch(`/webhook/history/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    historyData = historyData.filter(i => i.id !== id);
+    updateHistoryBadge();
+    renderHistoryList();
+  } catch (err) {
+    console.error('Error deleting history notification:', err);
+    alert('No se pudo eliminar la notificación: ' + err.message);
+  }
+}
+
+/**
+ * Mark a notification as resolved/solved via API.
+ */
+async function resolveHistoryNotification(id) {
+  try {
+    const res = await fetch(`/webhook/history/${encodeURIComponent(id)}/resolve`, { method: 'PATCH' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const item = historyData.find(i => i.id === id);
+    if (item) {
+      item.resolved = true;
+      item.resolvedAt = new Date().toISOString();
+      updateHistoryBadge();
+      renderHistoryList();
+    }
+  } catch (err) {
+    console.error('Error resolving history notification:', err);
+    alert('No se pudo marcar como solucionado: ' + err.message);
+  }
+}
+
+/**
+ * Clear history notifications via API.
+ */
+async function clearHistoryNotifications(mode = 'all') {
+  try {
+    const res = await fetch(`/webhook/history?mode=${encodeURIComponent(mode)}`, { method: 'DELETE' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (mode === 'resolved') {
+      historyData = historyData.filter(i => !i.resolved);
+    } else {
+      historyData = [];
+    }
+    updateHistoryBadge();
+    renderHistoryList();
+  } catch (err) {
+    console.error('Error clearing history:', err);
+    alert('No se pudo limpiar el historial: ' + err.message);
+  }
+}
+
+/**
  * Render the history timeline cards inside the Drawer.
  */
 function renderHistoryList() {
@@ -1182,8 +1312,12 @@ function renderHistoryList() {
   if (!listContainer) return;
 
   const filtered = historyData.filter(item => {
-    // 1. Filter by category chip
-    if (activeHistoryFilter !== 'all') {
+    // 1. Filter by category / resolution chip
+    if (activeHistoryFilter === 'pending') {
+      if (item.resolved) return false;
+    } else if (activeHistoryFilter === 'resolved') {
+      if (!item.resolved) return false;
+    } else if (activeHistoryFilter !== 'all') {
       if (item.failureType !== activeHistoryFilter) return false;
     }
 
@@ -1200,7 +1334,7 @@ function renderHistoryList() {
   });
 
   if (filtered.length === 0) {
-    listContainer.innerHTML = '<li class="no-results">No hay eventos que coincidan con los filtros.</li>';
+    listContainer.innerHTML = '<li class="no-results">No hay eventos en el historial con este filtro.</li>';
     return;
   }
 
@@ -1219,15 +1353,19 @@ function renderHistoryList() {
     }
 
     const timeAgo = formatTimeAgo(new Date(item.timestamp));
+    const isResolved = Boolean(item.resolved);
 
     li.innerHTML = `
       <div class="history-item-top">
         <span class="history-type-badge ${item.failureType}">
           ${iconHtml} ${item.failureLabel}
         </span>
-        <span class="history-timestamp" title="${item.formattedTime}">
-          <i class="fa-regular fa-clock"></i> ${timeAgo}
-        </span>
+        <div style="display: flex; align-items: center; gap: 8px;">
+          ${isResolved ? '<span class="history-resolved-tag"><i class="fa-solid fa-circle-check"></i> Solucionado</span>' : '<span class="history-pending-tag"><i class="fa-solid fa-bell"></i> Activo</span>'}
+          <span class="history-timestamp" title="${item.formattedTime}">
+            <i class="fa-regular fa-clock"></i> ${timeAgo}
+          </span>
+        </div>
       </div>
       <div class="history-main-info">
         <div class="history-nap-row">
@@ -1235,11 +1373,6 @@ function renderHistoryList() {
             <i class="fa-solid fa-box-archive"></i>
             ${item.napName}
           </span>
-          ${(item.latitude !== null && item.longitude !== null) ? `
-            <button class="btn-locate-history" data-nap="${item.napName}" data-lat="${item.latitude}" data-lng="${item.longitude}">
-              <i class="fa-solid fa-location-dot"></i> Ver en mapa
-            </button>
-          ` : ''}
         </div>
         <div class="history-client-tag">
           👤 <b>${item.onuName}</b> (<code>${item.sn}</code>)
@@ -1249,6 +1382,23 @@ function renderHistoryList() {
         </div>
         ${item.reason ? `<div class="history-reason-text">📝 ${item.reason}</div>` : ''}
       </div>
+      <div class="history-card-actions">
+        <div class="history-card-btns">
+          ${(item.latitude !== null && item.longitude !== null) ? `
+            <button class="btn-locate-history" data-nap="${item.napName}" data-lat="${item.latitude}" data-lng="${item.longitude}" title="Centrar en el mapa">
+              <i class="fa-solid fa-location-dot"></i> Ver en mapa
+            </button>
+          ` : ''}
+          ${!isResolved ? `
+            <button class="btn-resolve-history" data-id="${item.id}" title="Marcar como solucionado">
+              <i class="fa-solid fa-check"></i> Solucionar
+            </button>
+          ` : ''}
+        </div>
+        <button class="btn-delete-history" data-id="${item.id}" title="Borrar notificación del historial">
+          <i class="fa-solid fa-trash-can"></i> Borrar
+        </button>
+      </div>
     `;
 
     const locateBtn = li.querySelector('.btn-locate-history');
@@ -1256,6 +1406,22 @@ function renderHistoryList() {
       locateBtn.addEventListener('click', (e) => {
         e.stopPropagation();
         focusNapOnMap(item.napName, item.latitude, item.longitude);
+      });
+    }
+
+    const resolveBtn = li.querySelector('.btn-resolve-history');
+    if (resolveBtn) {
+      resolveBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        resolveHistoryNotification(item.id);
+      });
+    }
+
+    const deleteBtn = li.querySelector('.btn-delete-history');
+    if (deleteBtn) {
+      deleteBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        deleteHistoryNotification(item.id);
       });
     }
 

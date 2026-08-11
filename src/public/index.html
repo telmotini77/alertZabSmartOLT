@@ -113,6 +113,9 @@
             </div>
           </div>
           <div class="history-header-actions">
+            <button id="btn-clear-history" class="btn-icon" title="Limpiar / Borrar historial">
+              <i class="fa-solid fa-trash-can"></i>
+            </button>
             <button id="btn-refresh-history" class="btn-icon" title="Refrescar historial">
               <i class="fa-solid fa-arrows-rotate"></i>
             </button>
@@ -123,9 +126,10 @@
         <!-- History Quick Filter Chips -->
         <div class="history-filters">
           <button class="filter-chip active" data-filter="all">Todos</button>
+          <button class="filter-chip pending" data-filter="pending"><i class="fa-solid fa-bell"></i> Pendientes</button>
+          <button class="filter-chip resolved" data-filter="resolved"><i class="fa-solid fa-circle-check"></i> Solucionados</button>
           <button class="filter-chip power" data-filter="power_fail"><i class="fa-solid fa-bolt"></i> Energía</button>
           <button class="filter-chip loss" data-filter="loss"><i class="fa-solid fa-triangle-exclamation"></i> Señal (LOS)</button>
-          <button class="filter-chip recovery" data-filter="recovery"><i class="fa-solid fa-circle-check"></i> Restablecidos</button>
         </div>
 
         <!-- History Search Input -->

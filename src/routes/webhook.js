@@ -6,7 +6,7 @@ import { findOnuBySn, findOnusByAddressQuery, findOnusByPort, getOnuStatus } fro
 import { sendMessage, replyToMessage } from '../services/telegram.js';
 import { extractSerialNumber, extractNapBox, parseStatusInfo, extractEventTime, formatDateTime, extractBoardAndPort } from '../utils/parser.js';
 import { broadcast } from '../services/websocket.js';
-import { updateOnuStatusInCache, getCachedNaps, updateNapCoordinates, updateNapCoordinatesBulk, getStatusHistory } from '../services/cache.js';
+import { updateOnuStatusInCache, getCachedNaps, updateNapCoordinates, updateNapCoordinatesBulk, getStatusHistory, deleteHistoryItem, clearHistory, resolveHistoryItem } from '../services/cache.js';
 import { getActiveTriggers } from '../services/zabbix.js';
 
 const router = express.Router();
@@ -30,22 +30,51 @@ router.get('/naps', (req, res) => {
 
 // GET /webhook/history - Returns state change history events
 router.get('/history', (req, res) => {
-  const limit = parseInt(req.query.limit, 10) || 100;
+  const limit = parseInt(req.query.limit, 10) || 500;
+  const filter = req.query.filter || 'all';
   res.json({
     status: 'success',
-    total: getStatusHistory().length,
-    history: getStatusHistory(limit)
+    total: getStatusHistory(5000, filter).length,
+    history: getStatusHistory(limit, filter)
   });
 });
 
 // GET /webhook/status-history - Alias for history
 router.get('/status-history', (req, res) => {
-  const limit = parseInt(req.query.limit, 10) || 100;
+  const limit = parseInt(req.query.limit, 10) || 500;
+  const filter = req.query.filter || 'all';
   res.json({
     status: 'success',
-    total: getStatusHistory().length,
-    history: getStatusHistory(limit)
+    total: getStatusHistory(5000, filter).length,
+    history: getStatusHistory(limit, filter)
   });
+});
+
+// DELETE /webhook/history/:id - Delete a specific notification from history
+router.delete('/history/:id', (req, res) => {
+  const deleted = deleteHistoryItem(req.params.id);
+  if (deleted) {
+    res.json({ status: 'success', message: 'Notification deleted', item: deleted });
+  } else {
+    res.status(404).json({ error: 'Notification not found' });
+  }
+});
+
+// DELETE /webhook/history - Clear all or resolved notifications
+router.delete('/history', (req, res) => {
+  const mode = req.query.mode || 'all'; // 'all' or 'resolved'
+  const remaining = clearHistory(mode);
+  res.json({ status: 'success', message: `History cleared (${mode})`, remainingCount: remaining.length });
+});
+
+// PATCH /webhook/history/:id/resolve - Mark notification as solved/resolved
+router.patch('/history/:id/resolve', (req, res) => {
+  const updated = resolveHistoryItem(req.params.id);
+  if (updated) {
+    res.json({ status: 'success', message: 'Notification marked as resolved', item: updated });
+  } else {
+    res.status(404).json({ error: 'Notification not found' });
+  }
 });
 
 // POST /webhook/naps/coordinates/bulk - Updates coordinates of multiple NAP boxes in bulk

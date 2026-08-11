@@ -30,7 +30,7 @@ const cacheDir = path.dirname(cacheFile);
 // Memory cache
 let cachedNaps = [];
 let statusHistory = [];
-const MAX_HISTORY_ITEMS = 250;
+const MAX_HISTORY_ITEMS = 5000;
 
 /**
  * Initialize cache by loading from file or running a full sync.
@@ -300,6 +300,20 @@ export function recordStatusChangeEvent(data) {
   const seconds = String(now.getSeconds()).padStart(2, '0');
   const formattedTime = `${day}/${month}/${year} ${hours}:${minutes}:${seconds}`;
 
+  const resolved = isOnline;
+  const resolvedAt = isOnline ? now.toISOString() : null;
+
+  // If this is a recovery, auto-resolve previous active problem incidents for this SN
+  if (isOnline && data.sn) {
+    const targetSn = data.sn.toUpperCase();
+    statusHistory.forEach(item => {
+      if (item.sn && item.sn.toUpperCase() === targetSn && !item.resolved) {
+        item.resolved = true;
+        item.resolvedAt = now.toISOString();
+      }
+    });
+  }
+
   const eventRecord = {
     id: `evt_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
     timestamp: now.toISOString(),
@@ -314,6 +328,8 @@ export function recordStatusChangeEvent(data) {
     failureType,
     failureLabel,
     reason: data.reason || failureLabel,
+    resolved,
+    resolvedAt,
     oltName: data.oltName || 'OLT',
     board: data.board || '0',
     port: data.port || '0',
@@ -324,7 +340,7 @@ export function recordStatusChangeEvent(data) {
   // Prepend to history array
   statusHistory.unshift(eventRecord);
 
-  // Keep array within bounds
+  // Keep array within bounds (retains up to 5000 records indefinitely)
   if (statusHistory.length > MAX_HISTORY_ITEMS) {
     statusHistory = statusHistory.slice(0, MAX_HISTORY_ITEMS);
   }
@@ -339,16 +355,78 @@ export function recordStatusChangeEvent(data) {
     console.error('Error broadcasting status history event:', err.message);
   }
 
-  console.log(`📋 [History] Recorded: ${failureLabel} | NAP: ${eventRecord.napName} | Client: ${eventRecord.onuName} (${eventRecord.sn})`);
+  console.log(`📋 [History] Recorded: ${failureLabel} | NAP: ${eventRecord.napName} | Client: ${eventRecord.onuName} (${eventRecord.sn}) | Resolved: ${resolved}`);
   return eventRecord;
 }
 
 /**
  * Get the state change history list.
  * @param {number} [limit=100] - Number of items to return
+ * @param {string} [filter] - 'all', 'pending', 'resolved'
  */
-export function getStatusHistory(limit = 100) {
-  return statusHistory.slice(0, limit);
+export function getStatusHistory(limit = 100, filter = 'all') {
+  let list = statusHistory;
+  if (filter === 'pending') {
+    list = list.filter(item => !item.resolved);
+  } else if (filter === 'resolved') {
+    list = list.filter(item => item.resolved);
+  }
+  return list.slice(0, limit);
+}
+
+/**
+ * Delete a specific history item by ID.
+ */
+export function deleteHistoryItem(id) {
+  const index = statusHistory.findIndex(item => item.id === id);
+  if (index !== -1) {
+    const deleted = statusHistory.splice(index, 1)[0];
+    saveHistoryToDisk();
+    try {
+      broadcast('status_history_deleted', { id });
+    } catch (err) {
+      console.error('Error broadcasting history deletion:', err.message);
+    }
+    return deleted;
+  }
+  return null;
+}
+
+/**
+ * Clear history items (all, or only resolved).
+ */
+export function clearHistory(mode = 'all') {
+  if (mode === 'resolved') {
+    statusHistory = statusHistory.filter(item => !item.resolved);
+  } else {
+    statusHistory = [];
+  }
+  saveHistoryToDisk();
+  try {
+    broadcast('status_history_cleared', { mode });
+  } catch (err) {
+    console.error('Error broadcasting history clear:', err.message);
+  }
+  return statusHistory;
+}
+
+/**
+ * Manually mark a specific history item as resolved.
+ */
+export function resolveHistoryItem(id) {
+  const item = statusHistory.find(i => i.id === id);
+  if (item) {
+    item.resolved = true;
+    item.resolvedAt = new Date().toISOString();
+    saveHistoryToDisk();
+    try {
+      broadcast('status_history_updated', item);
+    } catch (err) {
+      console.error('Error broadcasting history update:', err.message);
+    }
+    return item;
+  }
+  return null;
 }
 
 function saveHistoryToDisk() {

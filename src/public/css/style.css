@@ -1174,6 +1174,18 @@ body {
   font-weight: 700;
 }
 
+.filter-chip.pending.active {
+  background: #EF4444;
+  border-color: #EF4444;
+  color: #FFFFFF;
+}
+
+.filter-chip.resolved.active {
+  background: #10B981;
+  border-color: #10B981;
+  color: #0F172A;
+}
+
 .filter-chip.power.active {
   background: #F59E0B;
   border-color: #F59E0B;
@@ -1453,5 +1465,89 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+
+/* History Card Actions */
+.history-card-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.history-card-btns {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btn-resolve-history {
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  color: #34D399;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 5px;
+  padding: 2px 7px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.btn-resolve-history:hover {
+  background: #10B981;
+  color: #0F172A;
+}
+
+.btn-delete-history {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  color: #F87171;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  border-radius: 5px;
+  padding: 2px 7px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.btn-delete-history:hover {
+  background: #EF4444;
+  color: #FFFFFF;
+}
+
+.history-resolved-tag {
+  font-size: 10px;
+  font-weight: 700;
+  color: #34D399;
+  background: rgba(16, 185, 129, 0.1);
+  border: 1px solid rgba(16, 185, 129, 0.2);
+  border-radius: 4px;
+  padding: 1px 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.history-pending-tag {
+  font-size: 10px;
+  font-weight: 700;
+  color: #F87171;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: 4px;
+  padding: 1px 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
