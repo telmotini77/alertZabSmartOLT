@@ -2,7 +2,7 @@ import express from 'express';
 import dotenv from 'dotenv';
 import http from 'http';
 import webhookRoutes, { handleTelegramMessage } from './routes/webhook.js';
-import { getUpdates, setWebhook, getWebhookInfo } from './services/telegram.js';
+import { getUpdates, setWebhook, getWebhookInfo, deleteWebhook } from './services/telegram.js';
 import { initWebSocketServer } from './services/websocket.js';
 import { initCache } from './services/cache.js';
 import { startScanner } from './services/scanner.js';
@@ -134,9 +134,23 @@ async function setupTelegramWebhook() {
 /**
  * Run Telegram Bot Updates using Long Polling.
  * (Used only when TELEGRAM_MODE=polling)
+ * Auto-removes any previously registered webhook before starting.
  */
 async function startTelegramPolling() {
   console.log('🤖 Starting Telegram Bot long-polling loop...');
+
+  // Remove any active webhook so polling can work without conflicts
+  try {
+    const webhookInfo = await getWebhookInfo();
+    if (webhookInfo && webhookInfo.url) {
+      console.log(`⚠️  Active webhook detected (${webhookInfo.url}). Removing it to enable polling...`);
+      await deleteWebhook();
+      console.log('✅ Webhook removed successfully. Polling is now active.');
+    }
+  } catch (err) {
+    console.warn(`⚠️  Could not check/remove existing webhook: ${err.message}`);
+  }
+
   let offset = 0;
 
   const poll = async () => {

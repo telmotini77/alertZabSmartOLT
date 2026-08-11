@@ -28,6 +28,26 @@ router.get('/naps', (req, res) => {
   res.json(getCachedNaps());
 });
 
+// GET /webhook/test-telegram - Send a test message to verify Telegram connectivity
+router.get('/test-telegram', async (req, res) => {
+  const chatId = req.query.chat_id || DEFAULT_CHAT_ID;
+  if (!chatId) {
+    return res.status(400).json({ error: 'TELEGRAM_CHAT_ID not configured and no chat_id query param provided.' });
+  }
+  try {
+    const result = await sendMessage(chatId,
+      `✅ <b>Prueba de Conectividad Telegram</b>\n\n` +
+      `🤖 El bot está activo y puede enviar mensajes correctamente.\n` +
+      `📅 Hora: <code>${new Date().toLocaleString('es-EC', { timeZone: 'America/Guayaquil' })}</code>\n` +
+      `💬 Chat ID: <code>${chatId}</code>\n` +
+      `🌐 Servidor: <code>${process.env.PUBLIC_URL || 'local'}</code>`
+    );
+    return res.json({ status: 'ok', message: 'Test message sent to Telegram successfully', chat_id: chatId, result });
+  } catch (err) {
+    return res.status(500).json({ status: 'error', message: err.message, chat_id: chatId });
+  }
+});
+
 // GET /webhook/history - Returns state change history events
 router.get('/history', (req, res) => {
   const limit = parseInt(req.query.limit, 10) || 500;
