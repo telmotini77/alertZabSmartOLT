@@ -421,50 +421,65 @@ async function generateNapReport(onu, eventStatus, severity, hostName, eventName
     techExplanation = `\n💡 <b>Diagnóstico Técnico:</b> Interrupción de comunicación detectada entre la OLT y la ONU.`;
   }
 
-  if (!napBox) {
-    // Individual customer report without NAP
-    return `
-${priorityTitle}
-
-📦 <b>Caja NAP:</b> <i>No identificada en el sistema</i>
-👤 <b>Cliente:</b> <b>${onu.name}</b>
-🔢 <b>Nro. de Serie (SN):</b> <code>${onu.sn}</code>
-🏠 <b>Dirección:</b> ${onu.address || 'No especificada'}
-🏢 <b>OLT:</b> ${onu.olt_name || hostName} | <b>Puerto PON:</b> Slot ${onu.board || 'N/A'} / Puerto ${onu.port || 'N/A'} | <b>ONU ID:</b> ${onu.onu_id || 'N/A'}
-
-⚡ <b>Detalle del Incidente:</b>
-• <b>Estado:</b> ${statusEmoji} <b>${statusLabel}</b> (${severity})
-${eventTime ? `• 📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : ''}${oltStatusReason ? `• 🔌 <b>Causa Reportada OLT:</b> <code>${oltStatusReason}</code>\n` : ''}${techExplanation}
-
-ℹ️ <i>Evento Zabbix: ${eventName}</i>
-`.trim();
-  }
-
   // Query other ONUs on this NAP (prefer local memory cache if available)
   let onusOnNap = [];
-  try {
-    if (cachedNap && cachedNap.clients && cachedNap.clients.length > 0) {
-      onusOnNap = cachedNap.clients;
-    } else {
-      onusOnNap = await findOnusByAddressQuery(napBox);
+  if (napBox) {
+    try {
+      if (cachedNap && cachedNap.clients && cachedNap.clients.length > 0) {
+        onusOnNap = cachedNap.clients;
+      } else {
+        onusOnNap = await findOnusByAddressQuery(napBox);
+      }
+    } catch (err) {
+      console.error(`[Smart OLT error querying NAP ONUs]:`, err.message);
     }
-  } catch (err) {
-    console.error(`[Smart OLT error querying NAP ONUs]:`, err.message);
   }
 
-  if (!onusOnNap || onusOnNap.length === 0) {
-    return `
-${priorityTitle}
+  if (!napBox || !onusOnNap || onusOnNap.length === 0) {
+    let singleEmoji = statusEmoji;
+    let singleLabel = statusLabel;
+    let singleTitle = priorityTitle;
+    let singleReason = oltStatusReason;
+    let singleTechExplanation = techExplanation;
 
-📦 <b>Caja NAP:</b> ${napLink}${coordsText}
+    if (eventStatus === 'OK') {
+      singleEmoji = '🟢';
+      singleLabel = 'OK (Restablecido)';
+      singleTitle = '🟢 <b>SERVICIO RESTABLECIDO</b>';
+      singleTechExplanation = '\n💡 <b>Diagnóstico:</b> El enlace óptico y la alimentación eléctrica se encuentran estables. La ONU volvió a registrarse exitosamente en la OLT.';
+    } else {
+      const isExplicitLoss = reasonLower.includes('los') || reasonLower.includes('signal') || reasonLower.includes('fibra');
+      if (isExplicitLoss) {
+        singleEmoji = '🔴';
+        singleLabel = 'Pérdida de Señal (Loss of Signal)';
+        singleTitle = '🚨🔴 <b>ALERTA CRÍTICA: PÉRDIDA DE SEÑAL</b>';
+        singleTechExplanation = '\n💡 <b>Diagnóstico Técnico:</b> Pérdida de potencia óptica (LOS). La ONU no recibe luz de la OLT.\n• <b>Causas probables:</b> Corte de acometida, rotura de fibra en troncal o conector desconectado.';
+      } else {
+        // Individual ONU not detected -> Power Fail
+        singleEmoji = '🔌';
+        singleLabel = 'Corte de Energía (Power Fail)';
+        singleTitle = '⚡🔌 <b>ALERTA: CORTE DE ENERGÍA</b>';
+        singleReason = (oltStatusReason && !oltStatusReason.toLowerCase().includes('los') && !oltStatusReason.toLowerCase().includes('signal'))
+          ? oltStatusReason
+          : 'Corte de Energía (Dying Gasp / ONU no detectada)';
+        singleTechExplanation = '\n💡 <b>Diagnóstico Técnico:</b> Falla de alimentación eléctrica (Power Fail). La ONU no responde por falta de suministro eléctrico.\n• <b>Causas probables:</b> Corte de luz en el domicilio, transformador desconectado o ONU apagada.';
+      }
+    }
+
+    const boxLabel = napBox ? napLink + coordsText : '<i>No identificada en el sistema</i>';
+
+    return `
+${singleTitle}
+
+📦 <b>Caja NAP:</b> ${boxLabel}
 👤 <b>Cliente:</b> <b>${onu.name}</b>
 🔢 <b>Nro. de Serie (SN):</b> <code>${onu.sn}</code>
 🏠 <b>Dirección:</b> ${onu.address || 'No especificada'}
 🏢 <b>OLT:</b> ${onu.olt_name || hostName} | <b>Puerto PON:</b> Slot ${onu.board || 'N/A'} / Puerto ${onu.port || 'N/A'} | <b>ONU ID:</b> ${onu.onu_id || 'N/A'}
 
 ⚡ <b>Detalle del Incidente:</b>
-• <b>Estado:</b> ${statusEmoji} <b>${statusLabel}</b> (${severity})
-${eventTime ? `• 📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : ''}${oltStatusReason ? `• 🔌 <b>Causa Reportada OLT:</b> <code>${oltStatusReason}</code>\n` : ''}${techExplanation}
+• <b>Estado:</b> ${singleEmoji} <b>${singleLabel}</b> (${severity})
+${eventTime ? `• 📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : ''}${singleReason ? `• 🔌 <b>Causa Reportada OLT:</b> <code>${singleReason}</code>\n` : ''}${singleTechExplanation}
 
 ℹ️ <i>Evento Zabbix: ${eventName}</i>
 `.trim();
@@ -480,6 +495,47 @@ ${eventTime ? `• 📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : '
   const totalOffline = offlineOnus.length;
   const totalOnline = totalClients - totalOffline;
   const percentageDown = ((totalOffline / totalClients) * 100).toFixed(1);
+
+  // Business Rules:
+  // - If the NAP loses signal (all clients down or totalOnline === 0 in multi-client NAP) -> Loss of Signal
+  // - If only an individual ONU in the NAP is not detected (totalOnline > 0) -> Power Fail
+  const isNapTotalLoss = (totalClients > 1 && totalOffline === totalClients) || (totalClients > 1 && totalOnline === 0);
+  const isNapPartialLoss = totalOffline > 1 && totalOnline > 0;
+  const isIndividualIncident = totalOffline <= 1 || totalOnline > 0;
+
+  let effectiveEmoji = statusEmoji;
+  let effectiveStatusLabel = statusLabel;
+  let effectiveTitle = priorityTitle;
+  let effectiveTechExplanation = '';
+  let effectiveReason = oltStatusReason;
+
+  if (eventStatus === 'OK') {
+    effectiveEmoji = '🟢';
+    effectiveStatusLabel = 'OK (Restablecido)';
+    effectiveTitle = '🟢 <b>SERVICIO RESTABLECIDO</b>';
+    effectiveTechExplanation = '\n💡 <b>Diagnóstico:</b> El enlace óptico y la alimentación eléctrica se encuentran estables. La ONU volvió a registrarse exitosamente en la OLT.';
+  } else if (isNapTotalLoss) {
+    effectiveEmoji = '🔴';
+    effectiveStatusLabel = 'Pérdida de Señal (Loss of Signal)';
+    effectiveTitle = '🚨🔴 <b>ALERTA CRÍTICA: PÉRDIDA DE SEÑAL EN NAP</b>';
+    effectiveReason = oltStatusReason || 'Pérdida de Potencia Óptica (LOS)';
+    effectiveTechExplanation = '\n💡 <b>Diagnóstico Técnico:</b> Pérdida total de potencia óptica (LOS). La caja NAP completa no recibe luz de la OLT.\n• <b>Causas probables:</b> Rotura de fibra troncal, corte de acometida general o daño físico en la caja NAP.';
+  } else if (isNapPartialLoss) {
+    effectiveEmoji = '⚠️';
+    effectiveStatusLabel = 'Pérdida Parcial de Señal en NAP';
+    effectiveTitle = '⚠️ <b>ALERTA: CAÍDA PARCIAL EN CAJA NAP</b>';
+    effectiveReason = oltStatusReason || 'Caída múltiple de clientes en NAP';
+    effectiveTechExplanation = '\n💡 <b>Diagnóstico Técnico:</b> Varios clientes en la misma caja NAP están sin señal. Posible problema en splitter o acometidas compartidas.';
+  } else {
+    // Individual undetected ONU on a working NAP with other online clients -> Power Fail
+    effectiveEmoji = '🔌';
+    effectiveStatusLabel = 'Corte de Energía (Power Fail)';
+    effectiveTitle = '⚡🔌 <b>ALERTA: CORTE DE ENERGÍA</b>';
+    effectiveReason = (oltStatusReason && !oltStatusReason.toLowerCase().includes('los') && !oltStatusReason.toLowerCase().includes('signal'))
+      ? oltStatusReason
+      : 'Corte de Energía (Dying Gasp / ONU no detectada)';
+    effectiveTechExplanation = '\n💡 <b>Diagnóstico Técnico:</b> Falla de alimentación eléctrica (Power Fail). La caja NAP mantiene señal óptica normal en los demás clientes.\n• <b>Causas probables:</b> Corte de luz en el domicilio/sector, transformador desconectado o ONU apagada.';
+  }
 
   // Filter only affected / failing ONUs
   let affectedOnus = onusOnNap.filter(o => {
@@ -498,10 +554,8 @@ ${eventTime ? `• 📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : '
     const isThisOne = (o.sn || '').toUpperCase() === (onu.sn || '').toUpperCase();
     const isOnlineClient = (o.status || '').toLowerCase() === 'online' || (o.status || '').toLowerCase() === 'active';
     const statusDot = (eventStatus === 'OK' && isThisOne) ? '🟢' : (isOnlineClient ? '🟢' : '🔴');
-    const nameLabel = isThisOne ? `<b>${o.name} [AFECTADO]</b>` : o.name;
-    const snLabel = `<code>${o.sn}</code>`;
-    const statusLabelText = (isThisOne && oltStatusReason) ? oltStatusReason : (o.status || (isOnlineClient ? 'Online' : 'Offline'));
-    return `  ${statusDot} ${nameLabel} (${snLabel}) - <i>${statusLabelText}</i>`;
+    const nameLabel = o.name;
+    return `  ${statusDot} ${nameLabel}`;
   });
 
   const clientSectionTitle = affectedOnus.length > 1
@@ -519,7 +573,7 @@ ${eventTime ? `• 📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : '
       : 'ℹ️ <b>Incidente Individual</b> (Solo 1 cliente afectado; los demás clientes de la NAP tienen señal normal)';
 
   let lastActiveNapInfo = '';
-  if (eventStatus !== 'OK' && isLoss) {
+  if (eventStatus !== 'OK' && isNapTotalLoss) {
     try {
       const onusOnPort = await findOnusByPort(onu.olt_id, onu.board, onu.port, onu.olt_name || hostName);
       if (onusOnPort && onusOnPort.length > 0) {
@@ -558,7 +612,7 @@ ${eventTime ? `• 📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : '
   }
 
   return `
-${priorityTitle}
+${effectiveTitle}
 
 📦 <b>Caja NAP:</b> ${napLink}${coordsText}
 👤 <b>Cliente:</b> <b>${onu.name}</b>
@@ -567,8 +621,8 @@ ${priorityTitle}
 🏢 <b>OLT:</b> ${onu.olt_name || hostName} | <b>Puerto PON:</b> Slot ${onu.board || 'N/A'} / Puerto ${onu.port || 'N/A'} | <b>ONU ID:</b> ${onu.onu_id || 'N/A'}
 
 ⚡ <b>Detalle del Incidente:</b>
-• <b>Estado:</b> ${statusEmoji} <b>${statusLabel}</b> (${severity})
-${eventTime ? `• 📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : ''}${oltStatusReason ? `• 🔌 <b>Causa Reportada OLT:</b> <code>${oltStatusReason}</code>\n` : ''}${techExplanation}
+• <b>Estado:</b> ${effectiveEmoji} <b>${effectiveStatusLabel}</b> (${severity})
+${eventTime ? `• 📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : ''}${effectiveReason ? `• 🔌 <b>Causa Reportada OLT:</b> <code>${effectiveReason}</code>\n` : ''}${effectiveTechExplanation}
 
 📊 <b>Estado de la Caja NAP (${napBox}):</b>
 • Total Clientes en esta NAP: <b>${totalClients}</b>
