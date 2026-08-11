@@ -966,10 +966,10 @@ body {
    ========================================================================== */
 
 .map-top-controls {
-  position: absolute;
+  position: fixed;
   top: 16px;
   right: 60px;
-  z-index: 1200;
+  z-index: 9999;
   display: flex;
   gap: 10px;
   touch-action: none;

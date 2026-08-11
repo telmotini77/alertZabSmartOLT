@@ -990,72 +990,85 @@ function setupHistoryDrawer() {
     if (savedPos) {
       try {
         const { left, top } = JSON.parse(savedPos);
-        const maxLeft = Math.max(10, window.innerWidth - (controlsContainer.offsetWidth || 220) - 10);
-        const maxTop = Math.max(10, window.innerHeight - (controlsContainer.offsetHeight || 50) - 10);
-        const clampLeft = Math.max(10, Math.min(left, maxLeft));
-        const clampTop = Math.max(10, Math.min(top, maxTop));
-        
+        const btnWidth = controlsContainer.offsetWidth || 220;
+        const btnHeight = controlsContainer.offsetHeight || 45;
+        const maxLeft = Math.max(0, window.innerWidth - btnWidth);
+        const maxTop = Math.max(0, window.innerHeight - btnHeight);
+        const clampLeft = Math.max(0, Math.min(left, maxLeft));
+        const clampTop = Math.max(0, Math.min(top, maxTop));
+
         controlsContainer.style.position = 'fixed';
         controlsContainer.style.left = `${clampLeft}px`;
         controlsContainer.style.top = `${clampTop}px`;
         controlsContainer.style.right = 'auto';
+        controlsContainer.style.bottom = 'auto';
       } catch (e) {
         console.warn('Error restoring history button position:', e);
       }
     }
   }
 
-  // Draggable Floating Logic
-  let isDragging = false;
-  let hasMoved = false;
-  let startX = 0, startY = 0;
-  let initialLeft = 0, initialTop = 0;
-
+  // Draggable Floating Logic across any part of the screen
   if (toggleBtn && controlsContainer) {
-    toggleBtn.addEventListener('pointerdown', (e) => {
+    let isDragging = false;
+    let hasMoved = false;
+    let shiftX = 0;
+    let shiftY = 0;
+
+    const onPointerDown = (e) => {
+      // Allow only primary mouse button or touch/stylus
       if (e.button !== undefined && e.button !== 0) return;
+
       isDragging = true;
       hasMoved = false;
-      startX = e.clientX;
-      startY = e.clientY;
 
       const rect = controlsContainer.getBoundingClientRect();
-      initialLeft = rect.left;
-      initialTop = rect.top;
+      shiftX = e.clientX - rect.left;
+      shiftY = e.clientY - rect.top;
 
       toggleBtn.classList.add('is-dragging');
-      toggleBtn.setPointerCapture(e.pointerId);
-    });
+      document.body.style.userSelect = 'none';
 
-    toggleBtn.addEventListener('pointermove', (e) => {
+      window.addEventListener('pointermove', onPointerMove, { passive: false });
+      window.addEventListener('pointerup', onPointerUp, { passive: false });
+      window.addEventListener('pointercancel', onPointerUp, { passive: false });
+    };
+
+    const onPointerMove = (e) => {
       if (!isDragging) return;
-      const deltaX = e.clientX - startX;
-      const deltaY = e.clientY - startY;
+      e.preventDefault();
 
-      if (Math.abs(deltaX) > 4 || Math.abs(deltaY) > 4) {
-        hasMoved = true;
-      }
+      hasMoved = true;
 
-      if (hasMoved) {
-        const maxLeft = window.innerWidth - controlsContainer.offsetWidth - 8;
-        const maxTop = window.innerHeight - controlsContainer.offsetHeight - 8;
-        const newLeft = Math.max(8, Math.min(initialLeft + deltaX, maxLeft));
-        const newTop = Math.max(8, Math.min(initialTop + deltaY, maxTop));
+      const btnWidth = controlsContainer.offsetWidth;
+      const btnHeight = controlsContainer.offsetHeight;
 
-        controlsContainer.style.position = 'fixed';
-        controlsContainer.style.left = `${newLeft}px`;
-        controlsContainer.style.top = `${newTop}px`;
-        controlsContainer.style.right = 'auto';
-      }
-    });
+      let newLeft = e.clientX - shiftX;
+      let newTop = e.clientY - shiftY;
 
-    const endDrag = (e) => {
+      // Keep within screen viewport
+      const maxLeft = window.innerWidth - btnWidth;
+      const maxTop = window.innerHeight - btnHeight;
+
+      newLeft = Math.max(0, Math.min(newLeft, maxLeft));
+      newTop = Math.max(0, Math.min(newTop, maxTop));
+
+      controlsContainer.style.position = 'fixed';
+      controlsContainer.style.left = `${newLeft}px`;
+      controlsContainer.style.top = `${newTop}px`;
+      controlsContainer.style.right = 'auto';
+      controlsContainer.style.bottom = 'auto';
+    };
+
+    const onPointerUp = (e) => {
       if (!isDragging) return;
       isDragging = false;
       toggleBtn.classList.remove('is-dragging');
-      try {
-        toggleBtn.releasePointerCapture(e.pointerId);
-      } catch (_) {}
+      document.body.style.userSelect = '';
+
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerUp);
 
       if (hasMoved) {
         const rect = controlsContainer.getBoundingClientRect();
@@ -1063,8 +1076,7 @@ function setupHistoryDrawer() {
       }
     };
 
-    toggleBtn.addEventListener('pointerup', endDrag);
-    toggleBtn.addEventListener('pointercancel', endDrag);
+    toggleBtn.addEventListener('pointerdown', onPointerDown);
 
     toggleBtn.addEventListener('click', (e) => {
       if (hasMoved) {
@@ -1082,11 +1094,11 @@ function setupHistoryDrawer() {
   window.addEventListener('resize', () => {
     if (controlsContainer && controlsContainer.style.position === 'fixed') {
       const rect = controlsContainer.getBoundingClientRect();
-      const maxLeft = window.innerWidth - controlsContainer.offsetWidth - 8;
-      const maxTop = window.innerHeight - controlsContainer.offsetHeight - 8;
+      const maxLeft = window.innerWidth - controlsContainer.offsetWidth;
+      const maxTop = window.innerHeight - controlsContainer.offsetHeight;
       if (rect.left > maxLeft || rect.top > maxTop) {
-        controlsContainer.style.left = `${Math.max(8, Math.min(rect.left, maxLeft))}px`;
-        controlsContainer.style.top = `${Math.max(8, Math.min(rect.top, maxTop))}px`;
+        controlsContainer.style.left = `${Math.max(0, Math.min(rect.left, maxLeft))}px`;
+        controlsContainer.style.top = `${Math.max(0, Math.min(rect.top, maxTop))}px`;
       }
     }
   });
