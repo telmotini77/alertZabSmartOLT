@@ -6,7 +6,7 @@ import { findOnuBySn, findOnusByAddressQuery, findOnusByPort, getOnuStatus } fro
 import { sendMessage, replyToMessage } from '../services/telegram.js';
 import { extractSerialNumber, extractNapBox, parseStatusInfo, extractEventTime, formatDateTime, extractBoardAndPort } from '../utils/parser.js';
 import { broadcast } from '../services/websocket.js';
-import { updateOnuStatusInCache, getCachedNaps, updateNapCoordinates, updateNapCoordinatesBulk } from '../services/cache.js';
+import { updateOnuStatusInCache, getCachedNaps, updateNapCoordinates, updateNapCoordinatesBulk, getStatusHistory } from '../services/cache.js';
 import { getActiveTriggers } from '../services/zabbix.js';
 
 const router = express.Router();
@@ -26,6 +26,26 @@ const getPositiveNumber = (value, fallback) => {
 // GET /webhook/naps - Returns current status of all NAPs
 router.get('/naps', (req, res) => {
   res.json(getCachedNaps());
+});
+
+// GET /webhook/history - Returns state change history events
+router.get('/history', (req, res) => {
+  const limit = parseInt(req.query.limit, 10) || 100;
+  res.json({
+    status: 'success',
+    total: getStatusHistory().length,
+    history: getStatusHistory(limit)
+  });
+});
+
+// GET /webhook/status-history - Alias for history
+router.get('/status-history', (req, res) => {
+  const limit = parseInt(req.query.limit, 10) || 100;
+  res.json({
+    status: 'success',
+    total: getStatusHistory().length,
+    history: getStatusHistory(limit)
+  });
 });
 
 // POST /webhook/naps/coordinates/bulk - Updates coordinates of multiple NAP boxes in bulk
@@ -747,7 +767,13 @@ async function processZabbixAlert(payload) {
   // even before Smart OLT confirms.
   if (sn) {
     const optimisticStatus = eventStatus === 'PROBLEM' ? 'Offline' : 'Online';
-    const updatedNap = updateOnuStatusInCache(sn, optimisticStatus);
+    const statusInfo = parseStatusInfo(eventName + ' ' + triggerDesc);
+    const eventTime = extractEventTime(payload);
+    const updatedNap = updateOnuStatusInCache(sn, optimisticStatus, {
+      reason: eventName || triggerDesc || (eventStatus === 'PROBLEM' ? 'Falla detectada' : 'Restablecido'),
+      category: statusInfo.category,
+      eventTime
+    });
     if (updatedNap) broadcast('nap_status_update', updatedNap);
   }
 

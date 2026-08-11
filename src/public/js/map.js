@@ -10,6 +10,11 @@ let activeStatusFilter = null;
 let darkLayer;
 let googleSatelliteLayer;
 
+// History State
+let historyData = [];
+let activeHistoryFilter = 'all';
+let historySearchQuery = '';
+
 // Color mapping based on status
 const statusColors = {
   online: '#10B981',   // Green
@@ -23,6 +28,8 @@ document.addEventListener('DOMContentLoaded', () => {
   setupWebSocket();
   setupSearch();
   setupStatsFilter();
+  setupHistoryDrawer();
+  loadHistoryData();
   
   // Attach cancel manual placement handler
   document.getElementById('cancel-placement').addEventListener('click', stopManualPlacement);
@@ -312,6 +319,28 @@ function getPopupContent(nap) {
   const googleMapsUrl = `https://www.google.com/maps/dir/?api=1&destination=${nap.latitude},${nap.longitude}`;
   const streetViewUrl = `https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${nap.latitude},${nap.longitude}`;
 
+  // Recent history for this specific NAP
+  const napHistory = historyData.filter(h => (h.napName || '').toUpperCase() === nap.name.toUpperCase()).slice(0, 3);
+  let historySection = '';
+  if (napHistory.length > 0) {
+    const historyRows = napHistory.map(h => {
+      const dot = h.failureType === 'recovery' ? '🟢' : (h.failureType === 'power_fail' ? '⚡' : '🔴');
+      return `
+        <li class="popup-history-item">
+          <span>${dot} <b>${h.failureLabel}</b> (${h.onuName})</span>
+          <span style="color:#94A3B8; font-size:10px">${formatTimeAgo(new Date(h.timestamp))}</span>
+        </li>
+      `;
+    }).join('');
+
+    historySection = `
+      <div class="popup-history-container">
+        <div class="popup-history-title"><i class="fa-solid fa-clock-rotate-left"></i> Historial Reciente de esta NAP</div>
+        <ul class="popup-history-list">${historyRows}</ul>
+      </div>
+    `;
+  }
+
   return `
     <div class="map-popup-container">
       <div class="map-popup-header">
@@ -326,6 +355,7 @@ function getPopupContent(nap) {
       <div class="map-popup-clients">
         ${clientRows}
       </div>
+      ${historySection}
       <div class="map-popup-actions">
         <a href="${googleMapsUrl}" target="_blank" class="btn-popup-nav">
           <i class="fa-solid fa-compass"></i> Cómo llegar
@@ -395,6 +425,8 @@ function setupWebSocket() {
 
       if (payload.event === 'nap_status_update' && payload.data) {
         handleNapUpdate(payload.data);
+      } else if (payload.event === 'status_history_event' && payload.data) {
+        handleNewHistoryEvent(payload.data);
       }
     } catch (err) {
       console.error('❌ Error parsing WebSocket message:', err);
@@ -935,4 +967,231 @@ function checkUrlQueryParams() {
       }
     }
   }
+}
+
+// ─── History Drawer & Timeline Management ────────────────────────────────────
+
+/**
+ * Setup History Drawer toggles, filter chips, search and refresh buttons.
+ */
+function setupHistoryDrawer() {
+  const drawer = document.getElementById('history-drawer');
+  const toggleBtn = document.getElementById('btn-history-toggle');
+  const closeBtn = document.getElementById('btn-close-history');
+  const refreshBtn = document.getElementById('btn-refresh-history');
+  const searchInput = document.getElementById('history-search-input');
+  const filterChips = document.querySelectorAll('.history-filters .filter-chip');
+
+  if (toggleBtn && drawer) {
+    toggleBtn.addEventListener('click', () => {
+      drawer.classList.toggle('hidden');
+    });
+  }
+
+  if (closeBtn && drawer) {
+    closeBtn.addEventListener('click', () => {
+      drawer.classList.add('hidden');
+    });
+  }
+
+  if (refreshBtn) {
+    refreshBtn.addEventListener('click', () => {
+      const icon = refreshBtn.querySelector('i');
+      if (icon) icon.classList.add('fa-spin');
+      loadHistoryData().finally(() => {
+        setTimeout(() => {
+          if (icon) icon.classList.remove('fa-spin');
+        }, 600);
+      });
+    });
+  }
+
+  if (searchInput) {
+    searchInput.addEventListener('input', (e) => {
+      historySearchQuery = e.target.value.trim().toLowerCase();
+      renderHistoryList();
+    });
+  }
+
+  filterChips.forEach(chip => {
+    chip.addEventListener('click', () => {
+      filterChips.forEach(c => c.classList.remove('active'));
+      chip.classList.add('active');
+      activeHistoryFilter = chip.dataset.filter || 'all';
+      renderHistoryList();
+    });
+  });
+}
+
+/**
+ * Load state change history from /webhook/history.
+ */
+async function loadHistoryData() {
+  const historyList = document.getElementById('history-list');
+  try {
+    const res = await fetch('/webhook/history?limit=150');
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    historyData = data.history || [];
+    updateHistoryBadge();
+    renderHistoryList();
+  } catch (err) {
+    console.error('Error loading history data:', err);
+    if (historyList) {
+      historyList.innerHTML = `<li class="no-results">No se pudo cargar el historial: ${err.message}</li>`;
+    }
+  }
+}
+
+/**
+ * Update the numeric badge in the history toggle button.
+ */
+function updateHistoryBadge() {
+  const badge = document.getElementById('history-badge');
+  if (badge) {
+    badge.textContent = historyData.length;
+  }
+}
+
+/**
+ * Handle a real-time incoming status history event from WebSocket.
+ */
+function handleNewHistoryEvent(newEvent) {
+  historyData.unshift(newEvent);
+  if (historyData.length > 250) historyData.pop();
+  
+  updateHistoryBadge();
+  renderHistoryList();
+
+  // Flash the button with a glow color
+  const toggleBtn = document.getElementById('btn-history-toggle');
+  if (toggleBtn) {
+    const glowColor = newEvent.failureType === 'recovery' ? 'rgba(16, 185, 129, 0.6)' : (newEvent.failureType === 'power_fail' ? 'rgba(245, 158, 11, 0.6)' : 'rgba(239, 68, 68, 0.6)');
+    toggleBtn.style.boxShadow = `0 0 20px ${glowColor}`;
+    setTimeout(() => {
+      toggleBtn.style.boxShadow = '';
+    }, 2500);
+  }
+}
+
+/**
+ * Render the history timeline cards inside the Drawer.
+ */
+function renderHistoryList() {
+  const listContainer = document.getElementById('history-list');
+  if (!listContainer) return;
+
+  const filtered = historyData.filter(item => {
+    // 1. Filter by category chip
+    if (activeHistoryFilter !== 'all') {
+      if (item.failureType !== activeHistoryFilter) return false;
+    }
+
+    // 2. Filter by search query
+    if (historySearchQuery) {
+      const matchNap = (item.napName || '').toLowerCase().includes(historySearchQuery);
+      const matchClient = (item.onuName || '').toLowerCase().includes(historySearchQuery);
+      const matchSn = (item.sn || '').toLowerCase().includes(historySearchQuery);
+      const matchReason = (item.reason || '').toLowerCase().includes(historySearchQuery);
+      if (!matchNap && !matchClient && !matchSn && !matchReason) return false;
+    }
+
+    return true;
+  });
+
+  if (filtered.length === 0) {
+    listContainer.innerHTML = '<li class="no-results">No hay eventos que coincidan con los filtros.</li>';
+    return;
+  }
+
+  listContainer.innerHTML = '';
+  filtered.forEach(item => {
+    const li = document.createElement('li');
+    li.className = `history-item ${item.failureType}`;
+
+    let iconHtml = '<i class="fa-solid fa-circle-exclamation"></i>';
+    if (item.failureType === 'power_fail') {
+      iconHtml = '<i class="fa-solid fa-bolt"></i>';
+    } else if (item.failureType === 'loss') {
+      iconHtml = '<i class="fa-solid fa-triangle-exclamation"></i>';
+    } else if (item.failureType === 'recovery') {
+      iconHtml = '<i class="fa-solid fa-circle-check"></i>';
+    }
+
+    const timeAgo = formatTimeAgo(new Date(item.timestamp));
+
+    li.innerHTML = `
+      <div class="history-item-top">
+        <span class="history-type-badge ${item.failureType}">
+          ${iconHtml} ${item.failureLabel}
+        </span>
+        <span class="history-timestamp" title="${item.formattedTime}">
+          <i class="fa-regular fa-clock"></i> ${timeAgo}
+        </span>
+      </div>
+      <div class="history-main-info">
+        <div class="history-nap-row">
+          <span class="history-nap-tag">
+            <i class="fa-solid fa-box-archive"></i>
+            ${item.napName}
+          </span>
+          ${(item.latitude !== null && item.longitude !== null) ? `
+            <button class="btn-locate-history" data-nap="${item.napName}" data-lat="${item.latitude}" data-lng="${item.longitude}">
+              <i class="fa-solid fa-location-dot"></i> Ver en mapa
+            </button>
+          ` : ''}
+        </div>
+        <div class="history-client-tag">
+          👤 <b>${item.onuName}</b> (<code>${item.sn}</code>)
+        </div>
+        <div class="history-status-transition">
+          <b>Transición:</b> <span>${item.previousStatus} ➔ <b>${item.newStatus}</b></span>
+        </div>
+        ${item.reason ? `<div class="history-reason-text">📝 ${item.reason}</div>` : ''}
+      </div>
+    `;
+
+    const locateBtn = li.querySelector('.btn-locate-history');
+    if (locateBtn) {
+      locateBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        focusNapOnMap(item.napName, item.latitude, item.longitude);
+      });
+    }
+
+    li.addEventListener('click', () => {
+      if (item.latitude !== null && item.longitude !== null) {
+        focusNapOnMap(item.napName, item.latitude, item.longitude);
+      }
+    });
+
+    listContainer.appendChild(li);
+  });
+}
+
+/**
+ * Focus and smooth-zoom map to a specific NAP marker.
+ */
+function focusNapOnMap(napName, lat, lng) {
+  if (lat !== null && lng !== null) {
+    map.flyTo([lat, lng], 18, { animate: true, duration: 1.2 });
+    if (markers[napName]) {
+      markers[napName].openPopup();
+    }
+  }
+}
+
+/**
+ * Format relative time (e.g. "hace 3 min").
+ */
+function formatTimeAgo(date) {
+  if (isNaN(date.getTime())) return 'reciente';
+  const seconds = Math.floor((new Date() - date) / 1000);
+  if (seconds < 60) return 'hace un momento';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `hace ${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `hace ${hours}h`;
+  const days = Math.floor(hours / 24);
+  return `hace ${days}d`;
 }

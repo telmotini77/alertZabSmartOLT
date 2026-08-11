@@ -3,24 +3,34 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { fetchAllOnus } from './smartOlt.js';
 import { extractNapBox } from '../utils/parser.js';
+import { broadcast } from './websocket.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // ─── Debounced async disk write ───────────────────────────────────────────────
 let _saveTimer = null;
+let _saveHistoryTimer = null;
 const SAVE_DEBOUNCE_MS = 2_000; // batch rapid updates into a single disk write
 
 const defaultCacheFile = path.resolve(__dirname, '../../data/nap_cache.json');
+const defaultHistoryFile = path.resolve(__dirname, '../../data/status_history.json');
+
 // Tests and maintenance jobs can use an isolated cache without touching the
 // production map data.
 const cacheFile = process.env.NAP_CACHE_FILE
   ? path.resolve(process.env.NAP_CACHE_FILE)
   : defaultCacheFile;
+const historyFile = process.env.STATUS_HISTORY_FILE
+  ? path.resolve(process.env.STATUS_HISTORY_FILE)
+  : defaultHistoryFile;
+
 const cacheDir = path.dirname(cacheFile);
 
 // Memory cache
 let cachedNaps = [];
+let statusHistory = [];
+const MAX_HISTORY_ITEMS = 250;
 
 /**
  * Initialize cache by loading from file or running a full sync.
@@ -41,6 +51,18 @@ export async function initCache() {
         await syncCacheWithSmartOlt();
       } catch (syncErr) {
         console.error('❌ Initial sync with Smart OLT failed:', syncErr.message);
+      }
+    }
+
+    // Load status change history from disk if exists
+    if (fs.existsSync(historyFile)) {
+      try {
+        const histData = fs.readFileSync(historyFile, 'utf8');
+        statusHistory = JSON.parse(histData);
+        console.log(`📋 Loaded ${statusHistory.length} status history events from disk.`);
+      } catch (hErr) {
+        console.error('Error reading history file:', hErr.message);
+        statusHistory = [];
       }
     }
 
@@ -174,16 +196,21 @@ export async function syncCacheWithSmartOlt() {
  * Useful to reflect Zabbix events instantly without doing a full fetch.
  * @param {string} sn - ONU Serial Number
  * @param {string} newStatus - New status ('Online', 'Offline', etc.)
+ * @param {Object} [eventMetadata] - Additional metadata (reason, category, eventTime, etc.)
  */
-export function updateOnuStatusInCache(sn, newStatus) {
+export function updateOnuStatusInCache(sn, newStatus, eventMetadata = {}) {
   if (!sn) return null;
   const cleanSn = sn.toUpperCase();
   let affectedNap = null;
+  let clientFound = null;
+  let previousStatus = 'Online';
 
   cachedNaps.forEach((nap) => {
     const client = nap.clients.find(c => c.sn === cleanSn);
     if (client) {
+      previousStatus = client.status || 'Online';
       client.status = newStatus;
+      clientFound = client;
       affectedNap = nap;
     }
   });
@@ -192,7 +219,7 @@ export function updateOnuStatusInCache(sn, newStatus) {
     // Recompute NAP status
     const totalClients = affectedNap.clients.length;
     const offlineClients = affectedNap.clients.filter(c => {
-      const s = c.status.toLowerCase();
+      const s = (c.status || '').toLowerCase();
       return s !== 'online' && s !== 'active';
     }).length;
     affectedNap.offlineClients = offlineClients;
@@ -208,9 +235,133 @@ export function updateOnuStatusInCache(sn, newStatus) {
 
     saveCacheToDisk();
     console.log(`💾 Cache updated for ONU ${cleanSn} inside ${affectedNap.name}. Status: ${newStatus}`);
+
+    // Record history event if status changed or forced
+    const isNewStatusOnline = (newStatus || '').toLowerCase() === 'online' || (newStatus || '').toLowerCase() === 'active';
+    const isPrevStatusOnline = (previousStatus || '').toLowerCase() === 'online' || (previousStatus || '').toLowerCase() === 'active';
+
+    if (isNewStatusOnline !== isPrevStatusOnline || eventMetadata.forceRecord) {
+      recordStatusChangeEvent({
+        sn: cleanSn,
+        onuName: clientFound?.name || eventMetadata.onuName || cleanSn,
+        napName: affectedNap.name,
+        previousStatus: isPrevStatusOnline ? 'Online' : 'Offline',
+        newStatus: isNewStatusOnline ? 'Online' : 'Offline',
+        napStatus: affectedNap.status,
+        reason: eventMetadata.reason || (isNewStatusOnline ? 'Restablecido' : 'Falla detectada'),
+        category: eventMetadata.category || (isNewStatusOnline ? 'recovery' : 'unknown'),
+        oltName: affectedNap.olt_name,
+        board: affectedNap.board,
+        port: affectedNap.port,
+        latitude: affectedNap.latitude,
+        longitude: affectedNap.longitude,
+        eventTime: eventMetadata.eventTime || null
+      });
+    }
   }
 
   return affectedNap;
+}
+
+/**
+ * Record a state change event into memory, write to disk, and broadcast via WebSockets.
+ */
+export function recordStatusChangeEvent(data) {
+  const now = new Date();
+  
+  // Determine normalized failure type
+  let failureType = 'unknown';
+  let failureLabel = 'Alerta de Red';
+  const reasonText = (data.reason || '').toLowerCase();
+  const catText = (data.category || '').toLowerCase();
+
+  const isOnline = (data.newStatus || '').toLowerCase() === 'online' || (data.newStatus || '').toLowerCase() === 'active';
+
+  if (isOnline) {
+    failureType = 'recovery';
+    failureLabel = 'Servicio Restablecido (OK)';
+  } else if (catText === 'power_fail' || reasonText.includes('power') || reasonText.includes('dying') || reasonText.includes('gasp') || reasonText.includes('luz') || reasonText.includes('energia')) {
+    failureType = 'power_fail';
+    failureLabel = 'Corte de Energía (Dying Gasp)';
+  } else if (catText === 'loss' || reasonText.includes('los') || reasonText.includes('signal') || reasonText.includes('fibra') || reasonText.includes('cable')) {
+    failureType = 'loss';
+    failureLabel = 'Pérdida de Señal (LOS)';
+  } else {
+    failureType = 'unknown';
+    failureLabel = 'Corte / Falla General';
+  }
+
+  // Format date and time
+  const day = String(now.getDate()).padStart(2, '0');
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const year = now.getFullYear();
+  const hours = String(now.getHours()).padStart(2, '0');
+  const minutes = String(now.getMinutes()).padStart(2, '0');
+  const seconds = String(now.getSeconds()).padStart(2, '0');
+  const formattedTime = `${day}/${month}/${year} ${hours}:${minutes}:${seconds}`;
+
+  const eventRecord = {
+    id: `evt_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
+    timestamp: now.toISOString(),
+    formattedTime,
+    eventTime: data.eventTime || formattedTime,
+    sn: data.sn ? data.sn.toUpperCase() : 'N/A',
+    onuName: data.onuName || data.sn || 'Cliente',
+    napName: data.napName || 'NAP Desconocida',
+    previousStatus: data.previousStatus || 'Online',
+    newStatus: data.newStatus || 'Offline',
+    napStatus: data.napStatus || 'partial',
+    failureType,
+    failureLabel,
+    reason: data.reason || failureLabel,
+    oltName: data.oltName || 'OLT',
+    board: data.board || '0',
+    port: data.port || '0',
+    latitude: data.latitude !== undefined ? data.latitude : null,
+    longitude: data.longitude !== undefined ? data.longitude : null
+  };
+
+  // Prepend to history array
+  statusHistory.unshift(eventRecord);
+
+  // Keep array within bounds
+  if (statusHistory.length > MAX_HISTORY_ITEMS) {
+    statusHistory = statusHistory.slice(0, MAX_HISTORY_ITEMS);
+  }
+
+  // Persist to disk debounced
+  saveHistoryToDisk();
+
+  // Broadcast to all connected map clients
+  try {
+    broadcast('status_history_event', eventRecord);
+  } catch (err) {
+    console.error('Error broadcasting status history event:', err.message);
+  }
+
+  console.log(`📋 [History] Recorded: ${failureLabel} | NAP: ${eventRecord.napName} | Client: ${eventRecord.onuName} (${eventRecord.sn})`);
+  return eventRecord;
+}
+
+/**
+ * Get the state change history list.
+ * @param {number} [limit=100] - Number of items to return
+ */
+export function getStatusHistory(limit = 100) {
+  return statusHistory.slice(0, limit);
+}
+
+function saveHistoryToDisk() {
+  if (_saveHistoryTimer) clearTimeout(_saveHistoryTimer);
+  _saveHistoryTimer = setTimeout(async () => {
+    _saveHistoryTimer = null;
+    try {
+      await fs.promises.mkdir(cacheDir, { recursive: true });
+      await fs.promises.writeFile(historyFile, JSON.stringify(statusHistory, null, 2), 'utf8');
+    } catch (err) {
+      console.error('❌ Failed to write status history file to disk:', err.message);
+    }
+  }, SAVE_DEBOUNCE_MS);
 }
 
 /**

@@ -79,6 +79,15 @@
     <main class="map-wrapper">
       <div id="map"></div>
       
+      <!-- Top Action Floating Controls -->
+      <div class="map-top-controls">
+        <button id="btn-history-toggle" class="btn-map-control btn-history-control" title="Abrir Historial de Eventos">
+          <i class="fa-solid fa-clock-rotate-left"></i>
+          <span>Historial de Estados</span>
+          <span id="history-badge" class="history-badge">0</span>
+        </button>
+      </div>
+
       <!-- Geolocation float button -->
       <button id="btn-geolocation" class="btn-geolocation-float" title="Centrar en mi ubicación">
         <i class="fa-solid fa-crosshairs"></i>
@@ -92,6 +101,46 @@
         </div>
         <button id="cancel-placement" class="btn-cancel">Cancelar</button>
       </div>
+
+      <!-- History Drawer / Panel -->
+      <aside id="history-drawer" class="history-drawer hidden">
+        <div class="history-header">
+          <div class="history-title">
+            <i class="fa-solid fa-clock-rotate-left logo-icon"></i>
+            <div>
+              <h2>Historial de Estados</h2>
+              <p class="history-subtitle">Registro de caídas y restablecimientos</p>
+            </div>
+          </div>
+          <div class="history-header-actions">
+            <button id="btn-refresh-history" class="btn-icon" title="Refrescar historial">
+              <i class="fa-solid fa-arrows-rotate"></i>
+            </button>
+            <button id="btn-close-history" class="btn-close-drawer" title="Cerrar panel">&times;</button>
+          </div>
+        </div>
+
+        <!-- History Quick Filter Chips -->
+        <div class="history-filters">
+          <button class="filter-chip active" data-filter="all">Todos</button>
+          <button class="filter-chip power" data-filter="power_fail"><i class="fa-solid fa-bolt"></i> Energía</button>
+          <button class="filter-chip loss" data-filter="loss"><i class="fa-solid fa-triangle-exclamation"></i> Señal (LOS)</button>
+          <button class="filter-chip recovery" data-filter="recovery"><i class="fa-solid fa-circle-check"></i> Restablecidos</button>
+        </div>
+
+        <!-- History Search Input -->
+        <div class="history-search-container">
+          <i class="fa-solid fa-magnifying-glass search-icon"></i>
+          <input type="text" id="history-search-input" placeholder="Buscar por NAP, cliente o SN...">
+        </div>
+
+        <!-- History Timeline List -->
+        <div class="history-content">
+          <ul id="history-list" class="history-list">
+            <li class="loading-item">Cargando eventos del historial...</li>
+          </ul>
+        </div>
+      </aside>
     </main>
   </div>
 
