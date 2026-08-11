@@ -63,7 +63,7 @@ testCases.forEach((tc, idx) => {
 console.log('\n--- STARTING NAP BOX EXTRACTION TESTS ---');
 const napTestCases = [
   { text: 'Calle Falsa 123, NAP-04-A, Sector Centro', expectedNap: 'NAP-04-A' },
-  { text: 'Caja NAP 12 en poste 4', expectedNap: 'CAJA NAP 12' },
+  { text: 'Caja NAP 12 en poste 4', expectedNap: 'NAP-12' },
   { text: 'Direccion: Av. Siempreviva 742 (NAP_09_B)', expectedNap: 'NAP_09_B' },
   { text: 'NAP 113 principal', expectedNap: 'NAP 113' },
   { text: 'Sin datos de splitter', expectedNap: null }

@@ -481,16 +481,36 @@ ${eventTime ? `• 📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : '
   const totalOnline = totalClients - totalOffline;
   const percentageDown = ((totalOffline / totalClients) * 100).toFixed(1);
 
-  // Build client list with clear status emojis
-  const clientLines = onusOnNap.map(o => {
+  // Filter only affected / failing ONUs
+  let affectedOnus = onusOnNap.filter(o => {
     const isThisOne = (o.sn || '').toUpperCase() === (onu.sn || '').toUpperCase();
     const isOnlineClient = (o.status || '').toLowerCase() === 'online' || (o.status || '').toLowerCase() === 'active';
-    const statusDot = isOnlineClient ? '🟢' : '🔴';
+    if (eventStatus !== 'OK' && isThisOne) return true;
+    return !isOnlineClient;
+  });
+
+  if (eventStatus !== 'OK' && affectedOnus.length === 0) {
+    affectedOnus = [onu];
+  }
+
+  // Build client list with failing / affected ONUs only
+  const clientLines = affectedOnus.map(o => {
+    const isThisOne = (o.sn || '').toUpperCase() === (onu.sn || '').toUpperCase();
+    const isOnlineClient = (o.status || '').toLowerCase() === 'online' || (o.status || '').toLowerCase() === 'active';
+    const statusDot = (eventStatus === 'OK' && isThisOne) ? '🟢' : (isOnlineClient ? '🟢' : '🔴');
     const nameLabel = isThisOne ? `<b>${o.name} [AFECTADO]</b>` : o.name;
     const snLabel = `<code>${o.sn}</code>`;
-    const statusLabelText = o.status || (isOnlineClient ? 'Online' : 'Offline');
+    const statusLabelText = (isThisOne && oltStatusReason) ? oltStatusReason : (o.status || (isOnlineClient ? 'Online' : 'Offline'));
     return `  ${statusDot} ${nameLabel} (${snLabel}) - <i>${statusLabelText}</i>`;
   });
+
+  const clientSectionTitle = affectedOnus.length > 1
+    ? `👥 <b>Detalle de Clientes Afectados en esta NAP (${affectedOnus.length}):</b>`
+    : '👥 <b>Detalle de Clientes en esta NAP:</b>';
+
+  const clientSectionBody = clientLines.length > 0
+    ? clientLines.join('\n')
+    : '  ✨ <i>Todos los clientes en esta NAP se encuentran con servicio normal.</i>';
 
   const napWarning = totalOffline === totalClients 
     ? '🛑 <b>¡CAÍDA TOTAL DE LA CAJA NAP!</b> (Todos los clientes están sin servicio)'
@@ -556,8 +576,8 @@ ${eventTime ? `• 📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : '
 • 🔴 Afectados (Offline): <b>${totalOffline}</b> (<b>${percentageDown}%</b>)
 • <b>Diagnóstico:</b> ${napWarning}${lastActiveNapInfo}
 
-👥 <b>Detalle de Clientes en esta NAP:</b>
-${clientLines.join('\n')}
+${clientSectionTitle}
+${clientSectionBody}
 
 ℹ️ <i>Evento Zabbix: ${eventName}</i>
 `.trim();
