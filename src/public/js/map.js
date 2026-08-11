@@ -982,11 +982,114 @@ function setupHistoryDrawer() {
   const searchInput = document.getElementById('history-search-input');
   const filterChips = document.querySelectorAll('.history-filters .filter-chip');
 
-  if (toggleBtn && drawer) {
-    toggleBtn.addEventListener('click', () => {
-      drawer.classList.toggle('hidden');
+  const controlsContainer = document.querySelector('.map-top-controls');
+
+  // Restore saved floating position
+  if (controlsContainer) {
+    const savedPos = localStorage.getItem('history_btn_pos');
+    if (savedPos) {
+      try {
+        const { left, top } = JSON.parse(savedPos);
+        const maxLeft = Math.max(10, window.innerWidth - (controlsContainer.offsetWidth || 220) - 10);
+        const maxTop = Math.max(10, window.innerHeight - (controlsContainer.offsetHeight || 50) - 10);
+        const clampLeft = Math.max(10, Math.min(left, maxLeft));
+        const clampTop = Math.max(10, Math.min(top, maxTop));
+        
+        controlsContainer.style.position = 'fixed';
+        controlsContainer.style.left = `${clampLeft}px`;
+        controlsContainer.style.top = `${clampTop}px`;
+        controlsContainer.style.right = 'auto';
+      } catch (e) {
+        console.warn('Error restoring history button position:', e);
+      }
+    }
+  }
+
+  // Draggable Floating Logic
+  let isDragging = false;
+  let hasMoved = false;
+  let startX = 0, startY = 0;
+  let initialLeft = 0, initialTop = 0;
+
+  if (toggleBtn && controlsContainer) {
+    toggleBtn.addEventListener('pointerdown', (e) => {
+      if (e.button !== undefined && e.button !== 0) return;
+      isDragging = true;
+      hasMoved = false;
+      startX = e.clientX;
+      startY = e.clientY;
+
+      const rect = controlsContainer.getBoundingClientRect();
+      initialLeft = rect.left;
+      initialTop = rect.top;
+
+      toggleBtn.classList.add('is-dragging');
+      toggleBtn.setPointerCapture(e.pointerId);
+    });
+
+    toggleBtn.addEventListener('pointermove', (e) => {
+      if (!isDragging) return;
+      const deltaX = e.clientX - startX;
+      const deltaY = e.clientY - startY;
+
+      if (Math.abs(deltaX) > 4 || Math.abs(deltaY) > 4) {
+        hasMoved = true;
+      }
+
+      if (hasMoved) {
+        const maxLeft = window.innerWidth - controlsContainer.offsetWidth - 8;
+        const maxTop = window.innerHeight - controlsContainer.offsetHeight - 8;
+        const newLeft = Math.max(8, Math.min(initialLeft + deltaX, maxLeft));
+        const newTop = Math.max(8, Math.min(initialTop + deltaY, maxTop));
+
+        controlsContainer.style.position = 'fixed';
+        controlsContainer.style.left = `${newLeft}px`;
+        controlsContainer.style.top = `${newTop}px`;
+        controlsContainer.style.right = 'auto';
+      }
+    });
+
+    const endDrag = (e) => {
+      if (!isDragging) return;
+      isDragging = false;
+      toggleBtn.classList.remove('is-dragging');
+      try {
+        toggleBtn.releasePointerCapture(e.pointerId);
+      } catch (_) {}
+
+      if (hasMoved) {
+        const rect = controlsContainer.getBoundingClientRect();
+        localStorage.setItem('history_btn_pos', JSON.stringify({ left: rect.left, top: rect.top }));
+      }
+    };
+
+    toggleBtn.addEventListener('pointerup', endDrag);
+    toggleBtn.addEventListener('pointercancel', endDrag);
+
+    toggleBtn.addEventListener('click', (e) => {
+      if (hasMoved) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      if (drawer) {
+        drawer.classList.toggle('hidden');
+      }
     });
   }
+
+  // Ensure button stays inside viewport on window resize
+  window.addEventListener('resize', () => {
+    if (controlsContainer && controlsContainer.style.position === 'fixed') {
+      const rect = controlsContainer.getBoundingClientRect();
+      const maxLeft = window.innerWidth - controlsContainer.offsetWidth - 8;
+      const maxTop = window.innerHeight - controlsContainer.offsetHeight - 8;
+      if (rect.left > maxLeft || rect.top > maxTop) {
+        controlsContainer.style.left = `${Math.max(8, Math.min(rect.left, maxLeft))}px`;
+        controlsContainer.style.top = `${Math.max(8, Math.min(rect.top, maxTop))}px`;
+      }
+    }
+  });
 
   if (closeBtn && drawer) {
     closeBtn.addEventListener('click', () => {

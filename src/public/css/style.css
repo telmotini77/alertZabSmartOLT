@@ -969,9 +969,12 @@ body {
   position: absolute;
   top: 16px;
   right: 60px;
-  z-index: 1000;
+  z-index: 1200;
   display: flex;
   gap: 10px;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .btn-map-control {
@@ -983,13 +986,17 @@ body {
   font-family: inherit;
   font-size: 13px;
   font-weight: 600;
-  cursor: pointer;
+  cursor: grab;
   display: flex;
   align-items: center;
   gap: 8px;
   backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   box-shadow: 0 4px 15px rgba(0, 0, 0, 0.35);
-  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: none;
 }
 
 .btn-map-control:hover {
@@ -997,7 +1004,15 @@ body {
   border-color: var(--accent-color);
   color: var(--accent-color);
   box-shadow: 0 0 15px rgba(56, 189, 248, 0.35);
-  transform: translateY(-1px);
+}
+
+.btn-map-control:active,
+.btn-map-control.is-dragging {
+  cursor: grabbing !important;
+  border-color: var(--accent-color);
+  box-shadow: 0 8px 25px rgba(56, 189, 248, 0.5) !important;
+  transform: scale(1.03);
+  opacity: 0.95;
 }
 
 .history-badge {
