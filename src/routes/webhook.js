@@ -304,7 +304,7 @@ const pendingAlerts = new Map(); // key: SN (uppercase), value: { timeoutId, pay
 const getSettleMs = () => {
   if (process.env.NODE_ENV === 'test') return 100; // fast in tests
   const secs = parseFloat(process.env.SMARTOLT_SETTLE_SECS);
-  return (!isNaN(secs) && secs >= 0) ? secs * 1_000 : 30_000; // default 30s
+  return (!isNaN(secs) && secs >= 0) ? secs * 1_000 : 2_000; // default 2s (ultra-fast response)
 };
 
 // Zabbix often reports one event per ONU even when the underlying incident is a
@@ -313,7 +313,7 @@ const getSettleMs = () => {
 const pendingPortIncidents = new Map();
 
 const getPortCorrelationMs = () =>
-  getPositiveNumber(process.env.PORT_CORRELATION_WINDOW_SECS, 15) * 1_000;
+  getPositiveNumber(process.env.PORT_CORRELATION_WINDOW_SECS, 3) * 1_000;
 
 const isOnline = (onu) => ['online', 'active'].includes(String(onu?.status || '').toLowerCase());
 

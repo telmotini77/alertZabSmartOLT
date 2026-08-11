@@ -4,7 +4,7 @@ dotenv.config();
 const SMARTOLT_SUBDOMAIN = (process.env.SMARTOLT_SUBDOMAIN || '').trim();
 const SMARTOLT_API_KEY   = (process.env.SMARTOLT_API_KEY   || '').trim();
 
-const FETCH_TIMEOUT_MS = 15_000; // 15s â€” Smart OLT can be slow on large inventories
+const FETCH_TIMEOUT_MS = 5_000; // 5s for fast response
 
 const getHeaders = () => ({
   'X-Token': SMARTOLT_API_KEY,
