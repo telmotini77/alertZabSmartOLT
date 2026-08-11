@@ -295,7 +295,6 @@ function getPopupContent(nap) {
           <span class="client-status-dot ${statusClass}"></span>
           ${c.name}
         </span>
-        <code>${c.sn}</code>
       </div>
     `;
   }).join('');
