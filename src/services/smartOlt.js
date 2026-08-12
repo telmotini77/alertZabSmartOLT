@@ -4,7 +4,7 @@ dotenv.config();
 const SMARTOLT_SUBDOMAIN = (process.env.SMARTOLT_SUBDOMAIN || '').trim();
 const SMARTOLT_API_KEY   = (process.env.SMARTOLT_API_KEY   || '').trim();
 
-const DEFAULT_TIMEOUT_MS = 10_000;
+const DEFAULT_TIMEOUT_MS = 5_000;
 
 const getHeaders = () => ({
   'X-Token': SMARTOLT_API_KEY,
