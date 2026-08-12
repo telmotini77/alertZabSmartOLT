@@ -83,7 +83,7 @@ globalThis.fetch = async (url) => {
 console.log('--- STARTING MAP AND CACHE UNIT TESTS ---');
 
 // Load cache service after configuring the isolated test cache path.
-const { getCachedNaps, updateOnuStatusInCache, syncCacheWithSmartOlt, updateNapCoordinates } =
+const { getCachedNaps, updateOnuStatusInCache, syncCacheWithSmartOlt, updateNapCoordinates, applyOnuStatusSnapshot } =
   await import('./services/cache.js');
 
 async function runTests() {
@@ -162,6 +162,21 @@ async function runTests() {
     assert.strictEqual(updatedCoordsNap.longitude, -77.0600, 'NAP-04-B longitude should be updated');
     
     console.log('✅ Manual coordinates update: PASS');
+
+    // 5. A full OLT snapshot must be applied before deciding whether a NAP
+    // has lost signal completely.
+    console.log('\n[5] Applying a complete Smart OLT status snapshot...');
+    updateOnuStatusInCache('HWTC12345678', 'Online');
+    const snapshot = mockOnus.map((onu) => ({
+      ...onu,
+      status: onu.odb === 'NAP-04-B' ? 'Online' : 'Offline'
+    }));
+    const changedNaps = applyOnuStatusSnapshot(snapshot);
+    const snapNapA = getCachedNaps().find(n => n.name === 'NAP-04-A');
+    assert.ok(changedNaps.some(n => n.name === 'NAP-04-A'), 'Snapshot should mark NAP-04-A as changed');
+    assert.strictEqual(snapNapA.status, 'offline', 'Full snapshot should mark NAP-04-A as fully offline');
+    assert.strictEqual(snapNapA.offlineClients, 3, 'Full snapshot should count every affected ONU');
+    console.log('Full scan snapshot and total NAP outage calculation: PASS');
 
     // Clean up cache file generated during test
     const cacheFile = process.env.NAP_CACHE_FILE;

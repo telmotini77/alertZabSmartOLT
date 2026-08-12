@@ -264,6 +264,69 @@ export function updateOnuStatusInCache(sn, newStatus, eventMetadata = {}) {
 }
 
 /**
+ * Apply the status returned by a complete Smart OLT scan to the existing NAP
+ * cache. Unlike updateOnuStatusInCache(), this does not record one history
+ * event per ONU: callers use it to make a single, coherent NAP decision from
+ * one scan cycle.
+ *
+ * @param {Array<Object>} onus - ONUs returned by Smart OLT.
+ * @returns {Array<Object>} NAPs whose calculated status changed.
+ */
+export function applyOnuStatusSnapshot(onus) {
+  if (!Array.isArray(onus) || onus.length === 0 || cachedNaps.length === 0) {
+    return [];
+  }
+
+  const statusBySn = new Map();
+  onus.forEach((onu) => {
+    const sn = String(onu?.sn || '').trim().toUpperCase();
+    if (sn && onu?.status !== undefined && onu?.status !== null) {
+      statusBySn.set(sn, String(onu.status));
+    }
+  });
+
+  if (statusBySn.size === 0) return [];
+
+  const changedNaps = [];
+  cachedNaps.forEach((nap) => {
+    let changed = false;
+
+    nap.clients.forEach((client) => {
+      const currentStatus = statusBySn.get(String(client.sn || '').toUpperCase());
+      if (currentStatus && String(client.status || '') !== currentStatus) {
+        client.status = currentStatus;
+        changed = true;
+      }
+    });
+
+    if (!changed) return;
+
+    const totalClients = nap.clients.length;
+    const offlineClients = nap.clients.filter((client) => {
+      const status = String(client.status || '').toLowerCase();
+      return status !== 'online' && status !== 'active';
+    }).length;
+
+    nap.totalClients = totalClients;
+    nap.offlineClients = offlineClients;
+    nap.onlineClients = totalClients - offlineClients;
+    nap.status = offlineClients === totalClients
+      ? 'offline'
+      : offlineClients > 0
+        ? 'partial'
+        : 'online';
+    changedNaps.push(nap);
+  });
+
+  if (changedNaps.length > 0) {
+    saveCacheToDisk();
+    console.log(`Applied Smart OLT status snapshot to ${changedNaps.length} NAP(s).`);
+  }
+
+  return changedNaps;
+}
+
+/**
  * Record a state change event into memory, write to disk, and broadcast via WebSockets.
  */
 export function recordStatusChangeEvent(data) {

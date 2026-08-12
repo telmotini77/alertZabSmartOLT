@@ -23,6 +23,35 @@ const getPositiveNumber = (value, fallback) => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 };
 
+const normalizeNapName = (value) => String(value || '')
+  .normalize('NFD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .replace(/[^a-zA-Z0-9]/g, '')
+  .toUpperCase();
+
+const findCachedNap = (napName) => {
+  const normalizedName = normalizeNapName(napName);
+  if (!normalizedName) return null;
+  return getCachedNaps().find((nap) => normalizeNapName(nap.name) === normalizedName) || null;
+};
+
+const getCoordinates = (source) => {
+  const latitude = Number(source?.latitude ?? source?.gps_lat);
+  const longitude = Number(source?.longitude ?? source?.gps_lng);
+  return Number.isFinite(latitude) && Number.isFinite(longitude) && latitude !== 0 && longitude !== 0
+    ? { latitude, longitude }
+    : null;
+};
+
+const getMinimumNapClients = () => {
+  const configured = Number.parseInt(process.env.NAP_LOSS_MIN_ONUS, 10);
+  return Number.isInteger(configured) && configured > 0 ? configured : 2;
+};
+
+// Avoid repeat notifications while the same NAP remains fully offline. The
+// state is cleared as soon as any ONU in that NAP recovers.
+const activeNapLossNotifications = new Set();
+
 // GET /webhook/naps - Returns current status of all NAPs
 router.get('/naps', (req, res) => {
   res.json(getCachedNaps());
@@ -321,6 +350,53 @@ export async function syncActiveProblems(targetChatId = DEFAULT_CHAT_ID) {
 // then compare both sources and send only if they agree.
 const pendingAlerts = new Map(); // key: SN (uppercase), value: { timeoutId, payload }
 
+function cancelPendingAlertsForNap(nap) {
+  nap.clients?.forEach((client) => {
+    const sn = String(client.sn || '').toUpperCase();
+    const pending = pendingAlerts.get(sn);
+    if (pending) {
+      clearTimeout(pending.timeoutId);
+      pendingAlerts.delete(sn);
+    }
+  });
+}
+
+/**
+ * Send a single NAP-level LOS report using the local cache. This path is
+ * intentionally independent of Smart OLT availability: Zabbix has already
+ * reported every router in the NAP down and the cache confirms 100% impact.
+ */
+async function sendCachedNapLossAlert(payload, nap, eventTime = '') {
+  const referenceClient = nap.clients?.find((client) => client.sn);
+  if (!referenceClient) return { sent: false, reason: 'NAP has no clients' };
+
+  const totalClients = nap.totalClients || nap.clients.length;
+  const representativeOnu = {
+    sn: String(referenceClient.sn).toUpperCase(),
+    name: referenceClient.name || nap.name,
+    status: 'Offline',
+    odb_name: nap.name,
+    olt_name: nap.olt_name,
+    board: nap.board,
+    port: nap.port
+  };
+  const enrichedPayload = {
+    ...payload,
+    onu_sn: representativeOnu.sn,
+    event_name: payload.event_name || `NAP ${nap.name}: Loss of Signal`,
+    trigger_description: `${payload.trigger_description || ''}\nCaída total confirmada: ${totalClients}/${totalClients} ONUs de la NAP ${nap.name} están sin señal.`.trim(),
+    event_time: payload.event_time || eventTime
+  };
+
+  const result = await processAndSendAlert(
+    enrichedPayload,
+    representativeOnu,
+    'Pérdida de Señal (LOS)'
+  );
+  console.log(`[NAP LOS] Sent consolidated cache-backed alert for ${nap.name}: ${totalClients}/${totalClients} ONUs offline.`);
+  return result;
+}
+
 const getSettleMs = () => {
   if (process.env.NODE_ENV === 'test') return 100; // fast in tests
   const secs = parseFloat(process.env.SMARTOLT_SETTLE_SECS);
@@ -614,12 +690,24 @@ async function generateNapReport(onu, eventStatus, severity, hostName, eventName
   // Search NAP in local cache for geographic coordinates
   let coordsText = '';
   let cachedNap = null;
+  let coordinates = null;
   if (napBox) {
-    cachedNap = getCachedNaps().find(n => n.name.toUpperCase() === napBox.toUpperCase());
-    if (cachedNap && cachedNap.latitude && cachedNap.longitude) {
+    cachedNap = findCachedNap(napBox);
+    // Cache coordinates are an average of associated ONUs, so they represent
+    // an approximate NAP position. Use the affected ONU as a fallback while
+    // the NAP cache is being built.
+    coordinates = getCoordinates(cachedNap) || getCoordinates(onu);
+    if (coordinates) {
+      cachedNap = { ...(cachedNap || {}), ...coordinates };
       const gmapsLink = `https://maps.google.com/?q=${cachedNap.latitude.toFixed(6)},${cachedNap.longitude.toFixed(6)}`;
       coordsText = `\n📍 <b>Ubicación NAP:</b> <code>[${cachedNap.latitude.toFixed(6)}, ${cachedNap.longitude.toFixed(6)}]</code> | 🗺️ <a href="${gmapsLink}">Ver en Google Maps</a>`;
     }
+  }
+
+  if (coordinates) {
+    const { latitude, longitude } = coordinates;
+    const gmapsLink = `https://maps.google.com/?q=${latitude.toFixed(6)},${longitude.toFixed(6)}`;
+    coordsText = `\n📍 <b>Ubicación aproximada de la NAP:</b> <code>[${latitude.toFixed(6)}, ${longitude.toFixed(6)}]</code> | 🗺️ <a href="${gmapsLink}">Ver en Google Maps</a>`;
   }
 
   const napDisplay = napBox ? `<code>${napBox}</code>` : '<i>No identificada en el sistema</i>';
@@ -1056,7 +1144,7 @@ router.post('/zabbix', (req, res) => {
  *
  * Flow for events without SN → process immediately (no corroboration possible).
  */
-async function processZabbixAlert(payload) {
+export async function processZabbixAlert(payload) {
   const eventName   = payload.event_name   || payload.trigger_name || '';
   const triggerDesc = payload.trigger_description || '';
   const eventStatus = payload.event_status || payload.status || 'PROBLEM';
@@ -1078,6 +1166,35 @@ async function processZabbixAlert(payload) {
       eventTime
     });
     if (updatedNap) broadcast('nap_status_update', updatedNap);
+    const napNotificationKey = normalizeNapName(updatedNap?.name);
+
+    if (eventStatus === 'OK' && updatedNap?.status !== 'offline') {
+      activeNapLossNotifications.delete(napNotificationKey);
+    }
+
+    // Smart OLT can be unreachable precisely during a fibre outage. Once
+    // Zabbix has reported every router in the NAP Offline, notify Telegram
+    // immediately from the confirmed cache rather than waiting for an OLT API
+    // query that may time out.
+    const isTotalNapLoss = eventStatus === 'PROBLEM' &&
+      statusInfo.category === 'loss' &&
+      updatedNap?.status === 'offline' &&
+      updatedNap.totalClients >= getMinimumNapClients();
+    if (isTotalNapLoss) {
+      if (!activeNapLossNotifications.has(napNotificationKey)) {
+        // Reserve the notification before awaiting Telegram so simultaneous
+        // duplicate Zabbix events cannot produce duplicate NAP reports.
+        activeNapLossNotifications.add(napNotificationKey);
+        cancelPendingAlertsForNap(updatedNap);
+        try {
+          await sendCachedNapLossAlert(payload, updatedNap, eventTime);
+        } catch (error) {
+          activeNapLossNotifications.delete(napNotificationKey);
+          throw error;
+        }
+      }
+      return;
+    }
   }
 
   // ── OK / Recovery ─────────────────────────────────────────────────────────
