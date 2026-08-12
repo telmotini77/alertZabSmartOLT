@@ -11,6 +11,12 @@ import { getActiveTriggers } from '../services/zabbix.js';
 
 const router = express.Router();
 const DEFAULT_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+
+// Optional dedicated group for Loss of Signal alerts (fibra cortada).
+// If not set, LOS alerts fall back to DEFAULT_CHAT_ID.
+// Power Fail and other alerts always go to DEFAULT_CHAT_ID.
+const getLossChatId = () =>
+  (process.env.TELEGRAM_LOS_CHAT_ID || '').trim() || DEFAULT_CHAT_ID;
 // Keep strict cross-validation by default. Set SMARTOLT_REQUIRE_CORROBORATION=false
 // when Smart OLT is unavailable and Zabbix alerts must still be delivered.
 const REQUIRE_SMARTOLT_CORROBORATION =
@@ -383,6 +389,7 @@ async function sendCachedNapLossAlert(payload, nap, eventTime = '') {
   const enrichedPayload = {
     ...payload,
     onu_sn: representativeOnu.sn,
+    chat_id: getLossChatId(),  // Route LOS alerts to the dedicated LOS group
     event_name: payload.event_name || `NAP ${nap.name}: Loss of Signal`,
     trigger_description: `${payload.trigger_description || ''}\nCaída total confirmada: ${totalClients}/${totalClients} ONUs de la NAP ${nap.name} están sin señal.`.trim(),
     event_time: payload.event_time || eventTime
@@ -467,7 +474,8 @@ function feedNapOutageBuffer(napName, cachedNap, payload) {
  * Determines if drops are area-related (same port or close GPS) or unrelated.
  */
 async function analyzeAndSendAreaReport(entries) {
-  const chatId = DEFAULT_CHAT_ID;
+  // Area outage = LOS affecting multiple NAPs → use the LOS chat group
+  const chatId = getLossChatId();
   if (!chatId) return;
   if (entries.length === 0) return;
 
@@ -916,7 +924,8 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
   const hostName = payload.host_name || payload.host || 'OLT Desconocida';
   const severity = payload.event_severity || payload.severity || 'Warning';
   const eventStatus = payload.event_status || payload.status || 'PROBLEM';
-  const targetChatId = payload.chat_id || DEFAULT_CHAT_ID;
+  // targetChatId may be overridden below if the event is classified as LOS
+  let targetChatId = payload.chat_id || DEFAULT_CHAT_ID;
   
   if (!targetChatId) {
     throw new Error('Missing TELEGRAM_CHAT_ID');
@@ -1023,6 +1032,10 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
 
   // Corroboration verification
   if (category === 'power_fail' || category === 'loss') {
+    // Route Loss of Signal alerts to the dedicated LOS chat group
+    if (category === 'loss') {
+      targetChatId = getLossChatId();
+    }
     if (!smartOltEnriched || !onu) {
       if (REQUIRE_SMARTOLT_CORROBORATION) {
         console.log(`[Corroboration Blocked] Event category "${category}" for SN "${sn}" was not enriched with Smart OLT. Skipping Telegram notification.`);
