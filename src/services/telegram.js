@@ -5,7 +5,7 @@ dotenv.config();
 const TELEGRAM_BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
 
 // ─── Config ───────────────────────────────────────────────────────────────────
-const FETCH_TIMEOUT_MS = 10_000; // 10s per Telegram request
+const FETCH_TIMEOUT_MS = 20_000; // 20s per Telegram request (Docker may be slow on first connect)
 const MAX_RETRIES      = 3;
 const DEDUP_TTL_MS     = 60_000; // 60s deduplication window
 
@@ -55,7 +55,12 @@ async function fetchWithRetry(url, options = {}, attempt = 1) {
     return res;
   } catch (err) {
     clearTimeout(timer);
-    const isRetryable = err.name === 'AbortError' || err.code === 'ECONNRESET' || err.code === 'ETIMEDOUT' || err.code === 'ENOTFOUND';
+    const isRetryable = err.name === 'AbortError' || 
+                        err.name === 'TypeError' ||
+                        err.code === 'ECONNRESET' || 
+                        err.code === 'ETIMEDOUT' || 
+                        err.code === 'ENOTFOUND' ||
+                        (err.message && err.message.includes('fetch failed'));
     if (isRetryable && attempt < MAX_RETRIES) {
       const delay = 500 * 2 ** (attempt - 1); // 500ms → 1000ms → 2000ms
       console.warn(`⚠️ Telegram fetch failed (attempt ${attempt}/${MAX_RETRIES}), retrying in ${delay}ms… [${err.message}]`);

@@ -4,7 +4,7 @@ dotenv.config();
 const SMARTOLT_SUBDOMAIN = (process.env.SMARTOLT_SUBDOMAIN || '').trim();
 const SMARTOLT_API_KEY   = (process.env.SMARTOLT_API_KEY   || '').trim();
 
-const FETCH_TIMEOUT_MS = 5_000; // 5s for fast response
+const DEFAULT_TIMEOUT_MS = 10_000;
 
 const getHeaders = () => ({
   'X-Token': SMARTOLT_API_KEY,
@@ -22,9 +22,9 @@ const getBaseUrl = () => {
  * Fetch with an AbortController timeout so a slow/dead Smart OLT API
  * never blocks the event loop indefinitely.
  */
-async function fetchWithTimeout(url, options = {}) {
+async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(url, { ...options, signal: controller.signal });
     clearTimeout(timer);
@@ -32,7 +32,7 @@ async function fetchWithTimeout(url, options = {}) {
   } catch (err) {
     clearTimeout(timer);
     if (err.name === 'AbortError') {
-      throw new Error(`Smart OLT API request timed out after ${FETCH_TIMEOUT_MS / 1000}s`);
+      throw new Error(`Smart OLT API request timed out after ${timeoutMs / 1000}s`);
     }
     throw err;
   }
@@ -205,7 +205,7 @@ export async function fetchAllOnus() {
   const url = `${getBaseUrl()}/onu/get_all_onus_details`;
   
   try {
-    const response = await fetchWithTimeout(url, { method: 'GET', headers: getHeaders() });
+    const response = await fetchWithTimeout(url, { method: 'GET', headers: getHeaders() }, 25_000);
     
     if (!response.ok) {
       const errorText = await response.text();

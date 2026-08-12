@@ -93,8 +93,11 @@ server.listen(PORT, async () => {
 
   if (TELEGRAM_MODE === 'webhook') {
     await setupTelegramWebhook();
-  } else {
+  } else if (TELEGRAM_MODE === 'polling') {
     startTelegramPolling();
+  } else {
+    // 'disabled' mode: outbound sendMessage still works, no polling loop
+    console.log('📤 Telegram mode: SEND-ONLY (polling disabled). Alerts will be sent but bot commands are inactive.');
   }
 });
 
@@ -151,11 +154,16 @@ async function startTelegramPolling() {
     console.warn(`⚠️  Could not check/remove existing webhook: ${err.message}`);
   }
 
-  let offset = 0;
+  let offset        = 0;
+  let consecutiveFails = 0;
+  let isPolling     = false; // mutex to prevent concurrent calls
 
   const poll = async () => {
+    if (isPolling) return; // skip if already running
+    isPolling = true;
     try {
       const updates = await getUpdates(offset);
+      consecutiveFails = 0; // reset on success
       for (const update of updates) {
         offset = update.update_id + 1;
         if (update.message) {
@@ -164,11 +172,30 @@ async function startTelegramPolling() {
           });
         }
       }
+      isPolling = false;
+      setTimeout(poll, 200); // small gap between polls
     } catch (error) {
-      console.error('❌ Error in Telegram polling loop:', error.message);
-      await new Promise(resolve => setTimeout(resolve, 5000));
+      isPolling = false;
+      consecutiveFails++;
+      const isConflict = error.message && error.message.includes('Conflict');
+      const isFetchFail = error.message && (error.message.includes('fetch failed') || error.message.includes('ECONNRESET'));
+
+      if (isConflict) {
+        // Another getUpdates session is active — wait longer for it to expire
+        const waitMs = Math.min(5000 * consecutiveFails, 60_000);
+        console.warn(`⚠️  Telegram Conflict detected. Waiting ${waitMs / 1000}s before retrying...`);
+        await new Promise(r => setTimeout(r, waitMs));
+      } else if (isFetchFail) {
+        // Network error — short retry
+        const waitMs = Math.min(3000 * consecutiveFails, 30_000);
+        console.warn(`⚠️  Telegram network error. Retrying in ${waitMs / 1000}s...`);
+        await new Promise(r => setTimeout(r, waitMs));
+      } else {
+        console.error('❌ Telegram polling error:', error.message);
+        await new Promise(r => setTimeout(r, 5000));
+      }
+      setTimeout(poll, 200);
     }
-    setTimeout(poll, 100);
   };
 
   poll();
