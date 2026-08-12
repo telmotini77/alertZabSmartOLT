@@ -335,6 +335,177 @@ const pendingPortIncidents = new Map();
 const getPortCorrelationMs = () =>
   getPositiveNumber(process.env.PORT_CORRELATION_WINDOW_SECS, 3) * 1_000;
 
+// ─── Area Outage Detection ────────────────────────────────────────────────────
+// Groups NAP drops that happen within AREA_OUTAGE_WINDOW_SECS seconds.
+// After the window, compares OLT/port and GPS distance to determine if it's a
+// localized area outage or unrelated individual failures.
+const napOutageBuffer = new Map(); // key: napName, value: { nap, payload, timestamp }
+let napOutageFlushTimer = null;
+
+const getAreaOutageWindowMs = () =>
+  getPositiveNumber(process.env.AREA_OUTAGE_WINDOW_SECS, 60) * 1_000;
+const getAreaOutageRadiusKm = () =>
+  getPositiveNumber(process.env.AREA_OUTAGE_RADIUS_KM, 2.0);
+
+/** Haversine formula — returns distance in km between two GPS coords */
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) *
+    Math.cos((lat2 * Math.PI) / 180) *
+    Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+/**
+ * Feed a confirmed LOS NAP into the area outage buffer.
+ * The window timer is (re)started each time a new NAP drops.
+ * When it finally fires, analyzeAndSendAreaReport() is called.
+ */
+function feedNapOutageBuffer(napName, cachedNap, payload) {
+  napOutageBuffer.set(napName.toUpperCase(), {
+    nap: cachedNap,
+    payload,
+    timestamp: Date.now()
+  });
+
+  // Reset the flush timer every time a new NAP is added
+  if (napOutageFlushTimer) clearTimeout(napOutageFlushTimer);
+  napOutageFlushTimer = setTimeout(async () => {
+    napOutageFlushTimer = null;
+    const entries = [...napOutageBuffer.values()];
+    napOutageBuffer.clear();
+    try {
+      await analyzeAndSendAreaReport(entries);
+    } catch (err) {
+      console.error('[Area Outage] Failed to send area report:', err.message);
+    }
+  }, getAreaOutageWindowMs());
+}
+
+/**
+ * Analyze accumulated NAP drops and send one consolidated Telegram message.
+ * Determines if drops are area-related (same port or close GPS) or unrelated.
+ */
+async function analyzeAndSendAreaReport(entries) {
+  const chatId = DEFAULT_CHAT_ID;
+  if (!chatId) return;
+  if (entries.length === 0) return;
+
+  // Single NAP: send individual alert (already queued separately, skip)
+  if (entries.length === 1) return;
+
+  const radiusKm = getAreaOutageRadiusKm();
+  const now = new Date().toLocaleString('es-EC', { timeZone: 'America/Guayaquil' });
+
+  // Group by OLT+Port key
+  const portGroups = new Map();
+  for (const entry of entries) {
+    const { nap } = entry;
+    const key = `${(nap.olt_name || 'unknown').toLowerCase()}:${nap.board}:${nap.port}`;
+    if (!portGroups.has(key)) portGroups.set(key, []);
+    portGroups.get(key).push(entry);
+  }
+
+  // Check geographic proximity for entries NOT in the same port
+  let isAreaOutage = false;
+  let areaType = 'independent'; // 'same_port' | 'geographic' | 'independent'
+  let maxDistKm = 0;
+
+  // If ANY group has 2+ NAPs on same port → it's a port-level area outage
+  for (const group of portGroups.values()) {
+    if (group.length >= 2) {
+      isAreaOutage = true;
+      areaType = 'same_port';
+      break;
+    }
+  }
+
+  // If not same port, check geographic proximity between all pairs
+  if (!isAreaOutage && entries.length >= 2) {
+    const withCoords = entries.filter(e => e.nap.latitude && e.nap.longitude);
+    let closeCount = 0;
+    for (let i = 0; i < withCoords.length; i++) {
+      for (let j = i + 1; j < withCoords.length; j++) {
+        const dist = haversineKm(
+          withCoords[i].nap.latitude, withCoords[i].nap.longitude,
+          withCoords[j].nap.latitude, withCoords[j].nap.longitude
+        );
+        if (dist > maxDistKm) maxDistKm = dist;
+        if (dist <= radiusKm) closeCount++;
+      }
+    }
+    if (closeCount > 0 && withCoords.length >= 2) {
+      isAreaOutage = true;
+      areaType = 'geographic';
+    }
+  }
+
+  const totalAffected = entries.reduce((sum, e) => sum + (e.nap.totalClients || 0), 0);
+  const napListLines = entries
+    .sort((a, b) => (a.nap.name || '').localeCompare(b.nap.name || '', undefined, { numeric: true }))
+    .map(e => {
+      const n = e.nap;
+      const offline = n.offlineClients ?? n.totalClients ?? '?';
+      const total = n.totalClients ?? '?';
+      const portTag = (n.board && n.port) ? ` — Slot ${n.board}/PON ${n.port}` : '';
+      const coordsLink = (n.latitude && n.longitude)
+        ? ` <a href="https://maps.google.com/?q=${n.latitude.toFixed(6)},${n.longitude.toFixed(6)}">📍</a>`
+        : '';
+      return `  • <b>${n.name}</b>${portTag} — ${offline}/${total} ONUs offline${coordsLink}`;
+    }).join('\n');
+
+  let message = '';
+  if (isAreaOutage && areaType === 'same_port') {
+    const sampleNap = entries[0].nap;
+    message = `
+🌐🚨 <b>CAÍDA EN ÁREA DETECTADA (MISMO PUERTO OLT)</b>
+
+📡 <b>OLT:</b> ${sampleNap.olt_name || 'Desconocida'} | <b>Puerto PON:</b> Slot ${sampleNap.board} / Puerto ${sampleNap.port}
+⚠️ <b>Diagnóstico:</b> Múltiples cajas NAP del mismo puerto caídas → probable corte de fibra troncal
+
+📦 <b>NAPs afectadas (${entries.length}):</b>
+${napListLines}
+
+👥 <b>Clientes afectados estimados:</b> ${totalAffected}
+📅 <b>Hora de detección:</b> <code>${now}</code>
+`.trim();
+  } else if (isAreaOutage && areaType === 'geographic') {
+    const sampleNap = entries[0].nap;
+    message = `
+🌐⚠️ <b>CAÍDA EN ÁREA DETECTADA (PROXIMIDAD GEOGRÁFICA)</b>
+
+📡 <b>OLT:</b> ${sampleNap.olt_name || 'Varias'}
+⚠️ <b>Diagnóstico:</b> Caídas en un radio ≤ ${radiusKm} km → posible falla en fibra de distribución o sector eléctrico
+
+📦 <b>NAPs afectadas (${entries.length}):</b>
+${napListLines}
+
+👥 <b>Clientes afectados estimados:</b> ${totalAffected}
+📅 <b>Hora de detección:</b> <code>${now}</code>
+`.trim();
+  } else {
+    // Not related — send a brief summary noting they're independent
+    message = `
+⚡ <b>MÚLTIPLES FALLAS INDEPENDIENTES DETECTADAS</b>
+
+Se detectaron ${entries.length} caídas de NAP sin relación geográfica ni de red en los últimos ${Math.round(getAreaOutageWindowMs() / 60000)} min:
+
+${napListLines}
+
+📊 <b>Distancia máxima entre NAPs:</b> ${maxDistKm.toFixed(1)} km (umbral: ${radiusKm} km)
+📅 <b>Hora de detección:</b> <code>${now}</code>
+<i>Cada caída fue notificada individualmente.</i>
+`.trim();
+  }
+
+  console.log(`[Area Outage] Sending ${areaType} area report for ${entries.length} NAPs.`);
+  await sendMessage(chatId, message);
+}
+
 const isOnline = (onu) => ['online', 'active'].includes(String(onu?.status || '').toLowerCase());
 
 function portIncidentKey(onu, payload) {
@@ -1010,6 +1181,48 @@ async function processZabbixAlert(payload) {
 
     // ── Compare and either queue a port report or send an individual fallback ─
     try {
+      // ── LOS Validation: For a Loss of Signal alert, ALL ONUs on this NAP
+      //    must be offline (100%) before we classify it as a full NAP outage.
+      //    If some ONUs are still online, it's an individual ONU failure, not LOS.
+      let losNapName = null;
+      let losCachedNap = null;
+      if (eventStatus !== 'OK') {
+        // Determine NAP from freshOnu or cache fallback
+        const resolvedNap = freshOnu?.odb_name || freshOnu?.odb || null;
+        if (resolvedNap) {
+          losCachedNap = getCachedNaps().find(n => n.name.toUpperCase() === resolvedNap.toUpperCase());
+        } else if (!freshOnu) {
+          // Try resolving from cache by SN
+          for (const nap of getCachedNaps()) {
+            if (nap.clients?.some(c => (c.sn || '').toUpperCase() === cleanSn)) {
+              losCachedNap = nap;
+              break;
+            }
+          }
+        }
+
+        if (losCachedNap && losCachedNap.clients && losCachedNap.clients.length > 0) {
+          const totalClients = losCachedNap.clients.length;
+          const offlineClients = losCachedNap.clients.filter(c => {
+            const s = (c.status || '').toLowerCase();
+            return s !== 'online' && s !== 'active';
+          }).length;
+          const allOffline = offlineClients === totalClients;
+          console.log(`[LOS Validation] NAP "${losCachedNap.name}": ${offlineClients}/${totalClients} ONUs offline. All offline: ${allOffline}`);
+
+          if (!allOffline && totalClients > 1) {
+            // Not a full LOS — only some ONUs dropped. Send as individual alert without LOS classification.
+            console.log(`[LOS Validation] Partial drop on NAP "${losCachedNap.name}" (${offlineClients}/${totalClients} offline). Not a full LOS. Sending as individual power-fail alert.`);
+            // Override the reason so it doesn't get classified as LOS
+            if (freshOltStatusReason && freshOltStatusReason.includes('Señal')) {
+              freshOltStatusReason = 'Falla Individual (otras ONUs de la NAP operativas)';
+            }
+          } else if (allOffline) {
+            losNapName = losCachedNap.name;
+          }
+        }
+      }
+
       const canCorrelatePort = PORT_CORRELATION_ENABLED && freshOnu && !isOnline(freshOnu) &&
         freshOnu.board !== undefined && freshOnu.port !== undefined;
       const result = await processAndSendAlert(
@@ -1026,6 +1239,11 @@ async function processZabbixAlert(payload) {
         }
       } else {
         console.log(`[Settle] Alert sent for SN ${cleanSn} after Smart OLT corroboration.`);
+        // Feed area outage buffer only when a full LOS on a named NAP is confirmed
+        if (losNapName && losCachedNap && eventStatus !== 'OK') {
+          feedNapOutageBuffer(losNapName, losCachedNap, payload);
+          console.log(`[Area Outage] NAP "${losNapName}" added to area outage buffer.`);
+        }
       }
     } catch (err) {
       console.error(`[Settle] Failed to send Telegram alert for ${cleanSn}:`, err.message);
