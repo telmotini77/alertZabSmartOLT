@@ -1,6 +1,8 @@
 import express from 'express';
 import dotenv from 'dotenv';
 import http from 'http';
+import dns from 'dns';
+import { Agent, setGlobalDispatcher } from 'undici';
 import webhookRoutes, { handleTelegramMessage } from './routes/webhook.js';
 import { getUpdates, setWebhook, getWebhookInfo, deleteWebhook } from './services/telegram.js';
 import { initWebSocketServer } from './services/websocket.js';
@@ -8,6 +10,16 @@ import { initCache } from './services/cache.js';
 import { startScanner } from './services/scanner.js';
 
 dotenv.config();
+
+// Force Node to prefer IPv4 DNS resolution (fixes `fetch failed` in Docker Alpine)
+dns.setDefaultResultOrder('ipv4first');
+
+// Configure global Keep-Alive agent for native fetch to reuse connections
+setGlobalDispatcher(new Agent({
+  keepAliveTimeout: 15_000, // 15s keep-alive
+  keepAliveMaxTimeout: 30_000,
+  connections: 50 // Increased pool size
+}));
 
 // ─── Startup validation ───────────────────────────────────────────────────────
 const REQUIRED_VARS = ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID'];

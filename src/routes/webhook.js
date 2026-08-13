@@ -407,7 +407,7 @@ async function sendCachedNapLossAlert(payload, nap, eventTime = '') {
 const getSettleMs = () => {
   if (process.env.NODE_ENV === 'test') return 100; // fast in tests
   const secs = parseFloat(process.env.SMARTOLT_SETTLE_SECS);
-  return (!isNaN(secs) && secs >= 0) ? secs * 1_000 : 2_000; // default 2s (ultra-fast response)
+  return (!isNaN(secs) && secs >= 0) ? secs * 1_000 : 1_200; // default 1.2s (ultra-fast response)
 };
 
 // Zabbix often reports one event per ONU even when the underlying incident is a
