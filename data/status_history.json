@@ -1,5 +1,27 @@
 [
   {
+    "id": "evt_1786575403083_6yxrj7",
+    "timestamp": "2026-08-12T22:56:43.083Z",
+    "formattedTime": "12/08/2026 22:56:43",
+    "eventTime": "2026-08-12 17:56:43",
+    "sn": "HWTC5045FF9B",
+    "onuName": "30740-ENRIQUEZ CHOCHO MARCELO FABIAN",
+    "napName": "SM7004-2",
+    "previousStatus": "Online",
+    "newStatus": "Offline",
+    "napStatus": "offline",
+    "failureType": "loss",
+    "failureLabel": "Pérdida de Señal (LOS)",
+    "reason": "ONU HWTC5045FF9B: Loss of Signal",
+    "resolved": false,
+    "resolvedAt": null,
+    "oltName": "ROUTER-FTTH",
+    "board": "2",
+    "port": "15",
+    "latitude": -2.929007,
+    "longitude": -78.960099
+  },
+  {
     "id": "evt_1786573377005_b05st2",
     "timestamp": "2026-08-12T22:22:57.005Z",
     "formattedTime": "12/08/2026 17:22:57",

@@ -33,14 +33,14 @@
     "latitude": -2.929007,
     "longitude": -78.960099,
     "totalClients": 1,
-    "onlineClients": 1,
-    "offlineClients": 0,
-    "status": "online",
+    "onlineClients": 0,
+    "offlineClients": 1,
+    "status": "offline",
     "clients": [
       {
         "name": "30740-ENRIQUEZ CHOCHO MARCELO FABIAN",
         "sn": "HWTC5045FF9B",
-        "status": "Online",
+        "status": "Offline",
         "onu_id": "N/A"
       }
     ]
