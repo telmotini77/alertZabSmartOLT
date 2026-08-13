@@ -6,6 +6,8 @@ let markers = {}; // Maps NAP name -> Leaflet marker object
 let socket;
 let userMarker = null; // Pulsing GPS user location marker
 let activeStatusFilter = null;
+let markerClusterGroup; // Leaflet marker cluster group
+let opticalChart = null; // Chart.js instance for optical history
 
 // Base Map Layers
 let baseLayers = {};
@@ -106,6 +108,14 @@ function initMap() {
 
   // Initialize Topology Layer Group
   topologyLayerGroup = L.layerGroup().addTo(map);
+
+  // Initialize Marker Cluster Group
+  markerClusterGroup = L.markerClusterGroup({
+    maxClusterRadius: 50,
+    showCoverageOnHover: false,
+    spiderfyOnMaxZoom: true
+  });
+  map.addLayer(markerClusterGroup);
 
   // Add Scale Control (bottom-left)
   L.control.scale({ position: 'bottomleft' }).addTo(map);
@@ -210,8 +220,10 @@ function renderNapsAndMarkers(filterQuery = '') {
   const listContainer = document.getElementById('naps-list');
   listContainer.innerHTML = '';
   
-  // Clear existing markers from map
-  Object.values(markers).forEach(m => map.removeLayer(m));
+  // Clear existing markers from cluster group
+  if (markerClusterGroup) {
+    markerClusterGroup.clearLayers();
+  }
   markers = {};
 
   const query = filterQuery.toLowerCase().trim();
@@ -287,7 +299,11 @@ function renderNapsAndMarkers(filterQuery = '') {
 
       // Bind detail popup
       marker.bindPopup(() => getPopupContent(nap));
-      marker.addTo(map);
+      if (markerClusterGroup) {
+        markerClusterGroup.addLayer(marker);
+      } else {
+        marker.addTo(map);
+      }
       markers[nap.name] = marker;
     }
 
@@ -575,7 +591,11 @@ function handleNapUpdate(updatedNap) {
       icon: markerIcon
     });
     newMarker.bindPopup(() => getPopupContent(updatedNap));
-    newMarker.addTo(map);
+    if (markerClusterGroup) {
+      markerClusterGroup.addLayer(newMarker);
+    } else {
+      newMarker.addTo(map);
+    }
     markers[updatedNap.name] = newMarker;
   }
 
@@ -2047,13 +2067,26 @@ async function showOnuDiagnostics(sn) {
           </div>
         </div>
 
-        <div class="diag-footer">
+        <!-- Optical Power History Chart -->
+        <div class="diag-chart-box" style="margin-top: 15px;">
+          <h4 style="font-size: 11px; color: var(--text-muted); text-transform: uppercase; margin-bottom: 8px; font-weight: 600; display: flex; align-items: center; gap: 6px; margin: 0 0 8px 0;">
+            <i class="fa-solid fa-chart-line"></i> Historial de Niveles Ópticos (Rx)
+          </h4>
+          <div style="position: relative; height: 180px; width: 100%;">
+            <canvas id="optical-history-chart"></canvas>
+          </div>
+        </div>
+
+        <div class="diag-footer" style="margin-top: 15px;">
           <button id="btn-refresh-diag" data-sn="${sn}" class="btn-primary">
             <i class="fa-solid fa-arrows-rotate"></i> Actualizar
           </button>
         </div>
       </div>
     `;
+
+    // Render historical optical chart
+    renderOpticalHistoryChart(sn);
 
     // Bind refresh button click
     document.getElementById('btn-refresh-diag').addEventListener('click', () => {
@@ -2099,3 +2132,91 @@ function getSignalProgressBarHtml(rx) {
     </div>
   `;
 }
+
+/**
+ * Fetch and render the Chart.js optical history graph.
+ */
+async function renderOpticalHistoryChart(sn) {
+  try {
+    const res = await fetch(`/webhook/onu/sn/${sn}/optical-history`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const history = data.history || [];
+
+    const ctx = document.getElementById('optical-history-chart');
+    if (!ctx) return;
+
+    if (opticalChart) {
+      opticalChart.destroy();
+      opticalChart = null;
+    }
+
+    if (history.length === 0) {
+      // Draw a "no data" message inside canvas
+      const ctx2d = ctx.getContext('2d');
+      ctx2d.font = '12px Outfit, sans-serif';
+      ctx2d.fillStyle = 'rgba(255,255,255,0.4)';
+      ctx2d.textAlign = 'center';
+      ctx2d.textBaseline = 'middle';
+      ctx2d.fillText('No hay historial de potencia óptica registrado.', ctx.width / 2, ctx.height / 2);
+      return;
+    }
+
+    const labels = history.map(item => {
+      const date = new Date(item.timestamp);
+      return date.toLocaleDateString('es-EC', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    });
+    
+    const rxData = history.map(item => item.rx_power);
+
+    // Create Line Chart
+    opticalChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: labels,
+        datasets: [{
+          label: 'Potencia Rx (dBm)',
+          data: rxData,
+          borderColor: '#38BDF8',
+          backgroundColor: 'rgba(56, 189, 248, 0.15)',
+          fill: true,
+          tension: 0.3,
+          borderWidth: 2,
+          pointBackgroundColor: '#FFFFFF',
+          pointBorderColor: '#38BDF8',
+          pointRadius: 4,
+          pointHoverRadius: 6
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: function(context) {
+                return ` Rx: ${context.parsed.y.toFixed(2)} dBm`;
+              }
+            }
+          }
+        },
+        scales: {
+          x: {
+            ticks: { color: 'rgba(255,255,255,0.4)', font: { size: 9, family: 'Outfit' } },
+            grid: { color: 'rgba(255,255,255,0.05)' }
+          },
+          y: {
+            ticks: { color: 'rgba(255,255,255,0.4)', font: { size: 9, family: 'Outfit' } },
+            grid: { color: 'rgba(255,255,255,0.05)' },
+            suggestedMin: -35,
+            suggestedMax: -15
+          }
+        }
+      }
+    });
+  } catch (err) {
+    console.error('Error rendering optical chart:', err);
+  }
+}
+

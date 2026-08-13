@@ -2042,3 +2042,68 @@ body {
   font-size: 11px !important;
 }
 
+/* Sleek Dark Glassmorphism Marker Clusters */
+.marker-cluster-small {
+  background-color: rgba(16, 185, 129, 0.2) !important;
+}
+.marker-cluster-small div {
+  background-color: rgba(16, 185, 129, 0.7) !important;
+  color: #0F172A !important;
+  font-weight: 700 !important;
+  font-family: 'Outfit', sans-serif;
+}
+
+.marker-cluster-medium {
+  background-color: rgba(245, 158, 11, 0.2) !important;
+}
+.marker-cluster-medium div {
+  background-color: rgba(245, 158, 11, 0.7) !important;
+  color: #0F172A !important;
+  font-weight: 700 !important;
+  font-family: 'Outfit', sans-serif;
+}
+
+.marker-cluster-large {
+  background-color: rgba(239, 68, 68, 0.2) !important;
+}
+.marker-cluster-large div {
+  background-color: rgba(239, 68, 68, 0.7) !important;
+  color: #FFFFFF !important;
+  font-weight: 700 !important;
+  font-family: 'Outfit', sans-serif;
+}
+
+.marker-cluster {
+  background-clip: padding-box;
+  border-radius: 20px;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 4px 15px rgba(0, 0, 0, 0.4);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.marker-cluster:hover {
+  transform: scale(1.1);
+  box-shadow: 0 8px 25px rgba(0, 0, 0, 0.6);
+}
+
+/* Transitions for drawers and overlays */
+.history-drawer {
+  transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
+.modal {
+  transition: opacity 0.3s ease, visibility 0.3s ease !important;
+}
+
+/* Diagnostics modal chart style */
+#optical-history-chart {
+  background: rgba(15, 23, 42, 0.3);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 8px;
+  max-height: 180px;
+  margin-top: 15px;
+}
+
+

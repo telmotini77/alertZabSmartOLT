@@ -8,6 +8,7 @@ import { extractSerialNumber, extractNapBox, parseStatusInfo, extractEventTime, 
 import { broadcast } from '../services/websocket.js';
 import { updateOnuStatusInCache, getCachedNaps, updateNapCoordinates, updateNapCoordinatesBulk, getStatusHistory, deleteHistoryItem, clearHistory, resolveHistoryItem } from '../services/cache.js';
 import { getActiveTriggers } from '../services/zabbix.js';
+import { dbGetOpticalHistory, dbSaveOpticalRecord } from '../services/db.js';
 
 const router = express.Router();
 const DEFAULT_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
@@ -1477,6 +1478,98 @@ Comandos disponibles:
     return;
   }
 
+  if (upperText.startsWith('/OLT') || upperText.startsWith('/STATUS_OLT')) {
+    try {
+      const cachedNaps = getCachedNaps();
+      let okCount = 0;
+      let partialCount = 0;
+      let downCount = 0;
+      let totalClients = 0;
+      let onlineClients = 0;
+      let offlineClients = 0;
+      
+      cachedNaps.forEach(nap => {
+        if (nap.status === 'online') okCount++;
+        else if (nap.status === 'partial') partialCount++;
+        else if (nap.status === 'offline') downCount++;
+        
+        totalClients += nap.totalClients || 0;
+        onlineClients += nap.onlineClients || 0;
+        offlineClients += nap.offlineClients || 0;
+      });
+      
+      const report = `📊 <b>Resumen General de la Red FTTH</b>
+\n📦 <b>Cajas NAP:</b>
+• 🟢 Estables (Online): <b>${okCount}</b>
+• ⚠️ Parciales (Partial): <b>${partialCount}</b>
+• 🔴 Caídas (Offline): <b>${downCount}</b>
+• Total NAPs: <b>${cachedNaps.length}</b>
+\n👤 <b>Abonados/Clientes:</b>
+• 🟢 Operativos (Online): <b>${onlineClients}</b>
+• 🔴 Caídos (Offline): <b>${offlineClients}</b>
+• Total Clientes: <b>${totalClients}</b>`;
+      
+      await replyToMessage(chatId, messageId, report);
+    } catch (err) {
+      console.error('Error handling /olt command:', err.message);
+    }
+    return;
+  }
+
+  if (upperText.startsWith('/DIAGNOSTICO') || upperText.startsWith('/DIAG')) {
+    try {
+      const parts = text.split(/\s+/);
+      const snParam = parts[1] ? parts[1].trim() : null;
+      if (!snParam) {
+        await replyToMessage(chatId, messageId, 'ℹ️ Por favor ingresa el número de serie de la ONU a diagnosticar.\nEjemplo: <code>/diagnostico FHTT8C3A91BF</code>');
+        return;
+      }
+      
+      await replyToMessage(chatId, messageId, `⚡ Consultando potencia óptica en tiempo real para <code>${snParam.toUpperCase()}</code>...`);
+      
+      const onu = await findOnuBySn(snParam);
+      if (!onu) {
+        await replyToMessage(chatId, messageId, `❌ ONU con número de serie <code>${snParam.toUpperCase()}</code> no encontrada.`);
+        return;
+      }
+      
+      const liveStatus = await getOnuStatus(onu.external_id);
+      if (!liveStatus) {
+        await replyToMessage(chatId, messageId, `❌ No se pudo obtener la potencia óptica en vivo para <code>${onu.sn}</code>.`);
+        return;
+      }
+      
+      const rx = parseFloat(liveStatus.signal || liveStatus.rx_power);
+      const tx = parseFloat(liveStatus.tx_power);
+      const temp = liveStatus.temperature ? `${parseFloat(liveStatus.temperature).toFixed(1)} °C` : 'N/A';
+      const bias = liveStatus.bias_current ? `${parseFloat(liveStatus.bias_current).toFixed(1)} mA` : 'N/A';
+      const dist = liveStatus.distance ? `${liveStatus.distance} m` : 'N/A';
+      
+      // Save to DB in background
+      dbSaveOpticalRecord(onu.sn, rx, tx, parseFloat(liveStatus.temperature), parseFloat(liveStatus.voltage), parseFloat(liveStatus.bias_current)).catch(() => {});
+      
+      const rxStr = isNaN(rx) || rx === 0 ? 'N/A' : `${rx.toFixed(2)} dBm`;
+      const txStr = isNaN(tx) || tx === 0 ? 'N/A' : `${tx.toFixed(2)} dBm`;
+      const statusDot = liveStatus.onu_status?.toLowerCase() === 'online' || liveStatus.status_desc?.toLowerCase() === 'online' || liveStatus.status_desc?.toLowerCase() === 'active' || liveStatus.onu_status?.toLowerCase() === 'active' ? '🟢' : '🔴';
+      
+      const reply = `⚡ <b>Diagnóstico en Vivo ONU: ${onu.name}</b>
+\n🔢 <b>SN:</b> <code>${onu.sn}</code>
+📊 <b>Estado OLT:</b> ${statusDot} <b>${(liveStatus.onu_status || liveStatus.status_desc || onu.status || 'Offline').toUpperCase()}</b>
+📶 <b>Potencia Rx (Señal):</b> <b>${rxStr}</b>
+📤 <b>Potencia Tx:</b> <code>${txStr}</code>
+🌡️ <b>Temperatura:</b> <code>${temp}</code>
+🔌 <b>Corriente Bias:</b> <code>${bias}</code>
+📏 <b>Distancia OLT:</b> <code>${dist}</code>
+📦 <b>Caja NAP:</b> <code>${onu.odb_name || onu.odb || 'N/A'}</code>`;
+      
+      await replyToMessage(chatId, messageId, reply);
+    } catch (err) {
+      console.error('Error handling /diagnostico command:', err.message);
+      await replyToMessage(chatId, messageId, `❌ Error de diagnóstico: ${err.message}`);
+    }
+    return;
+  }
+
   if (upperText.startsWith('/SYNC') || upperText.startsWith('/FALLAS') || upperText.startsWith('/STATUS_FALLAS')) {
     try {
       await replyToMessage(chatId, messageId, '🔄 Iniciando sincronización de fallas activas con Zabbix y Smart OLT. Por favor espere...');
@@ -1881,6 +1974,14 @@ router.get('/onu/sn/:sn/status', async (req, res) => {
       return res.status(500).json({ error: `Failed to fetch live status for ONU ${sn} (External ID: ${onu.external_id})` });
     }
 
+    const rx = parseFloat(liveStatus.signal || liveStatus.rx_power);
+    const tx = parseFloat(liveStatus.tx_power);
+    const temp = parseFloat(liveStatus.temperature);
+    const volt = parseFloat(liveStatus.voltage);
+    const bias = parseFloat(liveStatus.bias_current);
+    
+    dbSaveOpticalRecord(sn, rx, tx, temp, volt, bias).catch(() => {});
+
     return res.json({
       status: 'success',
       sn,
@@ -1907,6 +2008,25 @@ router.get('/onu/sn/:sn/status', async (req, res) => {
     });
   } catch (err) {
     console.error(`Error in /onu/sn/${sn}/status:`, err.message);
+    return res.status(500).json({ error: 'Internal server error', details: err.message });
+  }
+});
+
+// GET /webhook/onu/sn/:sn/optical-history - Fetch historical optical power levels
+router.get('/onu/sn/:sn/optical-history', async (req, res) => {
+  const sn = (req.params.sn || '').trim().toUpperCase();
+  if (!sn) {
+    return res.status(400).json({ error: 'Missing serial number' });
+  }
+  try {
+    const history = await dbGetOpticalHistory(sn, 20);
+    return res.json({
+      status: 'success',
+      sn,
+      history
+    });
+  } catch (err) {
+    console.error(`Error in /onu/sn/${sn}/optical-history:`, err.message);
     return res.status(500).json({ error: 'Internal server error', details: err.message });
   }
 });

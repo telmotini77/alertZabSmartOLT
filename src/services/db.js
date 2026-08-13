@@ -7,16 +7,86 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const dbDir = path.resolve(__dirname, '../../data');
-const dbPath = path.join(dbDir, 'telecom.db');
+const dbPath = process.env.NODE_ENV === 'test' || process.env.NAP_CACHE_FILE
+  ? path.join(dbDir, 'telecom.test.db')
+  : path.join(dbDir, 'telecom.db');
 
 let db;
+
+/**
+ * Get or initialize database connection synchronously.
+ */
+function getDb() {
+  if (!db) {
+    if (!fs.existsSync(dbDir)) {
+      fs.mkdirSync(dbDir, { recursive: true });
+    }
+    db = new sqlite3.Database(dbPath);
+    
+    // Setup tables synchronously
+    db.serialize(() => {
+      db.run(`
+        CREATE TABLE IF NOT EXISTS naps (
+          name TEXT PRIMARY KEY,
+          olt_name TEXT,
+          board TEXT,
+          port TEXT,
+          latitude REAL,
+          longitude REAL,
+          totalClients INTEGER,
+          onlineClients INTEGER,
+          offlineClients INTEGER,
+          status TEXT,
+          clients TEXT
+        )
+      `);
+      db.run(`
+        CREATE TABLE IF NOT EXISTS status_history (
+          id TEXT PRIMARY KEY,
+          timestamp TEXT,
+          formattedTime TEXT,
+          eventTime TEXT,
+          sn TEXT,
+          onuName TEXT,
+          napName TEXT,
+          previousStatus TEXT,
+          newStatus TEXT,
+          napStatus TEXT,
+          failureType TEXT,
+          failureLabel TEXT,
+          reason TEXT,
+          resolved INTEGER,
+          resolvedAt TEXT,
+          oltName TEXT,
+          board TEXT,
+          port TEXT,
+          latitude REAL,
+          longitude REAL
+        )
+      `);
+      db.run(`
+        CREATE TABLE IF NOT EXISTS optical_history (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          sn TEXT,
+          rx_power REAL,
+          tx_power REAL,
+          temperature REAL,
+          voltage REAL,
+          bias_current REAL,
+          timestamp TEXT
+        )
+      `);
+    });
+  }
+  return db;
+}
 
 /**
  * Helper to run a SQL command returning a Promise.
  */
 function run(sql, params = []) {
   return new Promise((resolve, reject) => {
-    db.run(sql, params, function (err) {
+    getDb().run(sql, params, function (err) {
       if (err) reject(err);
       else resolve(this);
     });
@@ -28,7 +98,7 @@ function run(sql, params = []) {
  */
 function get(sql, params = []) {
   return new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => {
+    getDb().get(sql, params, (err, row) => {
       if (err) reject(err);
       else resolve(row);
     });
@@ -40,7 +110,7 @@ function get(sql, params = []) {
  */
 function all(sql, params = []) {
   return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
+    getDb().all(sql, params, (err, rows) => {
       if (err) reject(err);
       else resolve(rows);
     });
@@ -50,89 +120,10 @@ function all(sql, params = []) {
 /**
  * Initialize SQLite database, create tables and run auto-migration.
  */
-export function initDb() {
-  return new Promise((resolve, reject) => {
-    if (!fs.existsSync(dbDir)) {
-      fs.mkdirSync(dbDir, { recursive: true });
-    }
-
-    db = new sqlite3.Database(dbPath, async (err) => {
-      if (err) {
-        console.error('❌ Failed to open SQLite database:', err.message);
-        return reject(err);
-      }
-      console.log(`📡 SQLite Database connected at: ${dbPath}`);
-
-      try {
-        // Create NAPs table
-        await run(`
-          CREATE TABLE IF NOT EXISTS naps (
-            name TEXT PRIMARY KEY,
-            olt_name TEXT,
-            board TEXT,
-            port TEXT,
-            latitude REAL,
-            longitude REAL,
-            totalClients INTEGER,
-            onlineClients INTEGER,
-            offlineClients INTEGER,
-            status TEXT,
-            clients TEXT
-          )
-        `);
-
-        // Create Status History table
-        await run(`
-          CREATE TABLE IF NOT EXISTS status_history (
-            id TEXT PRIMARY KEY,
-            timestamp TEXT,
-            formattedTime TEXT,
-            eventTime TEXT,
-            sn TEXT,
-            onuName TEXT,
-            napName TEXT,
-            previousStatus TEXT,
-            newStatus TEXT,
-            napStatus TEXT,
-            failureType TEXT,
-            failureLabel TEXT,
-            reason TEXT,
-            resolved INTEGER,
-            resolvedAt TEXT,
-            oltName TEXT,
-            board TEXT,
-            port TEXT,
-            latitude REAL,
-            longitude REAL
-          )
-        `);
-
-        // Create Optical History table
-        await run(`
-          CREATE TABLE IF NOT EXISTS optical_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sn TEXT,
-            rx_power REAL,
-            tx_power REAL,
-            temperature REAL,
-            voltage REAL,
-            bias_current REAL,
-            timestamp TEXT
-          )
-        `);
-
-        console.log('✅ SQLite Tables verified/created.');
-
-        // Run data migration if JSON files exist and DB is empty
-        await runMigration();
-
-        resolve();
-      } catch (tableErr) {
-        console.error('❌ SQLite table creation error:', tableErr.message);
-        reject(tableErr);
-      }
-    });
-  });
+export async function initDb() {
+  getDb();
+  console.log(`📡 SQLite Database connected at: ${dbPath}`);
+  await runMigration();
 }
 
 /**
@@ -149,8 +140,8 @@ async function runMigration() {
       console.log('📦 Migrating NAPs cache from JSON to SQLite...');
       const cacheData = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
       if (Array.isArray(cacheData)) {
-        db.serialize(() => {
-          const stmt = db.prepare(`
+        getDb().serialize(() => {
+          const stmt = getDb().prepare(`
             INSERT INTO naps (name, olt_name, board, port, latitude, longitude, totalClients, onlineClients, offlineClients, status, clients)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           `);
@@ -181,8 +172,8 @@ async function runMigration() {
       console.log('📋 Migrating Status History from JSON to SQLite...');
       const historyData = JSON.parse(fs.readFileSync(historyFile, 'utf8'));
       if (Array.isArray(historyData)) {
-        db.serialize(() => {
-          const stmt = db.prepare(`
+        getDb().serialize(() => {
+          const stmt = getDb().prepare(`
             INSERT INTO status_history (
               id, timestamp, formattedTime, eventTime, sn, onuName, napName,
               previousStatus, newStatus, napStatus, failureType, failureLabel,

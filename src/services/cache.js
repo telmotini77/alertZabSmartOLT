@@ -4,49 +4,40 @@ import { fileURLToPath } from 'url';
 import { fetchAllOnus } from './smartOlt.js';
 import { extractNapBox } from '../utils/parser.js';
 import { broadcast } from './websocket.js';
+import {
+  initDb,
+  dbGetAllNaps,
+  dbSaveNap,
+  dbGetStatusHistory,
+  dbSaveHistoryItem,
+  dbDeleteHistoryItem,
+  dbClearHistory,
+  dbResolveHistoryItem,
+  dbSaveOpticalRecord
+} from './db.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// ─── Debounced async disk write ───────────────────────────────────────────────
-let _saveTimer = null;
-let _saveHistoryTimer = null;
-const SAVE_DEBOUNCE_MS = 2_000; // batch rapid updates into a single disk write
-
-const defaultCacheFile = path.resolve(__dirname, '../../data/nap_cache.json');
-const defaultHistoryFile = path.resolve(__dirname, '../../data/status_history.json');
-
-// Tests and maintenance jobs can use an isolated cache without touching the
-// production map data.
-const cacheFile = process.env.NAP_CACHE_FILE
-  ? path.resolve(process.env.NAP_CACHE_FILE)
-  : defaultCacheFile;
-const historyFile = process.env.STATUS_HISTORY_FILE
-  ? path.resolve(process.env.STATUS_HISTORY_FILE)
-  : defaultHistoryFile;
-
-const cacheDir = path.dirname(cacheFile);
-
-// Memory cache
+// Memory cache for fast reads
 let cachedNaps = [];
 let statusHistory = [];
 const MAX_HISTORY_ITEMS = 5000;
 
 /**
- * Initialize cache by loading from file or running a full sync.
+ * Initialize cache by loading from SQLite database.
  */
 export async function initCache() {
   try {
-    if (!fs.existsSync(cacheDir)) {
-      fs.mkdirSync(cacheDir, { recursive: true });
-    }
+    // 1. Initialize SQLite Database
+    await initDb();
 
-    if (fs.existsSync(cacheFile)) {
-      const data = fs.readFileSync(cacheFile, 'utf8');
-      cachedNaps = JSON.parse(data);
-      console.log(`📦 Loaded ${cachedNaps.length} NAPs from disk cache.`);
-    } else {
-      console.log('📦 No disk cache found. Running initial sync with Smart OLT...');
+    // 2. Load NAPs from database
+    cachedNaps = await dbGetAllNaps();
+    console.log(`📦 Loaded ${cachedNaps.length} NAPs from SQLite database.`);
+
+    if (cachedNaps.length === 0) {
+      console.log('📦 No NAPs found in SQLite. Running initial sync with Smart OLT...');
       try {
         await syncCacheWithSmartOlt();
       } catch (syncErr) {
@@ -54,17 +45,9 @@ export async function initCache() {
       }
     }
 
-    // Load status change history from disk if exists
-    if (fs.existsSync(historyFile)) {
-      try {
-        const histData = fs.readFileSync(historyFile, 'utf8');
-        statusHistory = JSON.parse(histData);
-        console.log(`📋 Loaded ${statusHistory.length} status history events from disk.`);
-      } catch (hErr) {
-        console.error('Error reading history file:', hErr.message);
-        statusHistory = [];
-      }
-    }
+    // 3. Load Status History from database
+    statusHistory = await dbGetStatusHistory(MAX_HISTORY_ITEMS);
+    console.log(`📋 Loaded ${statusHistory.length} status history events from SQLite database.`);
 
     // Auto-seed coordinates from local CSV file
     applyCsvCoordinatesToCache();
@@ -133,6 +116,16 @@ export async function syncCacheWithSmartOlt() {
         napMap[napName].lngs.push(lng);
       }
 
+      // Automatically save optical power history record in background for online ONUs
+      if (isOnline && onu.sn) {
+        const rx = parseFloat(onu.rx_power);
+        const tx = parseFloat(onu.tx_power);
+        const temp = parseFloat(onu.temperature);
+        const volt = parseFloat(onu.voltage);
+        const bias = parseFloat(onu.bias_current);
+        dbSaveOpticalRecord(onu.sn, rx, tx, temp, volt, bias).catch(() => {});
+      }
+
       napMap[napName].clients.push(client);
     });
 
@@ -183,8 +176,10 @@ export async function syncCacheWithSmartOlt() {
     });
 
     cachedNaps = naps;
-    saveCacheToDisk();
-    console.log(`✅ Synced ${cachedNaps.length} NAPs successfully.`);
+    
+    // Save NAPs to SQLite in background
+    await Promise.all(naps.map(nap => dbSaveNap(nap)));
+    console.log(`✅ Synced and saved ${cachedNaps.length} NAPs successfully to SQLite database.`);
   } catch (err) {
     console.error('❌ Error during syncCacheWithSmartOlt:', err.message);
     throw err;
@@ -233,8 +228,8 @@ export function updateOnuStatusInCache(sn, newStatus, eventMetadata = {}) {
       affectedNap.status = 'online';
     }
 
-    saveCacheToDisk();
-    console.log(`💾 Cache updated for ONU ${cleanSn} inside ${affectedNap.name}. Status: ${newStatus}`);
+    dbSaveNap(affectedNap).catch(() => {});
+    console.log(`💾 SQLite updated for ONU ${cleanSn} inside ${affectedNap.name}. Status: ${newStatus}`);
 
     // Record history event if status changed or forced
     const isNewStatusOnline = (newStatus || '').toLowerCase() === 'online' || (newStatus || '').toLowerCase() === 'active';
@@ -319,15 +314,16 @@ export function applyOnuStatusSnapshot(onus) {
   });
 
   if (changedNaps.length > 0) {
-    saveCacheToDisk();
-    console.log(`Applied Smart OLT status snapshot to ${changedNaps.length} NAP(s).`);
+    // Save to SQLite
+    Promise.all(changedNaps.map(nap => dbSaveNap(nap))).catch(() => {});
+    console.log(`Applied Smart OLT status snapshot to ${changedNaps.length} NAP(s) in SQLite.`);
   }
 
   return changedNaps;
 }
 
 /**
- * Record a state change event into memory, write to disk, and broadcast via WebSockets.
+ * Record a state change event into memory, write to database, and broadcast via WebSockets.
  */
 export function recordStatusChangeEvent(data) {
   const now = new Date();
@@ -373,6 +369,7 @@ export function recordStatusChangeEvent(data) {
       if (item.sn && item.sn.toUpperCase() === targetSn && !item.resolved) {
         item.resolved = true;
         item.resolvedAt = now.toISOString();
+        dbResolveHistoryItem(item.id, now.toISOString()).catch(() => {});
       }
     });
   }
@@ -403,13 +400,13 @@ export function recordStatusChangeEvent(data) {
   // Prepend to history array
   statusHistory.unshift(eventRecord);
 
-  // Keep array within bounds (retains up to 5000 records indefinitely)
+  // Keep array within bounds
   if (statusHistory.length > MAX_HISTORY_ITEMS) {
     statusHistory = statusHistory.slice(0, MAX_HISTORY_ITEMS);
   }
 
-  // Persist to disk debounced
-  saveHistoryToDisk();
+  // Save to SQLite in background
+  dbSaveHistoryItem(eventRecord).catch(() => {});
 
   // Broadcast to all connected map clients
   try {
@@ -424,8 +421,6 @@ export function recordStatusChangeEvent(data) {
 
 /**
  * Get the state change history list.
- * @param {number} [limit=100] - Number of items to return
- * @param {string} [filter] - 'all', 'pending', 'resolved'
  */
 export function getStatusHistory(limit = 100, filter = 'all') {
   let list = statusHistory;
@@ -444,7 +439,7 @@ export function deleteHistoryItem(id) {
   const index = statusHistory.findIndex(item => item.id === id);
   if (index !== -1) {
     const deleted = statusHistory.splice(index, 1)[0];
-    saveHistoryToDisk();
+    dbDeleteHistoryItem(id).catch(() => {});
     try {
       broadcast('status_history_deleted', { id });
     } catch (err) {
@@ -464,7 +459,7 @@ export function clearHistory(mode = 'all') {
   } else {
     statusHistory = [];
   }
-  saveHistoryToDisk();
+  dbClearHistory(mode).catch(() => {});
   try {
     broadcast('status_history_cleared', { mode });
   } catch (err) {
@@ -481,7 +476,7 @@ export function resolveHistoryItem(id) {
   if (item) {
     item.resolved = true;
     item.resolvedAt = new Date().toISOString();
-    saveHistoryToDisk();
+    dbResolveHistoryItem(id, item.resolvedAt).catch(() => {});
     try {
       broadcast('status_history_updated', item);
     } catch (err) {
@@ -490,19 +485,6 @@ export function resolveHistoryItem(id) {
     return item;
   }
   return null;
-}
-
-function saveHistoryToDisk() {
-  if (_saveHistoryTimer) clearTimeout(_saveHistoryTimer);
-  _saveHistoryTimer = setTimeout(async () => {
-    _saveHistoryTimer = null;
-    try {
-      await fs.promises.mkdir(cacheDir, { recursive: true });
-      await fs.promises.writeFile(historyFile, JSON.stringify(statusHistory, null, 2), 'utf8');
-    } catch (err) {
-      console.error('❌ Failed to write status history file to disk:', err.message);
-    }
-  }, SAVE_DEBOUNCE_MS);
 }
 
 /**
@@ -514,10 +496,6 @@ export function getCachedNaps() {
 
 /**
  * Update coordinates for a specific NAP box in cache.
- * @param {string} napName - Name of the NAP box
- * @param {number} latitude - Latitude coordinate
- * @param {number} longitude - Longitude coordinate
- * @returns {Object|null} - The updated NAP object
  */
 export function updateNapCoordinates(napName, latitude, longitude) {
   if (!napName) return null;
@@ -525,8 +503,8 @@ export function updateNapCoordinates(napName, latitude, longitude) {
   if (nap) {
     nap.latitude = parseFloat(latitude);
     nap.longitude = parseFloat(longitude);
-    saveCacheToDisk();
-    console.log(`📍 Manually updated coordinates for NAP ${napName}: [${latitude}, ${longitude}]`);
+    dbSaveNap(nap).catch(() => {});
+    console.log(`📍 SQLite updated coordinates for NAP ${napName}: [${latitude}, ${longitude}]`);
     return nap;
   }
   return null;
@@ -534,8 +512,6 @@ export function updateNapCoordinates(napName, latitude, longitude) {
 
 /**
  * Update coordinates for multiple NAPs in bulk.
- * @param {Array} updates - Array of updates: [{ name: '...', latitude: -12.1, longitude: -77.1 }]
- * @returns {Array} - Array of updated NAPs
  */
 export function updateNapCoordinatesBulk(updates) {
   if (!Array.isArray(updates)) return [];
@@ -552,29 +528,11 @@ export function updateNapCoordinatesBulk(updates) {
   });
 
   if (updatedNaps.length > 0) {
-    saveCacheToDisk();
-    console.log(`📍 Bulk updated coordinates for ${updatedNaps.length} NAPs.`);
+    Promise.all(updatedNaps.map(nap => dbSaveNap(nap))).catch(() => {});
+    console.log(`📍 Bulk saved ${updatedNaps.length} NAPs coordinates to SQLite database.`);
   }
 
   return updatedNaps;
-}
-
-/**
- * Schedule a debounced async write of the memory cache to disk.
- * Rapid-fire calls (e.g. many ONU status updates at once) are coalesced
- * into a single write that fires 2s after the last call.
- */
-function saveCacheToDisk() {
-  if (_saveTimer) clearTimeout(_saveTimer);
-  _saveTimer = setTimeout(async () => {
-    _saveTimer = null;
-    try {
-      await fs.promises.mkdir(cacheDir, { recursive: true });
-      await fs.promises.writeFile(cacheFile, JSON.stringify(cachedNaps, null, 2), 'utf8');
-    } catch (err) {
-      console.error('❌ Failed to write cache file to disk:', err.message);
-    }
-  }, SAVE_DEBOUNCE_MS);
 }
 
 // Custom parser to split CSV lines respecting double quotes
@@ -628,18 +586,18 @@ export function applyCsvCoordinatesToCache() {
     let updatedCount = 0;
     cachedNaps.forEach((nap) => {
       if (nap.latitude === null || nap.longitude === null) {
-        const match = coordsMap[nap.name.trim().toUpperCase()];
-        if (match) {
-          nap.latitude = match.latitude;
-          nap.longitude = match.longitude;
-          updatedCount++;
-        }
+         const match = coordsMap[nap.name.trim().toUpperCase()];
+         if (match) {
+           nap.latitude = match.latitude;
+           nap.longitude = match.longitude;
+           dbSaveNap(nap).catch(() => {});
+           updatedCount++;
+         }
       }
     });
 
     if (updatedCount > 0) {
-      console.log(`📍 Auto-seeded ${updatedCount} NAPs coordinates from coordenadas_mymaps.csv`);
-      fs.writeFileSync(cacheFile, JSON.stringify(cachedNaps, null, 2), 'utf8');
+      console.log(`📍 Auto-seeded ${updatedCount} NAPs coordinates to SQLite from coordenadas_mymaps.csv`);
     } else {
       console.log('ℹ️ All NAPs already have coordinates or no matching NAP names were found in CSV.');
     }
