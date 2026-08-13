@@ -7,7 +7,23 @@ let socket;
 let userMarker = null; // Pulsing GPS user location marker
 let activeStatusFilter = null;
 
-let googleSatelliteLayer;
+// Base Map Layers
+let baseLayers = {};
+let activeLayerName = 'google_hybrid';
+
+// Topology State
+let topologyLayerGroup = null;
+let topologyEnabled = false;
+
+// Draggable Pins State
+let draggablePinsEnabled = false;
+
+// Ruler Measurement State
+let rulerEnabled = false;
+let rulerPoints = [];
+let rulerPolylines = [];
+let rulerMarkers = [];
+let rulerTempPolyline = null; // to show line following the mouse
 
 // History State
 let historyData = [];
@@ -29,6 +45,7 @@ document.addEventListener('DOMContentLoaded', () => {
   setupStatsFilter();
   setupHistoryDrawer();
   loadHistoryData();
+  setupMapControls();
   
   // Attach cancel manual placement handler
   document.getElementById('cancel-placement').addEventListener('click', stopManualPlacement);
@@ -56,26 +73,59 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 /**
- * Initialize the Leaflet map with Google Earth Satellite layer.
+ * Initialize the Leaflet map with multiple base layers and topology group.
  */
 function initMap() {
   // Default center at [0,0] (will auto-adjust when data is loaded)
   map = L.map('map').setView([0, 0], 2);
 
-  // Google Satellite/Hybrid (Google Earth style with street names)
-  googleSatelliteLayer = L.tileLayer('https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', {
-    attribution: '&copy; Google Maps',
-    maxZoom: 20
-  });
+  // Define base map tile layers
+  baseLayers = {
+    google_hybrid: L.tileLayer('https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}', {
+      attribution: '&copy; Google Maps',
+      maxZoom: 20
+    }),
+    cartodb_dark: L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+      attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
+      maxZoom: 20
+    }),
+    google_road: L.tileLayer('https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', {
+      attribution: '&copy; Google Maps',
+      maxZoom: 20
+    }),
+    osm: L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors',
+      maxZoom: 19
+    })
+  };
 
-  // Add Google Earth layer
-  googleSatelliteLayer.addTo(map);
+  // Restore saved map layer or default to Google Hybrid
+  const savedLayer = localStorage.getItem('map_active_layer') || 'google_hybrid';
+  activeLayerName = baseLayers[savedLayer] ? savedLayer : 'google_hybrid';
+  baseLayers[activeLayerName].addTo(map);
+
+  // Initialize Topology Layer Group
+  topologyLayerGroup = L.layerGroup().addTo(map);
 
   // Add Scale Control (bottom-left)
   L.control.scale({ position: 'bottomleft' }).addTo(map);
 
   // Attach click listener to GPS geolocation button
   document.getElementById('btn-geolocation').addEventListener('click', locateUser);
+
+  // Bind dynamic diagnostics events inside popup opening
+  map.on('popupopen', (e) => {
+    const container = e.popup.getElement();
+    if (!container) return;
+    const diagBtns = container.querySelectorAll('.btn-diagnostic-onu');
+    diagBtns.forEach(btn => {
+      btn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const sn = btn.dataset.sn;
+        showOnuDiagnostics(sn);
+      });
+    });
+  });
 }
 
 /**
@@ -202,7 +252,37 @@ function renderNapsAndMarkers(filterQuery = '') {
       
       const marker = L.marker([nap.latitude, nap.longitude], {
         icon: markerIcon,
-        className: `nap-marker marker-${nap.status}`
+        className: `nap-marker marker-${nap.status}`,
+        draggable: draggablePinsEnabled
+      });
+
+      marker.napName = nap.name;
+
+      marker.on('dragend', async (e) => {
+        const { lat, lng } = e.target.getLatLng();
+        console.log(`📌 Marker ${marker.napName} dragged to [${lat}, ${lng}]. Saving...`);
+        try {
+          const response = await fetch('/webhook/naps/coordinates', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              name: marker.napName,
+              latitude: lat,
+              longitude: lng
+            })
+          });
+          if (!response.ok) {
+            throw new Error('Failed to update drag coordinates on backend');
+          }
+          const resData = await response.json();
+          console.log(`✅ Position updated for ${marker.napName}:`, resData);
+        } catch (err) {
+          console.error(`❌ Drag coordinates error for ${marker.napName}:`, err);
+          alert(`Error al actualizar la ubicación de ${marker.napName}: ${err.message}`);
+          loadNapsData();
+        }
       });
 
       // Bind detail popup
@@ -278,6 +358,9 @@ function renderNapsAndMarkers(filterQuery = '') {
   } else {
     autoCenterMap(matchingNaps);
   }
+  
+  // Re-draw topology lines if enabled
+  drawTopologyLines();
 }
 
 /**
@@ -291,10 +374,13 @@ function getPopupContent(nap) {
     const statusClass = isOnline ? 'online' : 'offline';
     return `
       <div class="map-popup-client-item">
-        <span>
+        <div class="map-popup-client-info">
           <span class="client-status-dot ${statusClass}"></span>
-          ${c.name}
-        </span>
+          <span class="client-name" title="${c.name}">${c.name}</span>
+        </div>
+        <button class="btn-diagnostic-onu" data-sn="${c.sn}" title="⚡ Diagnóstico Óptico en Vivo">
+          <i class="fa-solid fa-gauge-high"></i>
+        </button>
       </div>
     `;
   }).join('');
@@ -1459,4 +1545,557 @@ function formatTimeAgo(date) {
   if (hours < 24) return `hace ${hours}h`;
   const days = Math.floor(hours / 24);
   return `hace ${days}d`;
+}
+
+// ==========================================
+// Map Controls & Advanced Features Setup
+// ==========================================
+
+function setupMapControls() {
+  // 1. Layer Selector Dropdown Click Toggle
+  const layerDropdownBtn = document.getElementById('btn-layer-dropdown');
+  const layerDropdownContent = document.getElementById('layer-dropdown-content');
+
+  if (layerDropdownBtn && layerDropdownContent) {
+    layerDropdownBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      layerDropdownContent.classList.toggle('hidden');
+    });
+
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.map-layer-selector')) {
+        layerDropdownContent.classList.add('hidden');
+      }
+    });
+
+    // Layer option click handler
+    const options = layerDropdownContent.querySelectorAll('.layer-option');
+    options.forEach(opt => {
+      opt.addEventListener('click', () => {
+        const layerName = opt.dataset.layer;
+        switchBaseLayer(layerName);
+        layerDropdownContent.classList.add('hidden');
+      });
+    });
+
+    // Select initial active option class
+    const savedLayer = localStorage.getItem('map_active_layer') || 'google_hybrid';
+    options.forEach(opt => {
+      if (opt.dataset.layer === savedLayer) {
+        opt.classList.add('active');
+      } else {
+        opt.classList.remove('active');
+      }
+    });
+  }
+
+  // 2. Topology PON Toggle
+  const topologyBtn = document.getElementById('btn-topology-toggle');
+  if (topologyBtn) {
+    // Restore state from localStorage if preset
+    const savedTopology = localStorage.getItem('map_topology_enabled');
+    topologyEnabled = savedTopology === 'true';
+    if (topologyEnabled) {
+      topologyBtn.classList.add('active-control');
+    }
+
+    topologyBtn.addEventListener('click', () => {
+      topologyEnabled = !topologyEnabled;
+      localStorage.setItem('map_topology_enabled', topologyEnabled);
+      topologyBtn.classList.toggle('active-control', topologyEnabled);
+      drawTopologyLines();
+    });
+  }
+
+  // 3. Draggable Pins Toggle
+  const dragBtn = document.getElementById('btn-drag-toggle');
+  if (dragBtn) {
+    dragBtn.addEventListener('click', () => {
+      draggablePinsEnabled = !draggablePinsEnabled;
+      dragBtn.classList.toggle('active-control', draggablePinsEnabled);
+      
+      const icon = dragBtn.querySelector('i');
+      if (icon) {
+        icon.className = draggablePinsEnabled ? 'fa-solid fa-lock-open' : 'fa-solid fa-lock';
+      }
+
+      setupDraggableMarkers();
+    });
+  }
+
+  // 4. Ruler Distance Measurement Toggle
+  const rulerBtn = document.getElementById('btn-ruler-toggle');
+  const rulerOverlay = document.getElementById('ruler-overlay');
+  const cancelRulerBtn = document.getElementById('cancel-ruler');
+  const clearRulerBtn = document.getElementById('clear-ruler');
+
+  if (rulerBtn) {
+    rulerBtn.addEventListener('click', () => {
+      rulerEnabled = !rulerEnabled;
+      rulerBtn.classList.toggle('active-control', rulerEnabled);
+      
+      if (rulerEnabled) {
+        if (placingNapName) stopManualPlacement();
+        rulerOverlay.classList.remove('hidden');
+        document.getElementById('map').style.cursor = 'crosshair';
+        map.on('click', handleRulerMapClick);
+        map.on('mousemove', handleRulerMouseMove);
+      } else {
+        disableRulerMode();
+      }
+    });
+  }
+
+  if (cancelRulerBtn) {
+    cancelRulerBtn.addEventListener('click', () => {
+      rulerEnabled = false;
+      if (rulerBtn) rulerBtn.classList.remove('active-control');
+      disableRulerMode();
+    });
+  }
+
+  if (clearRulerBtn) {
+    clearRulerBtn.addEventListener('click', clearRuler);
+  }
+
+  // 5. Diagnostics Modal Close Handlers
+  const diagnosticModal = document.getElementById('diagnostic-modal');
+  const closeDiagBtn = document.getElementById('btn-close-diagnostic');
+  if (diagnosticModal && closeDiagBtn) {
+    closeDiagBtn.addEventListener('click', () => {
+      diagnosticModal.classList.add('hidden');
+    });
+
+    // Close on outside click
+    diagnosticModal.addEventListener('click', (e) => {
+      if (e.target === diagnosticModal) {
+        diagnosticModal.classList.add('hidden');
+      }
+    });
+  }
+}
+
+/**
+ * Switch base map tile layer.
+ */
+function switchBaseLayer(layerName) {
+  if (!baseLayers[layerName]) return;
+
+  // Remove current layer
+  map.removeLayer(baseLayers[activeLayerName]);
+  
+  // Add new layer
+  baseLayers[layerName].addTo(map);
+  activeLayerName = layerName;
+  
+  localStorage.setItem('map_active_layer', layerName);
+}
+
+/**
+ * Enable/disable draggable status on all markers.
+ */
+function setupDraggableMarkers() {
+  Object.entries(markers).forEach(([name, marker]) => {
+    if (draggablePinsEnabled) {
+      marker.dragging.enable();
+      // Add a CSS class or visual indicator to show pins are movable
+      const element = marker.getElement();
+      if (element) element.classList.add('movable-pin');
+    } else {
+      marker.dragging.disable();
+      const element = marker.getElement();
+      if (element) element.classList.remove('movable-pin');
+    }
+  });
+
+  // Change cursor style on map
+  const mapContainer = document.getElementById('map');
+  if (draggablePinsEnabled) {
+    mapContainer.classList.add('pins-draggable');
+  } else {
+    mapContainer.classList.remove('pins-draggable');
+  }
+}
+
+/**
+ * Draw topology lines connecting NAPs on the same PON port.
+ */
+function drawTopologyLines() {
+  if (!topologyLayerGroup) return;
+
+  // Clear existing lines
+  topologyLayerGroup.clearLayers();
+
+  if (!topologyEnabled) return;
+
+  // Group NAPs by OLT & Slot/Port
+  const groups = {};
+  napsData.forEach(nap => {
+    if (nap.latitude === null || nap.longitude === null) return;
+    const key = `${nap.olt_name || 'unknown'}_${nap.board || '0'}_${nap.port || '0'}`;
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(nap);
+  });
+
+  // Draw lines within each group
+  Object.entries(groups).forEach(([key, naps]) => {
+    if (naps.length < 2) return;
+
+    // Sort NAPs sequentially by longitude (makes a nice span sequence)
+    naps.sort((a, b) => a.longitude - b.longitude);
+
+    const color = getPonColor(naps[0].olt_name, naps[0].board, naps[0].port);
+
+    for (let i = 0; i < naps.length - 1; i++) {
+      const napA = naps[i];
+      const napB = naps[i + 1];
+
+      const latlngs = [
+        [napA.latitude, napA.longitude],
+        [napB.latitude, napB.longitude]
+      ];
+
+      const polyline = L.polyline(latlngs, {
+        color: color,
+        weight: 3,
+        dashArray: '8, 8',
+        opacity: 0.75,
+        className: `pon-line line-${napA.olt_name.replace(/\s+/g, '-')}-${napA.board}-${napA.port}`
+      });
+
+      // Show PON port details on hover
+      polyline.bindTooltip(
+        `<b>Enlace de Fibra PON</b><br>` +
+        `🏢 <b>OLT:</b> ${napA.olt_name}<br>` +
+        `🔌 <b>Puerto:</b> Slot ${napA.board} | Pon ${napA.port}<br>` +
+        `📦 <b>Tramo:</b> ${napA.name} &harr; ${napB.name}`,
+        { sticky: true, className: 'topology-tooltip' }
+      );
+
+      // Highlights lines of the same port when hovered
+      polyline.on('mouseover', () => {
+        polyline.setStyle({ weight: 6, opacity: 1, dashArray: null });
+      });
+
+      polyline.on('mouseout', () => {
+        polyline.setStyle({ weight: 3, opacity: 0.75, dashArray: '8, 8' });
+      });
+
+      topologyLayerGroup.addLayer(polyline);
+    }
+  });
+}
+
+/**
+ * Generate a deterministic HSL color based on OLT + PON port string.
+ */
+function getPonColor(oltName, board, port) {
+  const str = `${oltName}_${board}_${port}`;
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = str.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  const h = Math.abs(hash % 360);
+  return `hsl(${h}, 85%, 60%)`;
+}
+
+// ─── Ruler Measurement Mechanics ─────────────────────────────────────────────
+
+function disableRulerMode() {
+  rulerEnabled = false;
+  document.getElementById('ruler-overlay').classList.add('hidden');
+  document.getElementById('map').style.cursor = '';
+  map.off('click', handleRulerMapClick);
+  map.off('mousemove', handleRulerMouseMove);
+  clearRuler();
+}
+
+function handleRulerMapClick(e) {
+  const latlng = e.latlng;
+  rulerPoints.push(latlng);
+
+  // Draw point marker
+  const marker = L.circleMarker(latlng, {
+    radius: 6,
+    color: 'var(--accent-color)',
+    fillColor: '#FFFFFF',
+    fillOpacity: 1,
+    weight: 2
+  }).addTo(map);
+  
+  rulerMarkers.push(marker);
+
+  // If there's a previous point, draw polyline
+  if (rulerPoints.length > 1) {
+    const prevPoint = rulerPoints[rulerPoints.length - 2];
+    const segmentDistance = prevPoint.distanceTo(latlng);
+    const totalDistance = calculateRulerTotalDistance();
+
+    const polyline = L.polyline([prevPoint, latlng], {
+      color: 'var(--accent-color)',
+      weight: 3,
+      dashArray: '5, 5'
+    }).addTo(map);
+
+    rulerPolylines.push(polyline);
+
+    // Bind tooltip showing segment length
+    let distText = segmentDistance < 1000 ? `${segmentDistance.toFixed(1)} m` : `${(segmentDistance/1000).toFixed(2)} km`;
+    let accumText = totalDistance < 1000 ? `${totalDistance.toFixed(1)} m` : `${(totalDistance/1000).toFixed(2)} km`;
+    
+    polyline.bindTooltip(`Segmento: ${distText}<br>Acumulado: ${accumText}`, { permanent: false, sticky: true });
+    
+    // Update marker tooltip
+    marker.bindTooltip(`Punto ${rulerPoints.length}<br>Distancia: ${accumText}`, { permanent: true, direction: 'top' });
+  } else {
+    marker.bindTooltip(`Inicio`, { permanent: true, direction: 'top' });
+  }
+
+  // Reset mousemove temp polyline
+  if (rulerTempPolyline) {
+    map.removeLayer(rulerTempPolyline);
+    rulerTempPolyline = null;
+  }
+
+  updateRulerDistanceUI();
+}
+
+function handleRulerMouseMove(e) {
+  if (rulerPoints.length === 0) return;
+
+  const lastPoint = rulerPoints[rulerPoints.length - 1];
+  const currentMouse = e.latlng;
+
+  if (rulerTempPolyline) {
+    rulerTempPolyline.setLatLngs([lastPoint, currentMouse]);
+  } else {
+    rulerTempPolyline = L.polyline([lastPoint, currentMouse], {
+      color: 'var(--accent-color)',
+      weight: 2,
+      dashArray: '3, 6',
+      opacity: 0.6
+    }).addTo(map);
+  }
+}
+
+function calculateRulerTotalDistance() {
+  let total = 0;
+  for (let i = 0; i < rulerPoints.length - 1; i++) {
+    total += rulerPoints[i].distanceTo(rulerPoints[i + 1]);
+  }
+  return total;
+}
+
+function updateRulerDistanceUI() {
+  const total = calculateRulerTotalDistance();
+  const uiEl = document.getElementById('ruler-total-distance');
+  if (uiEl) {
+    uiEl.textContent = total < 1000 ? `${total.toFixed(1)} m` : `${(total / 1000).toFixed(2)} km`;
+  }
+}
+
+function clearRuler() {
+  rulerPoints = [];
+  
+  rulerPolylines.forEach(line => map.removeLayer(line));
+  rulerPolylines = [];
+  
+  rulerMarkers.forEach(m => map.removeLayer(m));
+  rulerMarkers = [];
+  
+  if (rulerTempPolyline) {
+    map.removeLayer(rulerTempPolyline);
+    rulerTempPolyline = null;
+  }
+
+  const uiEl = document.getElementById('ruler-total-distance');
+  if (uiEl) uiEl.textContent = '0 m';
+}
+
+// ─── Real-Time ONU Optical Signal Diagnostics Panel ─────────────────────────
+
+async function showOnuDiagnostics(sn) {
+  const modal = document.getElementById('diagnostic-modal');
+  const body = document.getElementById('diagnostic-body');
+
+  if (!modal || !body) return;
+
+  // Show Modal
+  modal.classList.remove('hidden');
+
+  // Loading spinner
+  body.innerHTML = `
+    <div class="diagnostic-loading">
+      <i class="fa-solid fa-spinner fa-spin"></i>
+      <p>Consultando potencia óptica en tiempo real...</p>
+      <span style="font-size:11px; color:var(--text-muted)">SN: <code>${sn}</code></span>
+    </div>
+  `;
+
+  try {
+    const res = await fetch(`/webhook/onu/sn/${sn}/status`);
+    if (!res.ok) {
+      const errData = await res.json();
+      throw new Error(errData.error || `HTTP Error ${res.status}`);
+    }
+
+    const data = await res.json();
+    console.log('📡 Live diagnostic data received:', data);
+
+    const live = data.live || {};
+    const rx = parseFloat(live.rx_power);
+    const tx = parseFloat(live.tx_power);
+    const oltRx = parseFloat(live.olt_rx_power);
+    
+    // Color categorization of signal levels
+    let rxClass = 'good';
+    let rxLabel = 'Excelente';
+    if (isNaN(rx) || rx === 0) {
+      rxClass = 'critical';
+      rxLabel = 'Sin señal';
+    } else if (rx < -30) {
+      rxClass = 'critical';
+      rxLabel = 'Falla Grave';
+    } else if (rx < -27) {
+      rxClass = 'warning';
+      rxLabel = 'Señal Baja';
+    }
+
+    // Format metrics
+    const formattedRx = isNaN(rx) || rx === 0 ? 'N/A' : `${rx.toFixed(2)} dBm`;
+    const formattedTx = isNaN(tx) || tx === 0 ? 'N/A' : `${tx.toFixed(2)} dBm`;
+    const formattedOltRx = isNaN(oltRx) || oltRx === 0 ? 'N/A' : `${oltRx.toFixed(2)} dBm`;
+    const temp = live.temperature ? `${parseFloat(live.temperature).toFixed(1)} °C` : 'N/A';
+    const volt = live.voltage ? `${parseFloat(live.voltage).toFixed(2)} V` : 'N/A';
+    const bias = live.bias_current ? `${parseFloat(live.bias_current).toFixed(1)} mA` : 'N/A';
+    const dist = live.distance ? `${live.distance} m` : 'N/A';
+
+    const lastDown = live.last_down_time || 'N/A';
+    const downReason = live.last_down_reason || 'N/A';
+
+    const statusDot = live.status.toLowerCase() === 'online' || live.status.toLowerCase() === 'active' ? '🟢' : '🔴';
+
+    body.innerHTML = `
+      <div class="diagnostic-panel-content">
+        <!-- Client header -->
+        <div class="diag-header-info">
+          <h3>${data.name}</h3>
+          <span>SN: <code>${data.sn}</code></span>
+        </div>
+
+        <div class="diag-status-badge">
+          <span>OLT Hardware Status:</span>
+          <b>${statusDot} ${live.status.toUpperCase()}</b>
+        </div>
+
+        <!-- Connection details -->
+        <div class="diag-meta-grid">
+          <div><b>OLT:</b> ${data.olt_name}</div>
+          <div><b>Puerto PON:</b> Slot ${data.board} | Pon ${data.port}</div>
+          <div><b>ONU ID:</b> ${data.onu_id}</div>
+          <div><b>Caja NAP:</b> ${data.address || 'N/A'}</div>
+        </div>
+
+        <!-- Optical Power Progress Visualizer -->
+        <div class="optical-level-card ${rxClass}">
+          <div class="optical-level-header">
+            <span>Potencia Óptica de Recepción (Rx Power)</span>
+            <strong class="rx-val">${formattedRx}</strong>
+          </div>
+          ${getSignalProgressBarHtml(rx)}
+          <span class="optical-level-label">Categoría: <b>${rxLabel}</b> (Rango sugerido: -15 a -27 dBm)</span>
+        </div>
+
+        <!-- Metric details grid -->
+        <div class="metrics-grid">
+          <div class="metric-item">
+            <span class="m-label"><i class="fa-solid fa-cloud-arrow-up"></i> Potencia Tx ONU</span>
+            <span class="m-val">${formattedTx}</span>
+          </div>
+          <div class="metric-item">
+            <span class="m-label"><i class="fa-solid fa-server"></i> Potencia Rx OLT</span>
+            <span class="m-val">${formattedOltRx}</span>
+          </div>
+          <div class="metric-item">
+            <span class="m-label"><i class="fa-solid fa-thermometer"></i> Temperatura</span>
+            <span class="m-val">${temp}</span>
+          </div>
+          <div class="metric-item">
+            <span class="m-label"><i class="fa-solid fa-bolt"></i> Voltaje</span>
+            <span class="m-val">${volt}</span>
+          </div>
+          <div class="metric-item">
+            <span class="m-label"><i class="fa-solid fa-gauge"></i> Corriente Bias</span>
+            <span class="m-val">${bias}</span>
+          </div>
+          <div class="metric-item">
+            <span class="m-label"><i class="fa-solid fa-road"></i> Distancia OLT</span>
+            <span class="m-val">${dist}</span>
+          </div>
+        </div>
+
+        <!-- Connection history / failure log -->
+        <div class="diag-history-box">
+          <h4><i class="fa-solid fa-clock-rotate-left"></i> Registro de Desconexión</h4>
+          <div class="diag-history-row">
+            <span>Última Caída:</span>
+            <b><code>${lastDown}</code></b>
+          </div>
+          <div class="diag-history-row">
+            <span>Motivo Caída:</span>
+            <b><span class="reason-tag">${downReason}</span></b>
+          </div>
+        </div>
+
+        <div class="diag-footer">
+          <button id="btn-refresh-diag" data-sn="${sn}" class="btn-primary">
+            <i class="fa-solid fa-arrows-rotate"></i> Actualizar
+          </button>
+        </div>
+      </div>
+    `;
+
+    // Bind refresh button click
+    document.getElementById('btn-refresh-diag').addEventListener('click', () => {
+      showOnuDiagnostics(sn);
+    });
+
+  } catch (err) {
+    console.error('Diagnostic error:', err);
+    body.innerHTML = `
+      <div class="diagnostic-error">
+        <i class="fa-solid fa-triangle-exclamation"></i>
+        <p>No se pudo completar el diagnóstico en vivo.</p>
+        <span class="err-details">${err.message}</span>
+        <button id="btn-retry-diag" data-sn="${sn}" class="btn-primary" style="margin-top:15px">
+          <i class="fa-solid fa-arrows-rotate"></i> Reintentar
+        </button>
+      </div>
+    `;
+
+    document.getElementById('btn-retry-diag').addEventListener('click', () => {
+      showOnuDiagnostics(sn);
+    });
+  }
+}
+
+/**
+ * Format HTML progress bar representing signal intensity.
+ */
+function getSignalProgressBarHtml(rx) {
+  if (isNaN(rx) || rx === 0 || rx > 0) {
+    return `<div class="diag-progress-bar"><div class="bar-fill" style="width: 0%"></div></div>`;
+  }
+
+  // Map -40 dBm (0%) to -10 dBm (100%)
+  const minVal = -40;
+  const maxVal = -10;
+  let pct = ((rx - minVal) / (maxVal - minVal)) * 100;
+  pct = Math.max(0, Math.min(pct, 100));
+
+  return `
+    <div class="diag-progress-bar">
+      <div class="bar-fill" style="width: ${pct}%"></div>
+    </div>
+  `;
 }

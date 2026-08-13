@@ -1551,3 +1551,494 @@ body {
   gap: 4px;
 }
 
+/* ==========================================
+   Advanced Map Enhancements Styles
+   ========================================== */
+
+/* Active State for Top Controls Buttons */
+.btn-map-control.active-control {
+  background: var(--accent-color) !important;
+  color: var(--bg-primary) !important;
+  border-color: var(--accent-color) !important;
+  box-shadow: 0 0 15px rgba(56, 189, 248, 0.4) !important;
+}
+
+/* Dropdown Layer Selector container */
+.map-layer-selector {
+  position: relative;
+  display: inline-block;
+}
+
+.layer-dropdown-content {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  background: rgba(15, 23, 42, 0.95);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  width: 170px;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  z-index: 1001;
+}
+
+.layer-dropdown-content.hidden {
+  display: none;
+}
+
+.layer-option {
+  background: transparent;
+  border: none;
+  color: var(--text-main);
+  text-align: left;
+  padding: 8px 12px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  width: 100%;
+}
+
+.layer-option:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--accent-color);
+}
+
+.layer-option.active {
+  background: rgba(56, 189, 248, 0.1);
+  color: var(--accent-color);
+  font-weight: 700;
+  border-left: 3px solid var(--accent-color);
+}
+
+/* Ruler Measurement Overlay */
+.ruler-overlay {
+  position: absolute;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(15, 23, 42, 0.9);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border-color);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  border-radius: 12px;
+  padding: 10px 18px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  z-index: 1000;
+  border-top: 2px solid var(--accent-color);
+}
+
+.ruler-overlay.hidden {
+  display: none;
+}
+
+.ruler-message {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: var(--text-main);
+}
+
+.ruler-message i {
+  color: var(--accent-color);
+}
+
+.btn-clear-ruler {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-color);
+  color: var(--text-main);
+  padding: 6px 12px;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btn-clear-ruler:hover {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: var(--text-muted);
+}
+
+/* Draggable markers style helper */
+.pins-draggable .custom-pin-marker {
+  cursor: grab !important;
+}
+
+.pins-draggable .custom-pin-marker:active {
+  cursor: grabbing !important;
+}
+
+.movable-pin .pin-marker-dot {
+  border-color: var(--accent-color) !important;
+  animation: draggable-pin-pulse 1.5s infinite;
+}
+
+@keyframes draggable-pin-pulse {
+  0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(56, 189, 248, 0.6); }
+  70% { transform: scale(1.1); box-shadow: 0 0 0 8px rgba(56, 189, 248, 0); }
+  100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(56, 189, 248, 0); }
+}
+
+/* Popup Client Items Custom Styles */
+.map-popup-client-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 6px;
+  margin-bottom: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.03);
+  transition: background 0.2s ease;
+  gap: 10px;
+}
+
+.map-popup-client-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.map-popup-client-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  max-width: 170px;
+}
+
+.map-popup-client-info .client-name {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-main);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.btn-diagnostic-onu {
+  background: rgba(56, 189, 248, 0.1);
+  border: 1px solid rgba(56, 189, 248, 0.2);
+  color: var(--accent-color);
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.btn-diagnostic-onu:hover {
+  background: var(--accent-color);
+  color: var(--bg-primary);
+  transform: scale(1.1);
+}
+
+/* Live Diagnostics Panel Styles in Modal */
+.diagnostic-content {
+  max-width: 500px !important;
+  background: rgba(15, 23, 42, 0.95) !important;
+  border-top: 3px solid var(--accent-color) !important;
+}
+
+.diagnostic-loading {
+  text-align: center;
+  padding: 40px 20px;
+}
+
+.diagnostic-loading i {
+  font-size: 32px;
+  color: var(--accent-color);
+  margin-bottom: 15px;
+}
+
+.diagnostic-loading p {
+  font-size: 14px;
+  color: var(--text-main);
+}
+
+.diagnostic-error {
+  text-align: center;
+  padding: 30px 10px;
+}
+
+.diagnostic-error i {
+  font-size: 36px;
+  color: var(--color-offline);
+  margin-bottom: 12px;
+}
+
+.diagnostic-error p {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.diagnostic-error .err-details {
+  font-size: 11px;
+  color: var(--text-muted);
+  display: block;
+  margin-top: 6px;
+  background: rgba(0, 0, 0, 0.2);
+  padding: 6px;
+  border-radius: 4px;
+  word-break: break-all;
+}
+
+.diagnostic-panel-content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.diag-header-info {
+  border-bottom: 1px solid var(--border-color);
+  padding-bottom: 12px;
+}
+
+.diag-header-info h3 {
+  font-size: 18px;
+  font-weight: 700;
+  color: #FFFFFF;
+}
+
+.diag-header-info span {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.diag-status-badge {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: rgba(255, 255, 255, 0.03);
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  font-size: 12px;
+}
+
+.diag-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px 16px;
+  font-size: 11px;
+  background: rgba(30, 41, 59, 0.3);
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.03);
+}
+
+.diag-meta-grid div {
+  color: var(--text-main);
+}
+
+.diag-meta-grid div b {
+  color: var(--text-muted);
+}
+
+/* Optical signal level card styles */
+.optical-level-card {
+  padding: 14px;
+  border-radius: 10px;
+  border-left: 4px solid #FFF;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.optical-level-card.good {
+  background: rgba(16, 185, 129, 0.08);
+  border-color: var(--color-online);
+  color: var(--color-online);
+}
+
+.optical-level-card.good .bar-fill {
+  background: var(--color-online);
+  box-shadow: 0 0 10px var(--color-online);
+}
+
+.optical-level-card.warning {
+  background: rgba(245, 158, 11, 0.08);
+  border-color: var(--color-partial);
+  color: var(--color-partial);
+}
+
+.optical-level-card.warning .bar-fill {
+  background: var(--color-partial);
+  box-shadow: 0 0 10px var(--color-partial);
+}
+
+.optical-level-card.critical {
+  background: rgba(239, 68, 68, 0.08);
+  border-color: var(--color-offline);
+  color: var(--color-offline);
+}
+
+.optical-level-card.critical .bar-fill {
+  background: var(--color-offline);
+  box-shadow: 0 0 10px var(--color-offline);
+}
+
+.optical-level-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.optical-level-header .rx-val {
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.optical-level-label {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+/* Metrics details grid styles */
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+
+.metric-item {
+  background: rgba(15, 23, 42, 0.4);
+  border: 1px solid var(--border-color);
+  padding: 10px;
+  border-radius: 8px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.metric-item .m-label {
+  font-size: 9px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+}
+
+.metric-item .m-val {
+  font-size: 14px;
+  font-weight: 700;
+  color: #FFFFFF;
+}
+
+.diag-progress-bar {
+  height: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  overflow: hidden;
+  position: relative;
+  width: 100%;
+}
+
+.diag-progress-bar .bar-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* History Box in Diagnostics panel */
+.diag-history-box {
+  background: rgba(30, 41, 59, 0.2);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.diag-history-box h4 {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  margin-bottom: 8px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.diag-history-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  margin-bottom: 4px;
+}
+
+.diag-history-row:last-child {
+  margin-bottom: 0;
+}
+
+.diag-history-row span {
+  color: var(--text-muted);
+}
+
+.diag-history-row b {
+  color: var(--text-main);
+}
+
+.diag-history-row .reason-tag {
+  background: rgba(239, 68, 68, 0.15);
+  color: #F87171;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 10px;
+}
+
+.diag-footer {
+  border-top: 1px solid var(--border-color);
+  padding-top: 12px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* Topology Line Animations */
+.pon-line {
+  transition: stroke-width 0.2s ease, stroke-opacity 0.2s ease;
+  animation: line-dash-flow 20s linear infinite;
+}
+
+@keyframes line-dash-flow {
+  to {
+    stroke-dashoffset: -100;
+  }
+}
+
+.topology-tooltip {
+  background: rgba(15, 23, 42, 0.95) !important;
+  border: 1px solid var(--border-color) !important;
+  color: var(--text-main) !important;
+  border-radius: 8px !important;
+  font-family: 'Outfit', sans-serif !important;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4) !important;
+  font-size: 11px !important;
+}
+

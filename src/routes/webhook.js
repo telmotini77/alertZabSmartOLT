@@ -1859,6 +1859,58 @@ ${clientLines.length > 0 ? clientLines.join('\n') : '<i>No hay clientes registra
   await replyToMessage(chatId, messageId, `⚠️ No se encontraron cajas NAP ni clientes que coincidan con "<b>${cleanQuery}</b>".\n\n<i>Prueba buscando por nombre de cliente, serie (ej: <code>HWTC12345678</code>) o nombre de NAP (ej: <code>SM-7030-1</code>).</i>`);
 }
 
+// GET /webhook/onu/sn/:sn/status - Fetch real-time ONU status/signal details
+router.get('/onu/sn/:sn/status', async (req, res) => {
+  const sn = (req.params.sn || '').trim().toUpperCase();
+  if (!sn) {
+    return res.status(400).json({ error: 'Missing serial number' });
+  }
+
+  try {
+    const onu = await findOnuBySn(sn);
+    if (!onu) {
+      return res.status(404).json({ error: `ONU with serial number ${sn} not found in Smart OLT` });
+    }
+
+    if (!onu.external_id) {
+      return res.status(400).json({ error: `ONU has no external ID registered in Smart OLT` });
+    }
+
+    const liveStatus = await getOnuStatus(onu.external_id);
+    if (!liveStatus) {
+      return res.status(500).json({ error: `Failed to fetch live status for ONU ${sn} (External ID: ${onu.external_id})` });
+    }
+
+    return res.json({
+      status: 'success',
+      sn,
+      name: onu.name,
+      address: onu.address,
+      external_id: onu.external_id,
+      olt_name: onu.olt_name,
+      board: onu.board,
+      port: onu.port,
+      onu_id: onu.onu_id,
+      live: {
+        status: liveStatus.onu_status || liveStatus.status_desc || onu.status || 'Offline',
+        rx_power: liveStatus.signal || liveStatus.rx_power || null,
+        tx_power: liveStatus.tx_power || null,
+        olt_rx_power: liveStatus.olt_rx_power || null,
+        temperature: liveStatus.temperature || null,
+        voltage: liveStatus.voltage || null,
+        bias_current: liveStatus.bias_current || null,
+        distance: liveStatus.distance || null,
+        last_down_time: liveStatus.last_down_time || null,
+        last_down_reason: liveStatus.last_down_reason || liveStatus.offline_reason || null,
+        last_up_time: liveStatus.last_up_time || null
+      }
+    });
+  } catch (err) {
+    console.error(`Error in /onu/sn/${sn}/status:`, err.message);
+    return res.status(500).json({ error: 'Internal server error', details: err.message });
+  }
+});
+
 // GET /webhook/debug - Debug environment paths
 router.get('/debug', (req, res) => {
   const __filename = fileURLToPath(import.meta.url);

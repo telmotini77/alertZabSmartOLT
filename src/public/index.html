@@ -83,9 +83,41 @@
       <div class="map-top-controls">
         <button id="btn-history-toggle" class="btn-map-control btn-history-control" title="Historial de Estados (Clic para abrir, arrastra para mover)">
           <i class="fa-solid fa-clock-rotate-left"></i>
-          <span>Historial de Estados</span>
+          <span>Historial</span>
           <span id="history-badge" class="history-badge">0</span>
         </button>
+
+        <!-- Topology toggle -->
+        <button id="btn-topology-toggle" class="btn-map-control" title="Mostrar/ocultar líneas de topología por puerto PON">
+          <i class="fa-solid fa-network-wired"></i>
+          <span>Enlaces PON</span>
+        </button>
+
+        <!-- Drag pins toggle -->
+        <button id="btn-drag-toggle" class="btn-map-control" title="Habilitar/deshabilitar arrastre de pines en el mapa">
+          <i class="fa-solid fa-lock"></i>
+          <span>Mover Pines</span>
+        </button>
+
+        <!-- Ruler tool -->
+        <button id="btn-ruler-toggle" class="btn-map-control" title="Medir distancia entre puntos">
+          <i class="fa-solid fa-ruler-combined"></i>
+          <span>Regla</span>
+        </button>
+
+        <!-- Layer Selector Dropdown -->
+        <div class="map-layer-selector">
+          <button id="btn-layer-dropdown" class="btn-map-control" title="Cambiar tema/capa del mapa">
+            <i class="fa-solid fa-layer-group"></i>
+            <span>Capa</span>
+          </button>
+          <div id="layer-dropdown-content" class="layer-dropdown-content hidden">
+            <button class="layer-option active" data-layer="google_hybrid">Satélite Google</button>
+            <button class="layer-option" data-layer="cartodb_dark">Mapa Oscuro</button>
+            <button class="layer-option" data-layer="google_road">Calles Google</button>
+            <button class="layer-option" data-layer="osm">OpenStreetMap</button>
+          </div>
+        </div>
       </div>
 
       <!-- Geolocation float button -->
@@ -100,6 +132,16 @@
           <span>Modo Edición: Haz clic en el mapa para posicionar <b><span id="placement-nap-name">NAP-XXX</span></b></span>
         </div>
         <button id="cancel-placement" class="btn-cancel">Cancelar</button>
+      </div>
+
+      <!-- Distance Measurement Ruler Help Bar -->
+      <div id="ruler-overlay" class="ruler-overlay hidden">
+        <div class="ruler-message">
+          <i class="fa-solid fa-ruler-combined fa-pulse"></i>
+          <span>Regla activa: Haz clic en el mapa para trazar. Distancia: <b id="ruler-total-distance">0 m</b></span>
+        </div>
+        <button id="clear-ruler" class="btn-clear-ruler" title="Reiniciar regla"><i class="fa-solid fa-rotate-left"></i> Limpiar</button>
+        <button id="cancel-ruler" class="btn-cancel">Cerrar</button>
       </div>
 
       <!-- History Drawer / Panel -->
@@ -187,6 +229,22 @@
       <div class="modal-footer">
         <button id="btn-cancel-import" class="btn-cancel">Cancelar</button>
         <button id="btn-apply-import" class="btn-primary" disabled>Aplicar Coordenadas</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ONU Diagnostics Modal -->
+  <div id="diagnostic-modal" class="modal hidden">
+    <div class="modal-content diagnostic-content">
+      <div class="modal-header">
+        <h2><i class="fa-solid fa-gauge-high logo-icon"></i> Diagnóstico ONU en Tiempo Real</h2>
+        <button id="btn-close-diagnostic" class="btn-close">&times;</button>
+      </div>
+      <div class="modal-body" id="diagnostic-body">
+        <div class="diagnostic-loading">
+          <i class="fa-solid fa-circle-notch fa-spin"></i>
+          <p>Consultando estado de la ONU en la OLT...</p>
+        </div>
       </div>
     </div>
   </div>
