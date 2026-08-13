@@ -140,29 +140,61 @@ async function runMigration() {
       console.log('📦 Migrating NAPs cache from JSON to SQLite...');
       const cacheData = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
       if (Array.isArray(cacheData)) {
-        getDb().serialize(() => {
-          const stmt = getDb().prepare(`
-            INSERT INTO naps (name, olt_name, board, port, latitude, longitude, totalClients, onlineClients, offlineClients, status, clients)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `);
-          cacheData.forEach((nap) => {
-            stmt.run(
-              nap.name,
-              nap.olt_name,
-              nap.board,
-              nap.port,
-              nap.latitude,
-              nap.longitude,
-              nap.totalClients,
-              nap.onlineClients,
-              nap.offlineClients,
-              nap.status,
-              JSON.stringify(nap.clients || [])
-            );
+        await new Promise((resolve, reject) => {
+          getDb().serialize(() => {
+            getDb().run('BEGIN TRANSACTION');
+            const stmt = getDb().prepare(`
+              INSERT INTO naps (name, olt_name, board, port, latitude, longitude, totalClients, onlineClients, offlineClients, status, clients)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `);
+            cacheData.forEach((nap) => {
+              stmt.run(
+                nap.name,
+                nap.olt_name,
+                nap.board,
+                nap.port,
+                nap.latitude,
+                nap.longitude,
+                nap.totalClients,
+                nap.onlineClients,
+                nap.offlineClients,
+                nap.status,
+                JSON.stringify(nap.clients || [])
+              );
+            });
+            stmt.finalize();
+            getDb().run('COMMIT', (err) => {
+              if (err) reject(err);
+              else resolve();
+            });
           });
-          stmt.finalize();
         });
         console.log(`✅ Migrated ${cacheData.length} NAPs to SQLite.`);
+      }
+    } else if (napsCountRow.count > 0 && fs.existsSync(cacheFile)) {
+      // Heal missing/zeroed coordinates using the original JSON cache file if it exists
+      console.log('🔄 Healing missing coordinates from nap_cache.json...');
+      const cacheData = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+      if (Array.isArray(cacheData)) {
+        let healedCount = 0;
+        await new Promise((resolve, reject) => {
+          getDb().serialize(() => {
+            getDb().run('BEGIN TRANSACTION');
+            const stmt = getDb().prepare('UPDATE naps SET latitude = ?, longitude = ? WHERE name = ? AND (latitude IS NULL OR latitude = 0)');
+            cacheData.forEach((nap) => {
+              if (nap.latitude !== null && nap.latitude !== 0 && nap.longitude !== null && nap.longitude !== 0) {
+                stmt.run(nap.latitude, nap.longitude, nap.name);
+                healedCount++;
+              }
+            });
+            stmt.finalize();
+            getDb().run('COMMIT', (err) => {
+              if (err) reject(err);
+              else resolve();
+            });
+          });
+        });
+        console.log(`✅ Checked and healed NAPs coordinates in SQLite.`);
       }
     }
 
@@ -172,39 +204,46 @@ async function runMigration() {
       console.log('📋 Migrating Status History from JSON to SQLite...');
       const historyData = JSON.parse(fs.readFileSync(historyFile, 'utf8'));
       if (Array.isArray(historyData)) {
-        getDb().serialize(() => {
-          const stmt = getDb().prepare(`
-            INSERT INTO status_history (
-              id, timestamp, formattedTime, eventTime, sn, onuName, napName,
-              previousStatus, newStatus, napStatus, failureType, failureLabel,
-              reason, resolved, resolvedAt, oltName, board, port, latitude, longitude
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `);
-          historyData.forEach((item) => {
-            stmt.run(
-              item.id,
-              item.timestamp,
-              item.formattedTime,
-              item.eventTime,
-              item.sn,
-              item.onuName,
-              item.napName,
-              item.previousStatus,
-              item.newStatus,
-              item.napStatus,
-              item.failureType,
-              item.failureLabel,
-              item.reason,
-              item.resolved ? 1 : 0,
-              item.resolvedAt || null,
-              item.oltName,
-              item.board,
-              item.port,
-              item.latitude,
-              item.longitude
-            );
+        await new Promise((resolve, reject) => {
+          getDb().serialize(() => {
+            getDb().run('BEGIN TRANSACTION');
+            const stmt = getDb().prepare(`
+              INSERT INTO status_history (
+                id, timestamp, formattedTime, eventTime, sn, onuName, napName,
+                previousStatus, newStatus, napStatus, failureType, failureLabel,
+                reason, resolved, resolvedAt, oltName, board, port, latitude, longitude
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `);
+            historyData.forEach((item) => {
+              stmt.run(
+                item.id,
+                item.timestamp,
+                item.formattedTime,
+                item.eventTime,
+                item.sn,
+                item.onuName,
+                item.napName,
+                item.previousStatus,
+                item.newStatus,
+                item.napStatus,
+                item.failureType,
+                item.failureLabel,
+                item.reason,
+                item.resolved ? 1 : 0,
+                item.resolvedAt || null,
+                item.oltName,
+                item.board,
+                item.port,
+                item.latitude,
+                item.longitude
+              );
+            });
+            stmt.finalize();
+            getDb().run('COMMIT', (err) => {
+              if (err) reject(err);
+              else resolve();
+            });
           });
-          stmt.finalize();
         });
         console.log(`✅ Migrated ${historyData.length} history items to SQLite.`);
       }
