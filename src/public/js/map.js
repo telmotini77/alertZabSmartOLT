@@ -1777,9 +1777,9 @@ function drawTopologyLines() {
 
       const polyline = L.polyline(latlngs, {
         color: color,
-        weight: 3,
-        dashArray: '8, 8',
-        opacity: 0.75,
+        weight: 5,
+        dashArray: '12, 10',
+        opacity: 0.85,
         className: `pon-line line-${napA.olt_name.replace(/\s+/g, '-')}-${napA.board}-${napA.port}`
       });
 
@@ -1794,11 +1794,11 @@ function drawTopologyLines() {
 
       // Highlights lines of the same port when hovered
       polyline.on('mouseover', () => {
-        polyline.setStyle({ weight: 6, opacity: 1, dashArray: null });
+        polyline.setStyle({ weight: 8, opacity: 1, dashArray: null });
       });
 
       polyline.on('mouseout', () => {
-        polyline.setStyle({ weight: 3, opacity: 0.75, dashArray: '8, 8' });
+        polyline.setStyle({ weight: 5, opacity: 0.85, dashArray: '12, 10' });
       });
 
       topologyLayerGroup.addLayer(polyline);

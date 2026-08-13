@@ -2022,13 +2022,14 @@ body {
 
 /* Topology Line Animations */
 .pon-line {
-  transition: stroke-width 0.2s ease, stroke-opacity 0.2s ease;
-  animation: line-dash-flow 20s linear infinite;
+  transition: stroke-width 0.2s ease, stroke-opacity 0.2s ease, stroke 0.2s ease;
+  animation: line-dash-flow 10s linear infinite;
+  filter: drop-shadow(0 0 3px rgba(0, 0, 0, 0.95)) drop-shadow(0 0 1px rgba(0, 0, 0, 1));
 }
 
 @keyframes line-dash-flow {
   to {
-    stroke-dashoffset: -100;
+    stroke-dashoffset: -80;
   }
 }
 
