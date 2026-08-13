@@ -953,7 +953,7 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
           const liveStatus = await getOnuStatus(onu.external_id);
           if (liveStatus && liveStatus.status) {
             // Override stale API cache status with real-time hardware status
-            onu.status = liveStatus.status;
+            onu.status = liveStatus.onu_status || liveStatus.status_desc || (liveStatus.status === true ? 'online' : 'offline');
             
             const reason = (liveStatus.last_down_reason || liveStatus.offline_reason || '').toLowerCase();
             console.log(`Smart OLT live reason for ${sn}: "${reason}"`);
@@ -1334,7 +1334,7 @@ export async function processZabbixAlert(payload) {
         const liveStatus = await getOnuStatus(freshOnu.external_id);
         if (liveStatus && liveStatus.status) {
           // Override stale API cache status with real-time hardware status
-          freshOnu.status = liveStatus.status;
+          freshOnu.status = liveStatus.onu_status || liveStatus.status_desc || (liveStatus.status === true ? 'online' : 'offline');
 
           const reason = (liveStatus.last_down_reason || liveStatus.offline_reason || '').toLowerCase();
           console.log(`[Settle] SN ${cleanSn}: Smart OLT live reason = "${reason}"`);

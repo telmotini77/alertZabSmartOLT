@@ -244,12 +244,12 @@ function renderNapsAndMarkers(filterQuery = '') {
           <div class="pin-marker-container">
             <div class="pin-marker-glow"></div>
             <div class="pin-marker-dot">
-              <i class="fa-solid fa-network-wired"></i>
+              <img src="/logo.png" style="width: 100%; height: 100%; object-fit: cover;" />
             </div>
           </div>
         `,
-        iconSize: [24, 24],
-        iconAnchor: [12, 12]
+        iconSize: [32, 32],
+        iconAnchor: [16, 16]
       });
       
       const marker = L.marker([nap.latitude, nap.longitude], {
@@ -544,12 +544,12 @@ function handleNapUpdate(updatedNap) {
         <div class="pin-marker-container">
           <div class="pin-marker-glow"></div>
           <div class="pin-marker-dot">
-            <i class="fa-solid fa-network-wired"></i>
+            <img src="/logo.png" style="width: 100%; height: 100%; object-fit: cover;" />
           </div>
         </div>
       `,
-      iconSize: [24, 24],
-      iconAnchor: [12, 12]
+      iconSize: [32, 32],
+      iconAnchor: [16, 16]
     });
     marker.setIcon(markerIcon);
     
@@ -565,12 +565,12 @@ function handleNapUpdate(updatedNap) {
         <div class="pin-marker-container">
           <div class="pin-marker-glow"></div>
           <div class="pin-marker-dot">
-            <i class="fa-solid fa-network-wired"></i>
+            <img src="/logo.png" style="width: 100%; height: 100%; object-fit: cover;" />
           </div>
         </div>
       `,
-      iconSize: [24, 24],
-      iconAnchor: [12, 12]
+      iconSize: [32, 32],
+      iconAnchor: [16, 16]
     });
     
     const newMarker = L.marker([updatedNap.latitude, updatedNap.longitude], {

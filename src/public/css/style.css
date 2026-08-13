@@ -583,19 +583,19 @@ body {
 
 .pin-marker-container {
   position: relative;
-  width: 24px;
-  height: 24px;
+  width: 32px;
+  height: 32px;
   display: flex;
   align-items: center;
   justify-content: center;
-  transform: translate(-6px, -6px); /* Center aligning */
+  transform: translate(-8px, -8px); /* Center aligning */
 }
 
 /* Outer Pulsing Glow */
 .pin-marker-glow {
   position: absolute;
-  width: 32px;
-  height: 32px;
+  width: 40px;
+  height: 40px;
   border-radius: 50%;
   opacity: 0;
   pointer-events: none;
@@ -630,23 +630,23 @@ body {
 /* Central Pin Dot */
 .pin-marker-dot {
   position: absolute;
-  width: 20px;
-  height: 20px;
+  width: 26px;
+  height: 26px;
   border-radius: 50%;
-  border: 1.5px solid #FFFFFF;
+  border: 2.5px solid #FFFFFF;
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #FFFFFF;
-  font-size: 10px;
+  background-color: #FFFFFF;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
   z-index: 2;
   transition: all 0.2s ease;
+  overflow: hidden; /* Crop the image inside */
 }
 
-.custom-pin-marker.marker-online .pin-marker-dot { background-color: var(--color-online); }
-.custom-pin-marker.marker-partial .pin-marker-dot { background-color: var(--color-partial); }
-.custom-pin-marker.marker-offline .pin-marker-dot { background-color: var(--color-offline); }
+.custom-pin-marker.marker-online .pin-marker-dot { border-color: var(--color-online); }
+.custom-pin-marker.marker-partial .pin-marker-dot { border-color: var(--color-partial); }
+.custom-pin-marker.marker-offline .pin-marker-dot { border-color: var(--color-offline); }
 
 .pin-marker-container:hover .pin-marker-dot {
   transform: scale(1.2);
