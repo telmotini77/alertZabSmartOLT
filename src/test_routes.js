@@ -81,6 +81,7 @@ globalThis.fetch = async (url, options) => {
           onus: [
             {
               onu_id: '1/1/3:12',
+              external_id: 'ext_fhtt_123',
               sn: 'FHTT8C3A91BF',
               name: 'Juan Pérez',
               status: 'Offline',
@@ -92,6 +93,7 @@ globalThis.fetch = async (url, options) => {
             },
             {
               onu_id: '1/1/3:13',
+              external_id: 'ext_hwtc_123',
               sn: 'HWTC12345678',
               name: 'María López',
               status: 'Online',
@@ -103,6 +105,7 @@ globalThis.fetch = async (url, options) => {
             },
             {
               onu_id: '1/1/3:14',
+              external_id: 'ext_zteg_123',
               sn: 'ZTEG00998877',
               name: 'Carlos Rodríguez',
               status: 'Offline',
@@ -128,6 +131,7 @@ globalThis.fetch = async (url, options) => {
           onus: [
             {
               onu_id: isFhtt ? '1/1/3:12' : '1/1/3:13',
+              external_id: isFhtt ? 'ext_fhtt_123' : 'ext_hwtc_123',
               sn: sn,
               name: isFhtt ? 'Juan Pérez' : 'María López',
               status: isFhtt ? 'Offline' : 'Online',
@@ -150,6 +154,7 @@ globalThis.fetch = async (url, options) => {
           onus: [
             {
               onu_id: '1/1/3:12',
+              external_id: 'ext_fhtt_123',
               sn: 'FHTT8C3A91BF',
               name: 'Juan Pérez',
               status: 'Offline',
@@ -161,6 +166,7 @@ globalThis.fetch = async (url, options) => {
             },
             {
               onu_id: '1/1/3:13',
+              external_id: 'ext_hwtc_123',
               sn: 'HWTC12345678',
               name: 'María López',
               status: 'Online',
@@ -172,6 +178,7 @@ globalThis.fetch = async (url, options) => {
             },
             {
               onu_id: '1/1/3:14',
+              external_id: 'ext_zteg_123',
               sn: 'ZTEG00998877',
               name: 'Carlos Rodríguez',
               status: 'Offline',
@@ -205,6 +212,13 @@ globalThis.fetch = async (url, options) => {
       text: async () => '',
       json: async () => ({
         status: true,
+        onu_status: 'online',
+        signal: -18.5,
+        tx_power: 2.1,
+        temperature: 42.5,
+        voltage: 3.3,
+        bias_current: 15.2,
+        distance: 120,
         last_down_reason: 'Dying gasp'
       })
     };
@@ -624,6 +638,71 @@ try {
     console.log('✅ Synchronized Telegram Summary Report Content: PASS');
   } else {
     console.error('❌ Synchronized Telegram Summary Report Content: FAIL');
+    process.exit(1);
+  }
+
+  console.log('\n[7] Testing Deep-Linked /start diag_<sn> command...');
+  fetchLog = [];
+  
+  const startDiagResponse = await originalFetch('http://localhost:3001/webhook/telegram', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      update_id: 9999,
+      message: {
+        message_id: 999,
+        chat: { id: 8953554158, type: 'private' },
+        from: { id: 1111, is_bot: false, first_name: 'Engineer' },
+        text: '/start diag_FHTT8C3A91BF'
+      }
+    })
+  });
+
+  const startDiagData = await startDiagResponse.json();
+  console.log('Response Status:', startDiagResponse.status);
+  console.log('Response Body:', startDiagData);
+  
+  if (startDiagResponse.status === 200 && startDiagData.ok === true) {
+    console.log('✅ Webhook route /webhook/telegram (deep link /start): PASS');
+  } else {
+    console.error('❌ Webhook route /webhook/telegram (deep link /start): FAIL');
+    process.exit(1);
+  }
+
+  // Wait a short duration for the async message handler to query Smart OLT and send the reply
+  await new Promise(resolve => setTimeout(resolve, 500));
+
+  const startDiagReplies = fetchLog.filter(log => log.url.includes('/sendMessage'));
+  console.log(`Telegram messages sent: ${startDiagReplies.length}`);
+  console.log('startDiagReplies content:', JSON.stringify(startDiagReplies, null, 2));
+  const hasDiagTitle = startDiagReplies.some(log => log.body?.text?.includes('Diagnóstico en Vivo'));
+  
+  if (hasDiagTitle) {
+    console.log('✅ Deep-linked /start diagnostics executed and replied: PASS');
+  } else {
+    console.error('❌ Deep-linked /start diagnostics executed and replied: FAIL');
+    process.exit(1);
+  }
+
+  console.log('\n[8] Testing Inline Keyboard buttons on alert payload...');
+  // Verify that the diagnostics reply in [7] had reply_markup with buttons
+  const diagMsgWithKeyboard = startDiagReplies.find(log => log.body?.text?.includes('Diagnóstico en Vivo'));
+  const replyMarkup = diagMsgWithKeyboard?.body?.reply_markup;
+  
+  if (replyMarkup && replyMarkup.inline_keyboard) {
+    console.log('✅ Inline Keyboard found on live diagnostics: PASS');
+    const buttons = replyMarkup.inline_keyboard.flat();
+    const hasMapBtn = buttons.some(b => b.text.includes('Ver en Mapa') && b.url.includes('?nap='));
+    const hasGmapsBtn = buttons.some(b => b.text.includes('Google Maps') && b.url.includes('google.com/maps'));
+    
+    if (hasMapBtn && hasGmapsBtn) {
+      console.log('✅ Inline Keyboard map and navigation buttons: PASS');
+    } else {
+      console.error('❌ Inline Keyboard map/nav buttons missing:', JSON.stringify(buttons));
+      process.exit(1);
+    }
+  } else {
+    console.error('❌ No Inline Keyboard found on live diagnostics reply');
     process.exit(1);
   }
 

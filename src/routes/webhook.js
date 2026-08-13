@@ -1118,7 +1118,49 @@ ${triggerDesc ? `\n<i>Descripción: ${triggerDesc}</i>` : ''}
   }
 
   if (!options.suppressSend) {
-    await sendMessage(targetChatId, enrichedText.trim());
+    const sendOptions = {};
+    if (onu) {
+      const inlineButtons = [];
+      const firstRow = [];
+      
+      const publicUrl = (process.env.PUBLIC_URL || '').trim();
+      const napBox = (onu.odb_name ? onu.odb_name.trim() : '') || (onu.odb ? onu.odb.trim() : '') || extractNapBox(onu.address) || extractNapBox(onu.description);
+      if (publicUrl && napBox) {
+        firstRow.push({
+          text: '🗺️ Ver en Mapa',
+          url: `${publicUrl}/?nap=${encodeURIComponent(napBox)}`
+        });
+      }
+      
+      const coordinates = getCoordinates(onu) || (napBox ? getCoordinates(findCachedNap(napBox)) : null);
+      if (coordinates) {
+        firstRow.push({
+          text: '📍 Google Maps',
+          url: `https://www.google.com/maps/dir/?api=1&destination=${coordinates.latitude},${coordinates.longitude}`
+        });
+      }
+      
+      if (firstRow.length > 0) {
+        inlineButtons.push(firstRow);
+      }
+      
+      const botUsername = (process.env.BOT_USERNAME || '').trim().replace(/^@/, '');
+      if (sn && botUsername) {
+        inlineButtons.push([
+          {
+            text: '⚡ Diagnóstico Óptico en Vivo',
+            url: `https://t.me/${botUsername}?start=diag_${sn.toUpperCase()}`
+          }
+        ]);
+      }
+      
+      if (inlineButtons.length > 0) {
+        sendOptions.reply_markup = {
+          inline_keyboard: inlineButtons
+        };
+      }
+    }
+    await sendMessage(targetChatId, enrichedText.trim(), sendOptions);
   }
   return { sn, enriched: smartOltEnriched, sent: !options.suppressSend };
 }
@@ -1402,6 +1444,93 @@ router.post('/telegram', (req, res) => {
 });
 
 /**
+ * Auxiliary function to run live optical diagnostics for an ONU and send the result.
+ */
+export async function runLiveDiagnostics(chatId, messageId, snParam) {
+  if (!snParam) {
+    await replyToMessage(chatId, messageId, 'ℹ️ Por favor ingresa el número de serie de la ONU a diagnosticar.\nEjemplo: <code>/diagnostico FHTT8C3A91BF</code>');
+    return;
+  }
+  
+  const cleanSn = snParam.trim().toUpperCase();
+  await replyToMessage(chatId, messageId, `⚡ Consultando potencia óptica en tiempo real para <code>${cleanSn}</code>...`);
+  
+  try {
+    const onu = await findOnuBySn(cleanSn);
+    if (!onu) {
+      await replyToMessage(chatId, messageId, `❌ ONU con número de serie <code>${cleanSn}</code> no encontrada.`);
+      return;
+    }
+    
+    const liveStatus = await getOnuStatus(onu.external_id);
+    if (!liveStatus) {
+      await replyToMessage(chatId, messageId, `❌ No se pudo obtener la potencia óptica en vivo para <code>${onu.sn}</code>.`);
+      return;
+    }
+    
+    const rx = parseFloat(liveStatus.signal || liveStatus.rx_power);
+    const tx = parseFloat(liveStatus.tx_power);
+    const temp = liveStatus.temperature ? `${parseFloat(liveStatus.temperature).toFixed(1)} °C` : 'N/A';
+    const bias = liveStatus.bias_current ? `${parseFloat(liveStatus.bias_current).toFixed(1)} mA` : 'N/A';
+    const dist = liveStatus.distance ? `${liveStatus.distance} m` : 'N/A';
+    
+    // Save to DB in background
+    dbSaveOpticalRecord(onu.sn, rx, tx, parseFloat(liveStatus.temperature), parseFloat(liveStatus.voltage), parseFloat(liveStatus.bias_current)).catch(() => {});
+    
+    const rxStr = isNaN(rx) || rx === 0 ? 'N/A' : `${rx.toFixed(2)} dBm`;
+    const txStr = isNaN(tx) || tx === 0 ? 'N/A' : `${tx.toFixed(2)} dBm`;
+    const statusDot = liveStatus.onu_status?.toLowerCase() === 'online' || liveStatus.status_desc?.toLowerCase() === 'online' || liveStatus.status_desc?.toLowerCase() === 'active' || liveStatus.onu_status?.toLowerCase() === 'active' ? '🟢' : '🔴';
+    
+    const reply = `⚡ <b>Diagnóstico en Vivo ONU: ${onu.name}</b>
+\n🔢 <b>SN:</b> <code>${onu.sn}</code>
+📊 <b>Estado OLT:</b> ${statusDot} <b>${(liveStatus.onu_status || liveStatus.status_desc || onu.status || 'Offline').toUpperCase()}</b>
+📶 <b>Potencia Rx (Señal):</b> <b>${rxStr}</b>
+📤 <b>Potencia Tx:</b> <code>${txStr}</code>
+🌡️ <b>Temperatura:</b> <code>${temp}</code>
+🔌 <b>Corriente Bias:</b> <code>${bias}</code>
+📏 <b>Distancia OLT:</b> <code>${dist}</code>
+📦 <b>Caja NAP:</b> <code>${onu.odb_name || onu.odb || 'N/A'}</code>`;
+    
+    const sendOptions = {};
+    if (onu) {
+      const inlineButtons = [];
+      const firstRow = [];
+      
+      const publicUrl = (process.env.PUBLIC_URL || '').trim();
+      const napBox = (onu.odb_name ? onu.odb_name.trim() : '') || (onu.odb ? onu.odb.trim() : '') || extractNapBox(onu.address) || extractNapBox(onu.description);
+      if (publicUrl && napBox) {
+        firstRow.push({
+          text: '🗺️ Ver en Mapa',
+          url: `${publicUrl}/?nap=${encodeURIComponent(napBox)}`
+        });
+      }
+      
+      const coordinates = getCoordinates(onu) || (napBox ? getCoordinates(findCachedNap(napBox)) : null);
+      if (coordinates) {
+        firstRow.push({
+          text: '📍 Google Maps',
+          url: `https://www.google.com/maps/dir/?api=1&destination=${coordinates.latitude},${coordinates.longitude}`
+        });
+      }
+      
+      if (firstRow.length > 0) {
+        inlineButtons.push(firstRow);
+      }
+      
+      if (inlineButtons.length > 0) {
+        sendOptions.reply_markup = {
+          inline_keyboard: inlineButtons
+        };
+      }
+    }
+    await replyToMessage(chatId, messageId, reply, sendOptions);
+  } catch (err) {
+    console.error('Error in runLiveDiagnostics:', err.message);
+    await replyToMessage(chatId, messageId, `❌ Error de diagnóstico: ${err.message}`);
+  }
+}
+
+/**
  * Common logic to handle an incoming Telegram message (used by Webhook and Polling)
  */
 export async function handleTelegramMessage(message) {
@@ -1417,6 +1546,15 @@ export async function handleTelegramMessage(message) {
   if (!text) return;
 
   const upperText = text.toUpperCase();
+
+  if (upperText.startsWith('/START')) {
+    const parts = text.split(/\s+/);
+    if (parts[1] && parts[1].toLowerCase().startsWith('diag_')) {
+      const snParam = parts[1].substring(5).trim();
+      await runLiveDiagnostics(chatId, messageId, snParam);
+      return;
+    }
+  }
 
   if (upperText.startsWith('/START') || upperText.startsWith('/AYUDA') || upperText.startsWith('/HELP')) {
     try {
@@ -1517,56 +1655,9 @@ Comandos disponibles:
   }
 
   if (upperText.startsWith('/DIAGNOSTICO') || upperText.startsWith('/DIAG')) {
-    try {
-      const parts = text.split(/\s+/);
-      const snParam = parts[1] ? parts[1].trim() : null;
-      if (!snParam) {
-        await replyToMessage(chatId, messageId, 'ℹ️ Por favor ingresa el número de serie de la ONU a diagnosticar.\nEjemplo: <code>/diagnostico FHTT8C3A91BF</code>');
-        return;
-      }
-      
-      await replyToMessage(chatId, messageId, `⚡ Consultando potencia óptica en tiempo real para <code>${snParam.toUpperCase()}</code>...`);
-      
-      const onu = await findOnuBySn(snParam);
-      if (!onu) {
-        await replyToMessage(chatId, messageId, `❌ ONU con número de serie <code>${snParam.toUpperCase()}</code> no encontrada.`);
-        return;
-      }
-      
-      const liveStatus = await getOnuStatus(onu.external_id);
-      if (!liveStatus) {
-        await replyToMessage(chatId, messageId, `❌ No se pudo obtener la potencia óptica en vivo para <code>${onu.sn}</code>.`);
-        return;
-      }
-      
-      const rx = parseFloat(liveStatus.signal || liveStatus.rx_power);
-      const tx = parseFloat(liveStatus.tx_power);
-      const temp = liveStatus.temperature ? `${parseFloat(liveStatus.temperature).toFixed(1)} °C` : 'N/A';
-      const bias = liveStatus.bias_current ? `${parseFloat(liveStatus.bias_current).toFixed(1)} mA` : 'N/A';
-      const dist = liveStatus.distance ? `${liveStatus.distance} m` : 'N/A';
-      
-      // Save to DB in background
-      dbSaveOpticalRecord(onu.sn, rx, tx, parseFloat(liveStatus.temperature), parseFloat(liveStatus.voltage), parseFloat(liveStatus.bias_current)).catch(() => {});
-      
-      const rxStr = isNaN(rx) || rx === 0 ? 'N/A' : `${rx.toFixed(2)} dBm`;
-      const txStr = isNaN(tx) || tx === 0 ? 'N/A' : `${tx.toFixed(2)} dBm`;
-      const statusDot = liveStatus.onu_status?.toLowerCase() === 'online' || liveStatus.status_desc?.toLowerCase() === 'online' || liveStatus.status_desc?.toLowerCase() === 'active' || liveStatus.onu_status?.toLowerCase() === 'active' ? '🟢' : '🔴';
-      
-      const reply = `⚡ <b>Diagnóstico en Vivo ONU: ${onu.name}</b>
-\n🔢 <b>SN:</b> <code>${onu.sn}</code>
-📊 <b>Estado OLT:</b> ${statusDot} <b>${(liveStatus.onu_status || liveStatus.status_desc || onu.status || 'Offline').toUpperCase()}</b>
-📶 <b>Potencia Rx (Señal):</b> <b>${rxStr}</b>
-📤 <b>Potencia Tx:</b> <code>${txStr}</code>
-🌡️ <b>Temperatura:</b> <code>${temp}</code>
-🔌 <b>Corriente Bias:</b> <code>${bias}</code>
-📏 <b>Distancia OLT:</b> <code>${dist}</code>
-📦 <b>Caja NAP:</b> <code>${onu.odb_name || onu.odb || 'N/A'}</code>`;
-      
-      await replyToMessage(chatId, messageId, reply);
-    } catch (err) {
-      console.error('Error handling /diagnostico command:', err.message);
-      await replyToMessage(chatId, messageId, `❌ Error de diagnóstico: ${err.message}`);
-    }
+    const parts = text.split(/\s+/);
+    const snParam = parts[1] ? parts[1].trim() : null;
+    await runLiveDiagnostics(chatId, messageId, snParam);
     return;
   }
 
@@ -1677,8 +1768,50 @@ Comandos disponibles:
             oltStatusReason,
             eventTime
           );
-          
-          await replyToMessage(chatId, messageId, replyText.trim());
+
+          const sendOptions = {};
+          if (onu) {
+            const inlineButtons = [];
+            const firstRow = [];
+            
+            const publicUrl = (process.env.PUBLIC_URL || '').trim();
+            const napBox = (onu.odb_name ? onu.odb_name.trim() : '') || (onu.odb ? onu.odb.trim() : '') || extractNapBox(onu.address) || extractNapBox(onu.description);
+            if (publicUrl && napBox) {
+              firstRow.push({
+                text: '🗺️ Ver en Mapa',
+                url: `${publicUrl}/?nap=${encodeURIComponent(napBox)}`
+              });
+            }
+            
+            const coordinates = getCoordinates(onu) || (napBox ? getCoordinates(findCachedNap(napBox)) : null);
+            if (coordinates) {
+              firstRow.push({
+                text: '📍 Google Maps',
+                url: `https://www.google.com/maps/dir/?api=1&destination=${coordinates.latitude},${coordinates.longitude}`
+              });
+            }
+            
+            if (firstRow.length > 0) {
+              inlineButtons.push(firstRow);
+            }
+            
+            const botUsername = (process.env.BOT_USERNAME || '').trim().replace(/^@/, '');
+            if (sn && botUsername) {
+              inlineButtons.push([
+                {
+                  text: '⚡ Diagnóstico Óptico en Vivo',
+                  url: `https://t.me/${botUsername}?start=diag_${sn.toUpperCase()}`
+                }
+              ]);
+            }
+            
+            if (inlineButtons.length > 0) {
+              sendOptions.reply_markup = {
+                inline_keyboard: inlineButtons
+              };
+            }
+          }
+          await replyToMessage(chatId, messageId, replyText.trim(), sendOptions);
           smartOltEnriched = true;
           console.log(`Successfully replied with details for ${sn}`);
         } else {

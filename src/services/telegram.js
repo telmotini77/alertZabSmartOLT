@@ -120,8 +120,8 @@ export async function sendMessage(chatId, text, options = {}) {
  * @param {string} text - Message content
  * @returns {Promise<Object>}
  */
-export async function replyToMessage(chatId, replyToMessageId, text) {
-  return sendMessage(chatId, text, { reply_to_message_id: replyToMessageId });
+export async function replyToMessage(chatId, replyToMessageId, text, options = {}) {
+  return sendMessage(chatId, text, { reply_to_message_id: replyToMessageId, ...options });
 }
 
 /**
