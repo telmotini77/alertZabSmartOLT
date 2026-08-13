@@ -109,14 +109,6 @@ function initMap() {
   // Initialize Topology Layer Group
   topologyLayerGroup = L.layerGroup().addTo(map);
 
-  // Initialize Marker Cluster Group
-  markerClusterGroup = L.markerClusterGroup({
-    maxClusterRadius: 50,
-    showCoverageOnHover: false,
-    spiderfyOnMaxZoom: true
-  });
-  map.addLayer(markerClusterGroup);
-
   // Add Scale Control (bottom-left)
   L.control.scale({ position: 'bottomleft' }).addTo(map);
 
@@ -220,10 +212,8 @@ function renderNapsAndMarkers(filterQuery = '') {
   const listContainer = document.getElementById('naps-list');
   listContainer.innerHTML = '';
   
-  // Clear existing markers from cluster group
-  if (markerClusterGroup) {
-    markerClusterGroup.clearLayers();
-  }
+  // Clear existing markers from map
+  Object.values(markers).forEach(m => map.removeLayer(m));
   markers = {};
 
   const query = filterQuery.toLowerCase().trim();
@@ -299,11 +289,7 @@ function renderNapsAndMarkers(filterQuery = '') {
 
       // Bind detail popup
       marker.bindPopup(() => getPopupContent(nap));
-      if (markerClusterGroup) {
-        markerClusterGroup.addLayer(marker);
-      } else {
-        marker.addTo(map);
-      }
+      marker.addTo(map);
       markers[nap.name] = marker;
     }
 
@@ -591,11 +577,7 @@ function handleNapUpdate(updatedNap) {
       icon: markerIcon
     });
     newMarker.bindPopup(() => getPopupContent(updatedNap));
-    if (markerClusterGroup) {
-      markerClusterGroup.addLayer(newMarker);
-    } else {
-      newMarker.addTo(map);
-    }
+    newMarker.addTo(map);
     markers[updatedNap.name] = newMarker;
   }
 

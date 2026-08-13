@@ -172,20 +172,34 @@ async function runMigration() {
         console.log(`✅ Migrated ${cacheData.length} NAPs to SQLite.`);
       }
     } else if (napsCountRow.count > 0 && fs.existsSync(cacheFile)) {
-      // Heal missing/zeroed coordinates using the original JSON cache file if it exists
-      console.log('🔄 Healing missing coordinates from nap_cache.json...');
+      // Heal missing NAPs and zeroed coordinates using the original JSON cache file if it exists
+      console.log('🔄 Restoring/healing NAPs and coordinates from nap_cache.json...');
       const cacheData = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
       if (Array.isArray(cacheData)) {
-        let healedCount = 0;
         await new Promise((resolve, reject) => {
           getDb().serialize(() => {
             getDb().run('BEGIN TRANSACTION');
-            const stmt = getDb().prepare('UPDATE naps SET latitude = ?, longitude = ? WHERE name = ? AND (latitude IS NULL OR latitude = 0)');
+            const stmt = getDb().prepare(`
+              INSERT INTO naps (name, olt_name, board, port, latitude, longitude, totalClients, onlineClients, offlineClients, status, clients)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(name) DO UPDATE SET
+                latitude = CASE WHEN latitude IS NULL OR latitude = 0 THEN excluded.latitude ELSE latitude END,
+                longitude = CASE WHEN longitude IS NULL OR longitude = 0 THEN excluded.longitude ELSE longitude END
+            `);
             cacheData.forEach((nap) => {
-              if (nap.latitude !== null && nap.latitude !== 0 && nap.longitude !== null && nap.longitude !== 0) {
-                stmt.run(nap.latitude, nap.longitude, nap.name);
-                healedCount++;
-              }
+              stmt.run(
+                nap.name,
+                nap.olt_name,
+                nap.board,
+                nap.port,
+                nap.latitude,
+                nap.longitude,
+                nap.totalClients,
+                nap.onlineClients,
+                nap.offlineClients,
+                nap.status,
+                JSON.stringify(nap.clients || [])
+              );
             });
             stmt.finalize();
             getDb().run('COMMIT', (err) => {
@@ -194,7 +208,7 @@ async function runMigration() {
             });
           });
         });
-        console.log(`✅ Checked and healed NAPs coordinates in SQLite.`);
+        console.log(`✅ Checked and fully restored NAPs coordinates in SQLite.`);
       }
     }
 
