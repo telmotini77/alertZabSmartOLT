@@ -206,19 +206,20 @@ globalThis.fetch = async (url, options) => {
 
   // Smart OLT get_onu_status mock response
   if (url.includes('/onu/get_onu_status/')) {
+    const isFhtt = url.includes('ext_fhtt_123');
     return {
       ok: true,
       status: 200,
       text: async () => '',
       json: async () => ({
         status: true,
-        onu_status: 'online',
-        signal: -18.5,
-        tx_power: 2.1,
-        temperature: 42.5,
-        voltage: 3.3,
-        bias_current: 15.2,
-        distance: 120,
+        onu_status: isFhtt ? 'offline' : 'online',
+        signal: isFhtt ? 0 : -18.5,
+        tx_power: isFhtt ? 0 : 2.1,
+        temperature: isFhtt ? 0 : 42.5,
+        voltage: isFhtt ? 0 : 3.3,
+        bias_current: isFhtt ? 0 : 15.2,
+        distance: isFhtt ? 0 : 120,
         last_down_reason: 'Dying gasp'
       })
     };

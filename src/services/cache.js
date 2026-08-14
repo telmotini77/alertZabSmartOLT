@@ -217,6 +217,7 @@ export function updateOnuStatusInCache(sn, newStatus, eventMetadata = {}) {
       const s = (c.status || '').toLowerCase();
       return s !== 'online' && s !== 'active';
     }).length;
+    affectedNap.totalClients = totalClients;
     affectedNap.offlineClients = offlineClients;
     affectedNap.onlineClients = totalClients - offlineClients;
 

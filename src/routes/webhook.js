@@ -299,7 +299,7 @@ export async function syncActiveProblems(targetChatId = DEFAULT_CHAT_ID) {
           try {
             liveStatus = await getOnuStatus(onu.external_id);
             if (liveStatus && liveStatus.status) {
-              onu.status = liveStatus.status; // Override stale API cache with real-time hardware status
+              onu.status = liveStatus.onu_status || liveStatus.status_desc || (liveStatus.status === true ? 'online' : 'offline'); // Override stale API cache with real-time hardware status
               const reason = (liveStatus.last_down_reason || liveStatus.offline_reason || '').toLowerCase();
               if (reason.includes('dying') || reason.includes('power') || reason.includes('gasp') || reason.includes('off')) {
                 oltReason = 'Corte de Energía (Dying Gasp)';
@@ -1233,7 +1233,7 @@ export async function processZabbixAlert(payload) {
     // immediately from the confirmed cache rather than waiting for an OLT API
     // query that may time out.
     const isTotalNapLoss = eventStatus === 'PROBLEM' &&
-      statusInfo.category === 'loss' &&
+      (statusInfo.category === 'loss' || statusInfo.category === 'power_fail') &&
       updatedNap?.status === 'offline' &&
       updatedNap.totalClients >= getMinimumNapClients();
     if (isTotalNapLoss) {
