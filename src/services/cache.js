@@ -606,3 +606,37 @@ export function applyCsvCoordinatesToCache() {
     console.error('❌ Error applying CSV coordinates to cache:', err.message);
   }
 }
+
+/**
+ * Dynamically update details of an unresolved status history event for an SN.
+ */
+export function updateHistoryEventDetails(sn, newCategory, newReason) {
+  if (!sn) return null;
+  const cleanSn = sn.toUpperCase();
+  const item = statusHistory.find(i => i.sn === cleanSn && !i.resolved);
+  if (item) {
+    let failureType = 'unknown';
+    let failureLabel = 'Alerta de Red';
+    
+    if (newCategory === 'power_fail') {
+      failureType = 'power_fail';
+      failureLabel = 'Corte de Energía (Dying Gasp)';
+    } else if (newCategory === 'loss') {
+      failureType = 'loss';
+      failureLabel = 'Pérdida de Señal (LOS)';
+    }
+    
+    item.failureType = failureType;
+    item.failureLabel = failureLabel;
+    item.reason = newReason || failureLabel;
+    
+    dbSaveHistoryItem(item).catch(() => {});
+    try {
+      broadcast('status_history_updated', item);
+    } catch (err) {
+      console.error('Error broadcasting history update:', err.message);
+    }
+    return item;
+  }
+  return null;
+}

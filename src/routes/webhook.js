@@ -6,7 +6,7 @@ import { findOnuBySn, findOnusByAddressQuery, findOnusByPort, getOnuStatus } fro
 import { sendMessage, replyToMessage } from '../services/telegram.js';
 import { extractSerialNumber, extractNapBox, parseStatusInfo, extractEventTime, formatDateTime, extractBoardAndPort } from '../utils/parser.js';
 import { broadcast } from '../services/websocket.js';
-import { updateOnuStatusInCache, getCachedNaps, updateNapCoordinates, updateNapCoordinatesBulk, getStatusHistory, deleteHistoryItem, clearHistory, resolveHistoryItem } from '../services/cache.js';
+import { updateOnuStatusInCache, getCachedNaps, updateNapCoordinates, updateNapCoordinatesBulk, getStatusHistory, deleteHistoryItem, clearHistory, resolveHistoryItem, updateHistoryEventDetails } from '../services/cache.js';
 import { getActiveTriggers } from '../services/zabbix.js';
 import { dbGetOpticalHistory, dbSaveOpticalRecord } from '../services/db.js';
 
@@ -1035,6 +1035,10 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
     category = 'power_fail';
   } else if (oltStatusReason === 'Pérdida de Señal (LOS)') {
     category = 'loss';
+  }
+
+  if (sn && eventStatus === 'PROBLEM') {
+    updateHistoryEventDetails(sn, category, oltStatusReason || statusInfo.status);
   }
 
   // Corroboration verification
