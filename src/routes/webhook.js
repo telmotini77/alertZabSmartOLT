@@ -1205,7 +1205,7 @@ ${triggerDesc ? `\n<i>Descripción: ${triggerDesc}</i>` : ''}
         });
       }
       
-      const coordinates = getCoordinates(onu) || (napBox ? getCoordinates(findCachedNap(napBox)) : null);
+      const coordinates = (napBox ? getCoordinates(findCachedNap(napBox)) : null) || getCoordinates(onu);
       if (coordinates) {
         firstRow.push({
           text: '📍 Google Maps',
@@ -1578,7 +1578,7 @@ export async function runLiveDiagnostics(chatId, messageId, snParam) {
         });
       }
       
-      const coordinates = getCoordinates(onu) || (napBox ? getCoordinates(findCachedNap(napBox)) : null);
+      const coordinates = (napBox ? getCoordinates(findCachedNap(napBox)) : null) || getCoordinates(onu);
       if (coordinates) {
         firstRow.push({
           text: '📍 Google Maps',
@@ -1856,7 +1856,7 @@ Comandos disponibles:
               });
             }
             
-            const coordinates = getCoordinates(onu) || (napBox ? getCoordinates(findCachedNap(napBox)) : null);
+            const coordinates = (napBox ? getCoordinates(findCachedNap(napBox)) : null) || getCoordinates(onu);
             if (coordinates) {
               firstRow.push({
                 text: '📍 Google Maps',
