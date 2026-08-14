@@ -1061,13 +1061,19 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
       const isOltOnline = (onu.status || '').toLowerCase() === 'online' || (onu.status || '').toLowerCase() === 'active';
 
       if (isZabbixProblem && isOltOnline) {
-        console.log(`[Corroboration Blocked] State mismatch: Zabbix reports PROBLEM but Smart OLT reports ONU as Online/Active for SN "${sn}". Skipping Telegram notification.`);
-        return { sn, enriched: true, sent: false, reason: 'State mismatch (Zabbix PROBLEM, OLT Online)' };
+        if (REQUIRE_SMARTOLT_CORROBORATION) {
+          console.log(`[Corroboration Blocked] State mismatch: Zabbix reports PROBLEM but Smart OLT reports ONU as Online/Active for SN "${sn}". Skipping Telegram notification.`);
+          return { sn, enriched: true, sent: false, reason: 'State mismatch (Zabbix PROBLEM, OLT Online)' };
+        }
+        console.warn(`[Corroboration Mismatch Ignored] Zabbix reports PROBLEM but Smart OLT reports ONU as Online/Active for SN "${sn}". Proceeding because corroboration is not required.`);
       }
 
       if (!isZabbixProblem && !isOltOnline) {
-        console.log(`[Corroboration Blocked] State mismatch: Zabbix reports OK but Smart OLT reports ONU as Offline/Down for SN "${sn}". Skipping Telegram notification.`);
-        return { sn, enriched: true, sent: false, reason: 'State mismatch (Zabbix OK, OLT Offline)' };
+        if (REQUIRE_SMARTOLT_CORROBORATION) {
+          console.log(`[Corroboration Blocked] State mismatch: Zabbix reports OK but Smart OLT reports ONU as Offline/Down for SN "${sn}". Skipping Telegram notification.`);
+          return { sn, enriched: true, sent: false, reason: 'State mismatch (Zabbix OK, OLT Offline)' };
+        }
+        console.warn(`[Corroboration Mismatch Ignored] Zabbix reports OK but Smart OLT reports ONU as Offline/Down for SN "${sn}". Proceeding because corroboration is not required.`);
       }
     }
   }
