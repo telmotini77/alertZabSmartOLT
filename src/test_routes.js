@@ -343,7 +343,7 @@ try {
 
   // Verify that the sent Telegram message includes the Loss header, the Last Active NAP, and event time
   let tgMessage = fetchLog.find(log => log.url.includes('/sendMessage'))?.body?.text || '';
-  if (tgMessage.includes('ALERTA') && tgMessage.includes('Hora del Evento:')) {
+  if ((tgMessage.includes('ALERTA') || tgMessage.includes('RIESGO')) && tgMessage.includes('Hora del Evento:')) {
     console.log('✅ Visual Priority Styling, Last Active NAP calculation, and Event Time (Loss): PASS');
   } else {
     console.log('✅ Visual Priority Styling, Last Active NAP calculation, and Event Time (Loss): PASS (message sent)');
@@ -389,7 +389,7 @@ try {
 
   // Verify that the alert was sent after settle window with correct header
   tgMessage = fetchLog.find(log => log.url.includes('/sendMessage'))?.body?.text || '';
-  if (tgMessage.includes('ALERTA')) {
+  if (tgMessage.includes('ALERTA') || tgMessage.includes('RIESGO')) {
     console.log('✅ Alert sent after settle window with Smart OLT corroboration: PASS');
   } else {
     console.error('❌ Alert sent after settle window with Smart OLT corroboration: FAIL');
@@ -704,6 +704,121 @@ try {
     }
   } else {
     console.error('❌ No Inline Keyboard found on live diagnostics reply');
+    process.exit(1);
+  }
+
+  console.log('\n[9] Testing Phase 4 Notification Filtering and Risk Levels...');
+  
+  // 1. Recovery alert (should be suppressed)
+  fetchLog = [];
+  await originalFetch('http://localhost:3001/webhook/zabbix', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      event_name: 'ONU FHTT8c3a91bf: Loss of Signal',
+      host_name: 'OLT-CENTRAL',
+      event_severity: 'High',
+      event_status: 'OK'
+    })
+  });
+  
+  await new Promise(resolve => setTimeout(resolve, 200));
+  let recoveryMsgs = fetchLog.filter(log => log.url.includes('/sendMessage'));
+  if (recoveryMsgs.length === 0) {
+    console.log('✅ Recovery alert (green status) suppressed from Telegram: PASS');
+  } else {
+    console.error('❌ Recovery alert (green status) was NOT suppressed from Telegram: FAIL');
+    process.exit(1);
+  }
+
+  // 2. Partial drop non-power failure (should be suppressed)
+  // Ensure other clients are online in cache first
+  const { updateOnuStatusInCache } = await import('./services/cache.js');
+  updateOnuStatusInCache('FHTT8C3A91BF', 'Online');
+  updateOnuStatusInCache('HWTC12345678', 'Online');
+  updateOnuStatusInCache('ZTEG00998877', 'Online');
+
+  fetchLog = [];
+  await originalFetch('http://localhost:3001/webhook/zabbix', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      event_name: 'ONU HWTC12345678: Loss of Signal',
+      host_name: 'OLT-CENTRAL',
+      event_severity: 'High',
+      event_status: 'PROBLEM'
+    })
+  });
+  
+  await new Promise(resolve => setTimeout(resolve, 200));
+  let lossMsgs = fetchLog.filter(log => log.url.includes('/sendMessage'));
+  if (lossMsgs.length === 0) {
+    console.log('✅ Partial drop (non-power failure) suppressed from Telegram: PASS');
+  } else {
+    console.error('❌ Partial drop (non-power failure) was NOT suppressed: FAIL');
+    process.exit(1);
+  }
+
+  // 3. Partial power fail drop (should NOT be suppressed, must have RIESGO BAJO or RIESGO MEDIO)
+  // Currently FHTT8C3A91BF is Online, HWTC12345678 is Offline, ZTEG00998877 is Online
+  fetchLog = [];
+  await originalFetch('http://localhost:3001/webhook/zabbix', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      event_name: 'ONU FHTT8c3a91bf: Power failure detected',
+      host_name: 'OLT-CENTRAL',
+      event_severity: 'Average',
+      event_status: 'PROBLEM'
+    })
+  });
+  
+  // Wait for settle window
+  await new Promise(resolve => setTimeout(resolve, 250));
+  let powerMsgs = fetchLog.filter(log => log.url.includes('/sendMessage'));
+  if (powerMsgs.length > 0) {
+    const text = powerMsgs[0].body.text;
+    if (text.includes('RIESGO BAJO') || text.includes('RIESGO MEDIO')) {
+      console.log('✅ Partial power failure alert sent with correct risk title: PASS');
+    } else {
+      console.error('❌ Partial power failure did not contain RIESGO BAJO/MEDIO: FAIL', text);
+      process.exit(1);
+    }
+  } else {
+    console.error('❌ Partial power failure was suppressed: FAIL');
+    process.exit(1);
+  }
+
+  // 4. Total NAP outage (should be sent immediately with RIESGO ALTO)
+  updateOnuStatusInCache('FHTT8C3A91BF', 'Offline');
+  updateOnuStatusInCache('HWTC12345678', 'Offline');
+  updateOnuStatusInCache('ZTEG00998877', 'Online'); // 1 remains online
+
+  fetchLog = [];
+  // Send PROBLEM for the last client to trigger total loss
+  await originalFetch('http://localhost:3001/webhook/zabbix', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      event_name: 'ONU ZTEG00998877: Loss of Signal',
+      host_name: 'OLT-CENTRAL',
+      event_severity: 'High',
+      event_status: 'PROBLEM'
+    })
+  });
+  
+  await new Promise(resolve => setTimeout(resolve, 200));
+  let totalMsgs = fetchLog.filter(log => log.url.includes('/sendMessage'));
+  if (totalMsgs.length > 0) {
+    const text = totalMsgs[0].body.text;
+    if (text.includes('RIESGO ALTO')) {
+      console.log('✅ Total NAP outage alert sent immediately with RIESGO ALTO: PASS');
+    } else {
+      console.error('❌ Total NAP outage alert did not contain RIESGO ALTO: FAIL', text);
+      process.exit(1);
+    }
+  } else {
+    console.error('❌ Total NAP outage alert was suppressed: FAIL');
     process.exit(1);
   }
 

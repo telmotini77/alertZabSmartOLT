@@ -831,24 +831,30 @@ ${eventTime ? `• 📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : '
   } else if (isNapTotalLoss) {
     effectiveEmoji = '🔴';
     effectiveStatusLabel = 'Pérdida de Señal (Loss of Signal)';
-    effectiveTitle = '🚨🔴 <b>ALERTA CRÍTICA: PÉRDIDA DE SEÑAL EN NAP</b>';
+    effectiveTitle = '🚨🔴 <b>RIESGO ALTO: CAÍDA TOTAL EN CAJA NAP</b>';
     effectiveReason = oltStatusReason || 'Pérdida de Potencia Óptica (LOS)';
     effectiveTechExplanation = '\n💡 <b>Diagnóstico Técnico:</b> Pérdida total de potencia óptica (LOS). La caja NAP completa no recibe luz de la OLT.\n• <b>Causas probables:</b> Rotura de fibra troncal, corte de acometida general o daño físico en la caja NAP.';
   } else if (isNapPartialLoss) {
     effectiveEmoji = '⚠️';
     effectiveStatusLabel = 'Pérdida Parcial de Señal en NAP';
-    effectiveTitle = '⚠️ <b>ALERTA: CAÍDA PARCIAL EN CAJA NAP</b>';
+    effectiveTitle = isPower
+      ? `🔌⚡ <b>RIESGO MEDIO: CORTE DE ENERGÍA PARCIAL EN NAP</b>`
+      : `⚠️ <b>ALERTA: CAÍDA PARCIAL EN CAJA NAP</b>`;
     effectiveReason = oltStatusReason || 'Caída múltiple de conexiones en NAP';
     effectiveTechExplanation = '\n💡 <b>Diagnóstico Técnico:</b> Varias conexiones en la misma caja NAP están sin señal. Posible problema en splitter o acometidas compartidas.';
   } else {
-    // Individual undetected ONU on a working NAP with other online clients -> Power Fail
-    effectiveEmoji = '🔌';
-    effectiveStatusLabel = 'Corte de Energía (Power Fail)';
-    effectiveTitle = '⚡🔌 <b>ALERTA: CORTE DE ENERGÍA</b>';
+    // Individual undetected ONU on a working NAP with other online clients
+    effectiveEmoji = isPower ? '🔌' : '🔴';
+    effectiveStatusLabel = isPower ? 'Corte de Energía (Power Fail)' : 'Pérdida de Señal (Loss of Signal)';
+    effectiveTitle = isPower
+      ? `🔌⚠️ <b>RIESGO BAJO: CORTE DE ENERGÍA INDIVIDUAL</b>`
+      : `🚨🔴 <b>RIESGO ALTO: PÉRDIDA DE SEÑAL</b>`;
     effectiveReason = (oltStatusReason && !oltStatusReason.toLowerCase().includes('los') && !oltStatusReason.toLowerCase().includes('signal'))
       ? oltStatusReason
-      : 'Corte de Energía (Dying Gasp / No detectada)';
-    effectiveTechExplanation = '\n💡 <b>Diagnóstico Técnico:</b> Falla de alimentación eléctrica (Power Fail). La caja NAP mantiene señal óptica normal en las demás conexiones.\n• <b>Causas probables:</b> Corte de luz en el sector, transformador desconectado o equipo apagado.';
+      : (isPower ? 'Corte de Energía (Dying Gasp / No detectada)' : 'Pérdida de Potencia Óptica (LOS)');
+    effectiveTechExplanation = isPower
+      ? '\n💡 <b>Diagnóstico Técnico:</b> Falla de alimentación eléctrica (Power Fail). La caja NAP mantiene señal óptica normal en las demás conexiones.\n• <b>Causas probables:</b> Corte de luz en el sector, transformador desconectado o equipo apagado.'
+      : '\n💡 <b>Diagnóstico Técnico:</b> Pérdida de potencia óptica (LOS) en la acometida individual.\n• <b>Causas probables:</b> Acometida rota, conector suelto o atenuación excesiva.';
   }
 
   const napWarning = totalOffline === totalClients 
@@ -1062,21 +1068,84 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
     }
   }
 
+  // ── Apply Custom Notification Rules based on Risk Levels & Status ──
+  if (eventStatus === 'OK') {
+    // Suppress Telegram notifications for recovery (stable green NAP)
+    console.log(`[Notification Filter] Suppressing Telegram recovery alert for SN "${sn}" as green connections are not notified.`);
+    options.suppressSend = true;
+  } else if (onu) {
+    const napBox = (onu.odb_name ? onu.odb_name.trim() : '') || (onu.odb ? onu.odb.trim() : '') || extractNapBox(onu.address) || extractNapBox(onu.description);
+    if (napBox) {
+      const cachedNap = findCachedNap(napBox);
+      if (cachedNap) {
+        const totalClients = cachedNap.clients?.length || cachedNap.totalClients || 1;
+        const offlineClients = cachedNap.clients?.filter(c => {
+          const s = (c.status || '').toLowerCase();
+          return s !== 'online' && s !== 'active';
+        }).length || cachedNap.offlineClients || 0;
+        
+        const isTotalOffline = offlineClients === totalClients;
+        const isPartialOffline = offlineClients > 0 && !isTotalOffline;
+        
+        if (isTotalOffline) {
+          console.log(`[Notification Filter] NAP "${cachedNap.name}" is fully offline. Allowing Telegram alert (Riesgo Alto).`);
+        } else if (isPartialOffline) {
+          if (category === 'power_fail') {
+            console.log(`[Notification Filter] Partial drop on NAP "${cachedNap.name}" due to power fail. Allowing Telegram alert (Riesgo Bajo/Medio).`);
+          } else {
+            console.log(`[Notification Filter] Suppressing Telegram alert for partial drop on NAP "${cachedNap.name}" (not a power failure).`);
+            options.suppressSend = true;
+          }
+        }
+      }
+    }
+  }
+
   const eventTime = extractEventTime(payload);
 
   const statusEmoji = eventStatus === 'OK' ? '🟢' : (category === 'power_fail' ? '🔌' : '🔴');
   const statusLabel = eventStatus === 'OK' ? 'OK (Restablecido)' : (category === 'power_fail' ? 'Corte de Energía' : 'Pérdida de Señal');
 
-  // Set visual priority title based on category & status
+  // Set visual priority title based on category & status & custom risk levels
   let priorityTitle = '';
   if (eventStatus === 'OK') {
     priorityTitle = `🟢 <b>SERVICIO RESTABLECIDO</b>`;
-  } else if (category === 'loss') {
-    priorityTitle = `🚨🔴 <b>ALERTA CRÍTICA: PÉRDIDA DE SEÑAL</b>`;
-  } else if (category === 'power_fail') {
-    priorityTitle = `⚡🔌 <b>ALERTA: CORTE DE ENERGÍA</b>`;
-  } else {
-    priorityTitle = `${statusEmoji} <b>ALERTA DE INFRAESTRUCTURA</b>`;
+  } else if (onu) {
+    const napBox = (onu.odb_name ? onu.odb_name.trim() : '') || (onu.odb ? onu.odb.trim() : '') || extractNapBox(onu.address) || extractNapBox(onu.description);
+    if (napBox) {
+      const cachedNap = findCachedNap(napBox);
+      if (cachedNap) {
+        const totalClients = cachedNap.clients?.length || cachedNap.totalClients || 1;
+        const offlineClients = cachedNap.clients?.filter(c => {
+          const s = (c.status || '').toLowerCase();
+          return s !== 'online' && s !== 'active';
+        }).length || cachedNap.offlineClients || 0;
+        
+        const isTotalOffline = offlineClients === totalClients;
+        
+        if (isTotalOffline) {
+          priorityTitle = `🚨🔴 <b>RIESGO ALTO: CAÍDA TOTAL EN CAJA NAP</b>`;
+        } else if (category === 'power_fail') {
+          if (offlineClients > 1) {
+            priorityTitle = `🔌⚡ <b>RIESGO MEDIO: CORTE DE ENERGÍA PARCIAL EN NAP</b>`;
+          } else {
+            priorityTitle = `🔌⚠️ <b>RIESGO BAJO: CORTE DE ENERGÍA INDIVIDUAL</b>`;
+          }
+        }
+      }
+    }
+  }
+
+  if (!priorityTitle) {
+    if (eventStatus === 'OK') {
+      priorityTitle = `🟢 <b>SERVICIO RESTABLECIDO</b>`;
+    } else if (category === 'loss') {
+      priorityTitle = `🚨🔴 <b>RIESGO ALTO: PÉRDIDA DE SEÑAL</b>`;
+    } else if (category === 'power_fail') {
+      priorityTitle = `🔌⚡ <b>RIESGO MEDIO: CORTE DE ENERGÍA</b>`;
+    } else {
+      priorityTitle = `${statusEmoji} <b>ALERTA DE INFRAESTRUCTURA</b>`;
+    }
   }
 
   let enrichedText = '';
