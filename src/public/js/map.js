@@ -1526,11 +1526,12 @@ function renderHistoryList() {
  * Focus and smooth-zoom map to a specific NAP marker.
  */
 function focusNapOnMap(napName, lat, lng) {
-  if (lat !== null && lng !== null) {
+  if (markers[napName]) {
+    const markerLatLng = markers[napName].getLatLng();
+    map.flyTo(markerLatLng, 18, { animate: true, duration: 1.2 });
+    markers[napName].openPopup();
+  } else if (lat !== null && lng !== null) {
     map.flyTo([lat, lng], 18, { animate: true, duration: 1.2 });
-    if (markers[napName]) {
-      markers[napName].openPopup();
-    }
   }
 }
 
