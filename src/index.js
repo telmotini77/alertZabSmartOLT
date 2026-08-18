@@ -4,7 +4,7 @@ import http from 'http';
 import dns from 'dns';
 import { Agent, setGlobalDispatcher } from 'undici';
 import webhookRoutes, { handleTelegramMessage } from './routes/webhook.js';
-import { getUpdates, setWebhook, getWebhookInfo, deleteWebhook } from './services/telegram.js';
+import { getUpdates, setWebhook, getWebhookInfo, deleteWebhook, setBotCommands } from './services/telegram.js';
 import { initWebSocketServer } from './services/websocket.js';
 import { initCache } from './services/cache.js';
 import { startScanner } from './services/scanner.js';
@@ -107,6 +107,12 @@ server.listen(PORT, async () => {
   // Start Smart OLT Radar Scanner
   startScanner();
 
+  if (TELEGRAM_MODE !== 'disabled') {
+    configurePublicBotCommands().catch((error) => {
+      console.error('❌ Failed to publish Telegram bot commands:', error.message);
+    });
+  }
+
   if (TELEGRAM_MODE === 'webhook') {
     await setupTelegramWebhook();
   } else if (TELEGRAM_MODE === 'polling') {
@@ -116,6 +122,20 @@ server.listen(PORT, async () => {
     console.log('📤 Telegram mode: SEND-ONLY (polling disabled). Alerts will be sent but bot commands are inactive.');
   }
 });
+
+async function configurePublicBotCommands() {
+  await setBotCommands([
+    { command: 'start', description: 'Abrir el asistente público' },
+    { command: 'alertas', description: 'Ver el historial público de alertas' },
+    { command: 'fallas', description: 'Ver las fallas activas' },
+    { command: 'mapa', description: 'Abrir el mapa público de NAPs' },
+    { command: 'olt', description: 'Ver el resumen general de la red' },
+    { command: 'buscar', description: 'Buscar una NAP, cliente o serial' },
+    { command: 'diagnostico', description: 'Consultar una ONU por serial' },
+    { command: 'ayuda', description: 'Mostrar todos los comandos' }
+  ]);
+  console.log('🌐 Telegram bot commands published for all users.');
+}
 
 // Graceful shutdown
 process.on('SIGTERM', () => { server.close(() => process.exit(0)); });

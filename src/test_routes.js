@@ -708,6 +708,32 @@ try {
     process.exit(1);
   }
 
+  console.log('\n[8b] Testing public alert history command...');
+  fetchLog = [];
+  await originalFetch('http://localhost:3001/webhook/telegram', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      update_id: 10001,
+      message: {
+        message_id: 1001,
+        chat: { id: 777000111, type: 'private' },
+        from: { id: 777000111, is_bot: false, first_name: 'Public User' },
+        text: '/alertas 1'
+      }
+    })
+  });
+  await new Promise(resolve => setTimeout(resolve, 200));
+  const publicHistoryReply = fetchLog.find(log =>
+    log.url.includes('/sendMessage') && log.body?.reply_to_message_id === 1001
+  );
+  if (publicHistoryReply?.body?.text?.includes('HISTORIAL PÚBLICO DE ALERTAS')) {
+    console.log('✅ Public users can view existing alert history: PASS');
+  } else {
+    console.error('❌ Public alert history command did not return the existing alerts');
+    process.exit(1);
+  }
+
   console.log('\n[9] Testing Phase 4 Notification Filtering and Risk Levels...');
   
   // 1. Recovery alert (should be suppressed)

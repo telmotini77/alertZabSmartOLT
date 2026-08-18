@@ -13,6 +13,7 @@ import { PUBLIC_URL } from '../config/publicUrl.js';
 
 const router = express.Router();
 const DEFAULT_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const TELEGRAM_BOT_PUBLIC = (process.env.TELEGRAM_BOT_PUBLIC || 'true').trim().toLowerCase() !== 'false';
 
 // Nearby OpenStreetMap places are cached briefly to avoid repeatedly querying
 // Overpass while a field technician works with the same NAP.
@@ -25,6 +26,13 @@ const OVERPASS_URL = (process.env.OVERPASS_URL || 'https://overpass-api.de/api/i
 // Power Fail and other alerts always go to DEFAULT_CHAT_ID.
 const getLossChatId = () =>
   (process.env.TELEGRAM_LOS_CHAT_ID || '').trim() || DEFAULT_CHAT_ID;
+
+const isTrustedTelegramChat = (chatId) => {
+  const normalizedChatId = String(chatId);
+  return [DEFAULT_CHAT_ID, getLossChatId()].some((allowedId) =>
+    allowedId !== undefined && allowedId !== null && String(allowedId) === normalizedChatId
+  );
+};
 // Keep strict cross-validation by default. Set SMARTOLT_REQUIRE_CORROBORATION=false
 // when Smart OLT is unavailable and Zabbix alerts must still be delivered.
 const REQUIRE_SMARTOLT_CORROBORATION =
@@ -1925,6 +1933,56 @@ export async function runLiveDiagnostics(chatId, messageId, snParam) {
   }
 }
 
+function escapeTelegramHtml(value) {
+  return String(value ?? '').replace(/[&<>]/g, (character) => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;'
+  })[character]);
+}
+
+async function sendPublicAlertHistory(chatId, messageId, requestedPage = 1, onlyPending = false) {
+  const pageSize = 8;
+  const history = getStatusHistory(5_000, onlyPending ? 'pending' : 'all');
+  const totalPages = Math.max(1, Math.ceil(history.length / pageSize));
+  const page = Math.min(Math.max(Number.parseInt(requestedPage, 10) || 1, 1), totalPages);
+  const pageItems = history.slice((page - 1) * pageSize, page * pageSize);
+
+  if (pageItems.length === 0) {
+    const emptyLabel = onlyPending ? 'No hay fallas activas en este momento.' : 'Todavía no existen alertas registradas.';
+    await replyToMessage(chatId, messageId, `✅ <b>${emptyLabel}</b>`);
+    return;
+  }
+
+  const rows = pageItems.map((item, index) => {
+    const position = (page - 1) * pageSize + index + 1;
+    const state = item.resolved ? '✅ Solucionada' : '🔔 Activa';
+    const icon = item.failureType === 'power_fail'
+      ? '🔌'
+      : item.failureType === 'loss'
+        ? '🔴'
+        : item.failureType === 'recovery'
+          ? '🟢'
+          : '⚠️';
+    return `${position}. ${icon} <b>${escapeTelegramHtml(item.failureLabel || 'Alerta de red')}</b>\n` +
+      `   📦 ${escapeTelegramHtml(item.napName || 'NAP desconocida')} | 👤 ${escapeTelegramHtml(item.onuName || 'Cliente')}\n` +
+      `   🔢 <code>${escapeTelegramHtml(item.sn || 'N/A')}</code> | 🕒 ${escapeTelegramHtml(item.eventTime || item.formattedTime || item.timestamp)}\n` +
+      `   ${state}`;
+  });
+
+  const title = onlyPending ? '⚠️ <b>FALLAS ACTIVAS DE LA RED</b>' : '📋 <b>HISTORIAL PÚBLICO DE ALERTAS</b>';
+  const navigation = totalPages > 1
+    ? `\n\n📄 Página <b>${page}/${totalPages}</b>. Usa <code>/${onlyPending ? 'fallas' : 'alertas'} ${page < totalPages ? page + 1 : 1}</code> para continuar.`
+    : '';
+  const mapLink = PUBLIC_URL ? `\n🌐 <a href="${PUBLIC_URL}">Abrir monitor público</a>` : '';
+
+  await replyToMessage(
+    chatId,
+    messageId,
+    `${title}\n\n${rows.join('\n\n')}${navigation}${mapLink}`
+  );
+}
+
 /**
  * Common logic to handle an incoming Telegram message (used by Webhook and Polling)
  */
@@ -1940,7 +1998,13 @@ export async function handleTelegramMessage(message) {
   
   if (!text) return;
 
+  if (!TELEGRAM_BOT_PUBLIC && !isTrustedTelegramChat(chatId)) {
+    await replyToMessage(chatId, messageId, '🔒 Este bot está configurado para uso privado.');
+    return;
+  }
+
   const upperText = text.toUpperCase();
+  const command = upperText.trim().split(/\s+/)[0].split('@')[0];
 
   if (upperText.startsWith('/START')) {
     const parts = text.split(/\s+/);
@@ -1958,11 +2022,12 @@ export async function handleTelegramMessage(message) {
 Comandos disponibles:
 • 🔍 <code>/buscar &lt;nombre / NAP / SN&gt;</code> - Busca clientes o cajas NAP por nombre o serie.
 • 📦 <code>/nap &lt;nombre NAP&gt;</code> - Consulta estado detallado de una caja NAP (ej: <code>/nap SM-7030-1</code>).
-• ⚠️ <code>/fallas</code> o <code>/sync</code> - Muestra las alertas y cortes activos en la red.
+• 📋 <code>/alertas [página]</code> - Muestra todas las alertas existentes.
+• ⚠️ <code>/fallas [página]</code> - Muestra solamente las fallas activas.
 • 🗺️ <code>/mapa</code> - Enlace directo al mapa de cajas NAP en tiempo real.
 • 🆔 <code>/id</code> - Muestra el ID de este chat de Telegram.
 
-<i>💡 También puedes escribir directamente el número de serie de una ONU (ej: <code>HWTC12345678</code>) o el nombre de una caja NAP para consultar su información al instante.</i>`;
+<i>💡 El bot está disponible públicamente. Las operaciones administrativas permanecen protegidas.</i>`;
       await replyToMessage(chatId, messageId, helpMsg);
     } catch (err) {
       console.error('Error handling /ayuda command:', err.message);
@@ -1980,6 +2045,18 @@ Comandos disponibles:
     } catch (err) {
       console.error('Error handling /mapa command:', err.message);
     }
+    return;
+  }
+
+  if (command === '/ALERTAS' || command === '/HISTORIAL') {
+    const requestedPage = text.match(/\s+(\d+)/)?.[1] || 1;
+    await sendPublicAlertHistory(chatId, messageId, requestedPage, false);
+    return;
+  }
+
+  if (command === '/FALLAS' || command === '/STATUS_FALLAS') {
+    const requestedPage = text.match(/\s+(\d+)/)?.[1] || 1;
+    await sendPublicAlertHistory(chatId, messageId, requestedPage, true);
     return;
   }
 
@@ -2056,13 +2133,24 @@ Comandos disponibles:
     return;
   }
 
-  if (upperText.startsWith('/SYNC') || upperText.startsWith('/FALLAS') || upperText.startsWith('/STATUS_FALLAS')) {
+  if (command === '/SYNC') {
+    if (!isTrustedTelegramChat(chatId)) {
+      await replyToMessage(chatId, messageId, '🔒 La sincronización con Zabbix y Smart OLT está reservada para el chat administrador.');
+      return;
+    }
     try {
       await replyToMessage(chatId, messageId, '🔄 Iniciando sincronización de fallas activas con Zabbix y Smart OLT. Por favor espere...');
       await syncActiveProblems(chatId);
     } catch (err) {
       console.error('Error handling sync bot command:', err.message);
     }
+    return;
+  }
+
+  // Public users are read-only. This prevents a crafted plain-text message
+  // from being interpreted as a real Zabbix incident and changing the cache.
+  if (!isTrustedTelegramChat(chatId)) {
+    await replyToMessage(chatId, messageId, 'ℹ️ Usa <code>/alertas</code>, <code>/fallas</code>, <code>/buscar</code> o <code>/ayuda</code>.');
     return;
   }
   

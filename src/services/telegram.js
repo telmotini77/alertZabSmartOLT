@@ -125,6 +125,30 @@ export async function replyToMessage(chatId, replyToMessageId, text, options = {
 }
 
 /**
+ * Publish the command menu in the default scope so it is visible to every
+ * Telegram user in private chats, groups and supergroups.
+ * @param {Array<{command: string, description: string}>} commands
+ * @returns {Promise<boolean>}
+ */
+export async function setBotCommands(commands) {
+  const url = `${getBaseUrl()}/setMyCommands`;
+  const response = await fetchWithRetry(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      commands,
+      scope: { type: 'default' },
+      language_code: ''
+    })
+  });
+  const data = await response.json();
+  if (!response.ok || !data.ok) {
+    throw new Error(`Telegram API Error: ${data.description || 'Could not publish bot commands'}`);
+  }
+  return true;
+}
+
+/**
  * Register a webhook for Telegram Bot updates.
  * @param {string} webhookUrl - Public HTTPS URL of our webhook endpoint
  * @returns {Promise<Object>}
