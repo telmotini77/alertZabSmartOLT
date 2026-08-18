@@ -32,6 +32,13 @@ let historyData = [];
 let activeHistoryFilter = 'all';
 let historySearchQuery = '';
 
+// Secondary map state: nearby places around a selected NAP.
+let nearbyMap = null;
+let nearbyNapMarker = null;
+let nearbyPlacesLayer = null;
+let selectedNearbyNapName = '';
+let nearbyRequestId = 0;
+
 // Color mapping based on status
 const statusColors = {
   online: '#10B981',   // Green
@@ -127,6 +134,16 @@ function initMap() {
         showOnuDiagnostics(sn);
       });
     });
+
+    const nearbyBtn = container.querySelector('.btn-nearby-nap');
+    if (nearbyBtn) {
+      nearbyBtn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const napName = e.popup?._source?.napName;
+        const nap = napsData.find(item => item.name === napName);
+        if (nap) openNearbyMap(nap);
+      });
+    }
   });
 }
 
@@ -191,6 +208,7 @@ async function loadNapsData() {
     
     napsData = await response.json();
     renderNapsAndMarkers();
+    populateNearbyNapSelect();
     updateGlobalStats();
     autoCenterMap();
     checkUrlQueryParams();
@@ -429,6 +447,9 @@ function getPopupContent(nap) {
       </div>
       ${historySection}
       <div class="map-popup-actions">
+        <button type="button" class="btn-popup-nav btn-nearby-nap">
+          <i class="fa-solid fa-map-location-dot"></i> Sitios cercanos
+        </button>
         <a href="${googleMapsUrl}" target="_blank" class="btn-popup-nav">
           <i class="fa-solid fa-compass"></i> Cómo llegar
         </a>
@@ -576,6 +597,7 @@ function handleNapUpdate(updatedNap) {
     const newMarker = L.marker([updatedNap.latitude, updatedNap.longitude], {
       icon: markerIcon
     });
+    newMarker.napName = updatedNap.name;
     newMarker.bindPopup(() => getPopupContent(updatedNap));
     newMarker.addTo(map);
     markers[updatedNap.name] = newMarker;
@@ -584,6 +606,7 @@ function handleNapUpdate(updatedNap) {
   // 4. Re-draw current sidebar lists with active search query preserved
   const searchQuery = document.getElementById('nap-search').value;
   renderNapsAndMarkers(searchQuery);
+  populateNearbyNapSelect();
 }
 
 /**
@@ -1661,7 +1684,10 @@ function setupMapControls() {
     clearRulerBtn.addEventListener('click', clearRuler);
   }
 
-  // 5. Diagnostics Modal Close Handlers
+  // 5. Secondary nearby-places map.
+  setupNearbyMapControls();
+
+  // 6. Diagnostics Modal Close Handlers
   const diagnosticModal = document.getElementById('diagnostic-modal');
   const closeDiagBtn = document.getElementById('btn-close-diagnostic');
   if (diagnosticModal && closeDiagBtn) {
@@ -1676,6 +1702,225 @@ function setupMapControls() {
       }
     });
   }
+}
+
+// ==========================================
+// Nearby Places Secondary Map
+// ==========================================
+
+function setupNearbyMapControls() {
+  const drawer = document.getElementById('nearby-drawer');
+  const toggleBtn = document.getElementById('btn-nearby-toggle');
+  const closeBtn = document.getElementById('btn-close-nearby');
+  const napSelect = document.getElementById('nearby-nap-select');
+  const radiusSelect = document.getElementById('nearby-radius-select');
+  const refreshBtn = document.getElementById('btn-refresh-nearby');
+
+  if (!drawer || !toggleBtn || !closeBtn || !napSelect || !radiusSelect || !refreshBtn) return;
+
+  toggleBtn.addEventListener('click', () => {
+    if (!drawer.classList.contains('hidden')) {
+      closeNearbyMap();
+      return;
+    }
+    const currentNap = napsData.find(nap => nap.name === selectedNearbyNapName) || getFirstMappedNap();
+    if (currentNap) openNearbyMap(currentNap);
+  });
+
+  closeBtn.addEventListener('click', closeNearbyMap);
+  napSelect.addEventListener('change', () => {
+    selectedNearbyNapName = napSelect.value;
+    const nap = napsData.find(item => item.name === selectedNearbyNapName);
+    if (nap) loadNearbyPlaces(nap);
+  });
+  radiusSelect.addEventListener('change', () => {
+    const nap = napsData.find(item => item.name === selectedNearbyNapName);
+    if (nap) loadNearbyPlaces(nap);
+  });
+  refreshBtn.addEventListener('click', () => {
+    const nap = napsData.find(item => item.name === selectedNearbyNapName);
+    if (nap) loadNearbyPlaces(nap, true);
+  });
+}
+
+function getFirstMappedNap() {
+  return napsData.find(hasMappedCoordinates);
+}
+
+function hasMappedCoordinates(nap) {
+  return nap?.latitude !== null && nap?.longitude !== null &&
+    Number.isFinite(Number(nap.latitude)) && Number.isFinite(Number(nap.longitude));
+}
+
+function populateNearbyNapSelect() {
+  const select = document.getElementById('nearby-nap-select');
+  if (!select) return;
+
+  const mappedNaps = napsData.filter(hasMappedCoordinates);
+  const previousSelection = selectedNearbyNapName || select.value;
+  select.replaceChildren();
+
+  if (mappedNaps.length === 0) {
+    const option = new Option('No hay cajas NAP con GPS', '');
+    select.add(option);
+    select.disabled = true;
+    return;
+  }
+
+  mappedNaps.forEach(nap => select.add(new Option(nap.name, nap.name)));
+  select.disabled = false;
+  selectedNearbyNapName = mappedNaps.some(nap => nap.name === previousSelection)
+    ? previousSelection
+    : mappedNaps[0].name;
+  select.value = selectedNearbyNapName;
+}
+
+function openNearbyMap(nap) {
+  if (!hasMappedCoordinates(nap)) {
+    alert(`La caja ${nap.name} no tiene coordenadas GPS todavía.`);
+    return;
+  }
+
+  const drawer = document.getElementById('nearby-drawer');
+  const historyDrawer = document.getElementById('history-drawer');
+  drawer.classList.remove('hidden');
+  historyDrawer?.classList.add('hidden');
+  document.getElementById('btn-nearby-toggle')?.classList.add('active-control');
+  selectedNearbyNapName = nap.name;
+  populateNearbyNapSelect();
+
+  if (!nearbyMap) {
+    nearbyMap = L.map('nearby-map', { zoomControl: true }).setView([nap.latitude, nap.longitude], 16);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors',
+      maxZoom: 19
+    }).addTo(nearbyMap);
+    nearbyPlacesLayer = L.layerGroup().addTo(nearbyMap);
+  }
+
+  window.setTimeout(() => nearbyMap.invalidateSize(), 50);
+  loadNearbyPlaces(nap);
+}
+
+function closeNearbyMap() {
+  document.getElementById('nearby-drawer')?.classList.add('hidden');
+  document.getElementById('btn-nearby-toggle')?.classList.remove('active-control');
+}
+
+async function loadNearbyPlaces(nap, forceRefresh = false) {
+  if (!nearbyMap || !nearbyPlacesLayer) return;
+
+  const status = document.getElementById('nearby-status');
+  const list = document.getElementById('nearby-places-list');
+  const radius = Number(document.getElementById('nearby-radius-select').value);
+  const refreshBtn = document.getElementById('btn-refresh-nearby');
+  const latitude = Number(nap.latitude);
+  const longitude = Number(nap.longitude);
+  const requestId = ++nearbyRequestId;
+
+  status.className = 'nearby-status loading';
+  status.textContent = 'Consultando referencias cercanas…';
+  list.replaceChildren();
+  refreshBtn.disabled = true;
+  nearbyPlacesLayer.clearLayers();
+
+  if (nearbyNapMarker) nearbyMap.removeLayer(nearbyNapMarker);
+  nearbyNapMarker = L.marker([latitude, longitude], {
+    icon: L.divIcon({
+      className: 'nearby-nap-marker',
+      html: '<div class="nearby-nap-marker-dot"><i class="fa-solid fa-box-archive"></i></div>',
+      iconSize: [32, 32],
+      iconAnchor: [16, 16]
+    })
+  }).addTo(nearbyMap).bindPopup(`<b>${escapeHtml(nap.name)}</b><br>Caja NAP seleccionada`);
+  nearbyMap.setView([latitude, longitude], 15);
+
+  try {
+    const params = new URLSearchParams({ lat: latitude, lng: longitude, radius });
+    if (forceRefresh) params.set('refresh', Date.now());
+    const response = await fetch(`/webhook/nearby-places?${params}`);
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || 'No se pudieron cargar los sitios cercanos.');
+    if (requestId !== nearbyRequestId) return;
+
+    nearbyPlacesLayer.addLayer(L.circle([latitude, longitude], {
+      radius,
+      color: '#38BDF8',
+      fillColor: '#38BDF8',
+      fillOpacity: 0.06,
+      weight: 1
+    }));
+
+    payload.places.forEach(place => {
+      const marker = L.marker([place.latitude, place.longitude], {
+        icon: L.divIcon({
+          className: 'nearby-place-marker',
+          html: `<div>${getNearbyPlaceIcon(place.category)}</div>`,
+          iconSize: [24, 24],
+          iconAnchor: [12, 12]
+        })
+      }).bindPopup(`<b>${escapeHtml(place.name)}</b><br>${escapeHtml(formatNearbyCategory(place.category))}<br>${formatNearbyDistance(place.distance)}`);
+      marker.addTo(nearbyPlacesLayer);
+      addNearbyPlaceListItem(list, place, marker);
+    });
+
+    status.className = 'nearby-status';
+    status.textContent = payload.places.length
+      ? `${payload.places.length} sitio${payload.places.length === 1 ? '' : 's'} encontrado${payload.places.length === 1 ? '' : 's'} en ${radius >= 1000 ? `${radius / 1000} km` : `${radius} m`}.`
+      : 'No se encontraron referencias registradas en OpenStreetMap dentro de este radio.';
+  } catch (error) {
+    if (requestId !== nearbyRequestId) return;
+    console.error('Error loading nearby places:', error);
+    status.className = 'nearby-status error';
+    status.textContent = error.message;
+  } finally {
+    if (requestId === nearbyRequestId) refreshBtn.disabled = false;
+  }
+}
+
+function addNearbyPlaceListItem(list, place, marker) {
+  const item = document.createElement('li');
+  item.className = 'nearby-place-item';
+  item.innerHTML = `
+    <span class="nearby-place-icon">${getNearbyPlaceIcon(place.category)}</span>
+    <span class="nearby-place-info"><span class="nearby-place-name"></span><span class="nearby-place-category"></span></span>
+    <span class="nearby-place-distance">${formatNearbyDistance(place.distance)}</span>`;
+  item.querySelector('.nearby-place-name').textContent = place.name;
+  item.querySelector('.nearby-place-category').textContent = formatNearbyCategory(place.category);
+  item.addEventListener('click', () => {
+    nearbyMap.flyTo([place.latitude, place.longitude], 18, { animate: true, duration: 0.8 });
+    marker.openPopup();
+  });
+  list.appendChild(item);
+}
+
+function getNearbyPlaceIcon(category) {
+  const icons = {
+    hospital: 'fa-solid fa-hospital', clinic: 'fa-solid fa-house-medical', pharmacy: 'fa-solid fa-prescription-bottle-medical',
+    fuel: 'fa-solid fa-gas-pump', police: 'fa-solid fa-shield-halved', fire_station: 'fa-solid fa-fire-extinguisher',
+    bank: 'fa-solid fa-building-columns', atm: 'fa-solid fa-money-bill', restaurant: 'fa-solid fa-utensils',
+    cafe: 'fa-solid fa-mug-hot', fast_food: 'fa-solid fa-burger', bus_station: 'fa-solid fa-bus',
+    bus_stop: 'fa-solid fa-bus-simple', platform: 'fa-solid fa-bus', stop_position: 'fa-solid fa-bus'
+  };
+  return `<i class="${icons[category] || 'fa-solid fa-store'}"></i>`;
+}
+
+function formatNearbyCategory(category) {
+  const labels = {
+    hospital: 'Hospital', clinic: 'Clínica', pharmacy: 'Farmacia', fuel: 'Gasolinera', police: 'Policía',
+    fire_station: 'Bomberos', bank: 'Banco', atm: 'Cajero', restaurant: 'Restaurante', cafe: 'Cafetería',
+    fast_food: 'Comida rápida', bus_station: 'Terminal de buses', bus_stop: 'Parada de bus',
+    platform: 'Transporte público', stop_position: 'Parada de transporte'
+  };
+  return labels[category] || String(category || 'Sitio').replace(/_/g, ' ');
+}
+
+function formatNearbyDistance(distance) {
+  return distance >= 1000 ? `${(distance / 1000).toFixed(1)} km` : `${distance} m`;
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
 }
 
 /**
@@ -2202,4 +2447,3 @@ async function renderOpticalHistoryChart(sn) {
     console.error('Error rendering optical chart:', err);
   }
 }
-

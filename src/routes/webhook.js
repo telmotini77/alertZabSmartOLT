@@ -14,6 +14,12 @@ import { PUBLIC_URL } from '../config/publicUrl.js';
 const router = express.Router();
 const DEFAULT_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
+// Nearby OpenStreetMap places are cached briefly to avoid repeatedly querying
+// Overpass while a field technician works with the same NAP.
+const nearbyPlacesCache = new Map();
+const NEARBY_CACHE_TTL_MS = 5 * 60 * 1000;
+const OVERPASS_URL = (process.env.OVERPASS_URL || 'https://overpass-api.de/api/interpreter').trim();
+
 // Optional dedicated group for Loss of Signal alerts (fibra cortada).
 // If not set, LOS alerts fall back to DEFAULT_CHAT_ID.
 // Power Fail and other alerts always go to DEFAULT_CHAT_ID.
@@ -161,6 +167,92 @@ async function corroborateTotalNapLossWithSmartOlt(nap) {
 router.get('/naps', (req, res) => {
   res.json(getCachedNaps());
 });
+
+// GET /webhook/nearby-places?lat=-2.1&lng=-79.9&radius=1500
+// Returns useful OpenStreetMap points around a NAP for on-site work.
+router.get('/nearby-places', async (req, res) => {
+  const latitude = Number(req.query.lat);
+  const longitude = Number(req.query.lng);
+  const requestedRadius = Number(req.query.radius);
+  const radius = Number.isFinite(requestedRadius)
+    ? Math.min(Math.max(Math.round(requestedRadius), 250), 5_000)
+    : 1_500;
+  const bypassCache = Boolean(req.query.refresh);
+
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude) ||
+      latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) {
+    return res.status(400).json({ error: 'Valid lat and lng query parameters are required.' });
+  }
+
+  const cacheKey = `${latitude.toFixed(5)},${longitude.toFixed(5)},${radius}`;
+  const cached = nearbyPlacesCache.get(cacheKey);
+  if (!bypassCache && cached && Date.now() - cached.createdAt < NEARBY_CACHE_TTL_MS) {
+    return res.json({ ...cached.payload, cached: true });
+  }
+
+  // Prioritize landmarks useful for locating or servicing equipment, without
+  // returning every individual building nearby.
+  const query = `[out:json][timeout:20];
+(
+  nwr["amenity"~"^(hospital|clinic|pharmacy|fuel|police|fire_station|bank|atm|restaurant|cafe|fast_food|bus_station)$"](around:${radius},${latitude},${longitude});
+  nwr["shop"](around:${radius},${latitude},${longitude});
+  nwr["public_transport"](around:${radius},${latitude},${longitude});
+  nwr["highway"="bus_stop"](around:${radius},${latitude},${longitude});
+);
+out center tags;`;
+
+  try {
+    const response = await fetch(OVERPASS_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+      body: new URLSearchParams({ data: query }).toString(),
+      signal: AbortSignal.timeout(25_000)
+    });
+
+    if (!response.ok) throw new Error(`Overpass returned HTTP ${response.status}`);
+
+    const result = await response.json();
+    const places = (result.elements || [])
+      .map((place) => {
+        const placeLat = place.lat ?? place.center?.lat;
+        const placeLng = place.lon ?? place.center?.lon;
+        if (!Number.isFinite(placeLat) || !Number.isFinite(placeLng)) return null;
+        const tags = place.tags || {};
+        return {
+          id: `${place.type}/${place.id}`,
+          name: tags.name || tags.brand || tags.operator || 'Lugar sin nombre',
+          category: tags.amenity || tags.shop || tags.public_transport || (tags.highway === 'bus_stop' ? 'bus_stop' : 'place'),
+          latitude: placeLat,
+          longitude: placeLng,
+          distance: Math.round(calculateDistanceMeters(latitude, longitude, placeLat, placeLng)),
+          osmUrl: `https://www.openstreetmap.org/${place.type}/${place.id}`
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.distance - b.distance)
+      .slice(0, 50);
+
+    const payload = { places, radius, cached: false };
+    nearbyPlacesCache.set(cacheKey, { createdAt: Date.now(), payload });
+    return res.json(payload);
+  } catch (error) {
+    console.error('Error fetching nearby OpenStreetMap places:', error.message);
+    return res.status(502).json({
+      error: 'No se pudieron consultar los sitios cercanos en este momento.',
+      details: error.message
+    });
+  }
+});
+
+function calculateDistanceMeters(lat1, lng1, lat2, lng2) {
+  const toRadians = (value) => value * Math.PI / 180;
+  const earthRadius = 6_371_000;
+  const deltaLat = toRadians(lat2 - lat1);
+  const deltaLng = toRadians(lng2 - lng1);
+  const a = Math.sin(deltaLat / 2) ** 2 +
+    Math.cos(toRadians(lat1)) * Math.cos(toRadians(lat2)) * Math.sin(deltaLng / 2) ** 2;
+  return earthRadius * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
 
 // GET /webhook/test-telegram - Send a test message to verify Telegram connectivity
 router.get('/test-telegram', async (req, res) => {
