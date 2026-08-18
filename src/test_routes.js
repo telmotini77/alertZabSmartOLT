@@ -572,12 +572,13 @@ try {
   });
 
   const hasSmartOltCallTg = fetchLog.some(log => log.url.includes('/onu/get_all_onus_details'));
-  const hasTelegramReply = fetchLog.some(log => log.url.includes('/sendMessage') && log.body?.reply_to_message_id === 777);
+  const smartOltReply = fetchLog.find(log => log.url.includes('/sendMessage') && log.body?.reply_to_message_id === 777);
+  const hasTelegramReply = Boolean(smartOltReply);
 
-  if (hasSmartOltCallTg && !hasTelegramReply) {
-    console.log('✅ Bot listener suppresses conflicting Zabbix/Smart OLT causes: PASS');
+  if (hasSmartOltCallTg && hasTelegramReply && smartOltReply.body.text.includes('CORTE DE ENERGÍA')) {
+    console.log('✅ Bot listener prioritizes the Smart OLT cause over the Zabbix label: PASS');
   } else {
-    console.error('❌ Bot listener did not enforce cause corroboration: FAIL');
+    console.error('❌ Bot listener did not use the Smart OLT cause: FAIL');
     process.exit(1);
   }
 
@@ -610,13 +611,13 @@ try {
   // Wait for background Smart OLT + Telegram processing
   await new Promise(resolve => setTimeout(resolve, 500));
 
-  // One isolated LOS event must not become a NAP outage without fresh Zabbix
-  // evidence from every ONU in the NAP.
+  // A single event is notified with Smart OLT's cause, but must not be
+  // escalated to a total NAP outage without fresh evidence from every ONU.
   const hexTgMsg = fetchLog.find(log => log.url.includes('/sendMessage'))?.body?.text || '';
-  if (!hexTgMsg) {
-    console.log('✅ Isolated hex LOS waits for full NAP corroboration: PASS');
+  if (hexTgMsg.includes('CORTE DE ENERGÍA') && !hexTgMsg.includes('CAÍDA TOTAL EN CAJA NAP')) {
+    console.log('✅ Isolated hex event uses the Smart OLT cause without false NAP escalation: PASS');
   } else {
-    console.error('❌ Isolated hex LOS was incorrectly notified as a NAP outage: FAIL');
+    console.error('❌ Isolated hex event did not preserve the Smart OLT cause: FAIL');
     process.exit(1);
   }
 

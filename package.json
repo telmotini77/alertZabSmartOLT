@@ -8,7 +8,7 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "update-coords": "node src/utils/update_olt_coordinates.js",
-    "test": "node src/test_parser.js && node src/test_map_api.js && node src/test_nap_loss_scanner.js && node src/test_zabbix_nap_loss.js && node src/test_routes.js"
+    "test": "node src/test_parser.js && node src/test_smartolt_alert_types.js && node src/test_map_api.js && node src/test_nap_loss_scanner.js && node src/test_zabbix_nap_loss.js && node src/test_routes.js"
   },
   "dependencies": {
     "dotenv": "^16.4.5",

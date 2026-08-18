@@ -128,13 +128,15 @@ try {
   assert.ok(powerMessage.includes('CORTE DE ENERGÍA'), 'Power Fail must use the energy alert title');
   assert.ok(!powerMessage.includes('CAÍDA TOTAL EN CAJA NAP'), 'Power Fail must not be relabelled as a NAP outage');
 
-  const mismatchResult = await processAndSendAlert({
+  const oltPriorityResult = await processAndSendAlert({
     event_name: 'ONU FHTTZAB00001: Loss of Signal',
     host_name: 'OLT-TEST',
     event_status: 'PROBLEM',
     event_severity: 'High'
   }, { ...onus[0], status: 'Offline' }, 'Corte de Energía (Dying Gasp)');
-  assert.strictEqual(mismatchResult.sent, false, 'Conflicting Zabbix and Smart OLT causes must be suppressed');
+  assert.strictEqual(oltPriorityResult.sent, true, 'A Smart OLT-confirmed cause must be notified even when Zabbix labels it differently');
+  const oltPriorityMessage = telegramMessages.at(-1).text;
+  assert.ok(oltPriorityMessage.includes('CORTE DE ENERGÍA'), 'The notification must use Smart OLT power classification over the Zabbix LOS label');
 
   console.log('Zabbix NAP/Power Fail corroboration rules: PASS');
 } catch (error) {

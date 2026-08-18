@@ -96,6 +96,49 @@ const getFailureCategoryFromOltReason = (reason) => {
   return 'unknown';
 };
 
+/**
+ * Smart OLT is the authoritative source for the incident type. Keep the raw
+ * reason for the technician, but map common OLT reasons to a concise title.
+ * Unknown values are still notified verbatim instead of being relabelled from
+ * the Zabbix trigger.
+ */
+export function classifySmartOltAlert(reason, liveStatus = {}) {
+  const rawReason = String(reason || '').trim();
+  const text = rawReason
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+  const status = String(
+    liveStatus?.onu_status || liveStatus?.status_desc || liveStatus?.status || ''
+  ).trim().toLowerCase();
+
+  if (/(low.*(power|signal|optic)|weak.*signal|rx.*low|optical.*power)/.test(text)) {
+    return { category: 'low_optical_power', label: 'Potencia óptica baja', emoji: '📶', rawReason };
+  }
+  if (/(dying|gasp|power|energia|electric)/.test(text)) {
+    return { category: 'power_fail', label: 'Corte de energía', emoji: '🔌', rawReason };
+  }
+  if (/(loss of signal|\blos\b|signal|fibra|optic.*loss|link.*down)/.test(text)) {
+    return { category: 'loss', label: 'Pérdida de señal (LOS)', emoji: '🔴', rawReason };
+  }
+  if (/(reboot|reset|restart)/.test(text)) {
+    return { category: 'reboot', label: 'Reinicio de ONU', emoji: '🔄', rawReason };
+  }
+  if (/(disable|deactiv|deregister|delete)/.test(text)) {
+    return { category: 'disabled', label: 'ONU deshabilitada', emoji: '⛔', rawReason };
+  }
+  if (/(auth|password|unauthor|registration fail|rogue)/.test(text)) {
+    return { category: 'authentication', label: 'Fallo de autenticación de ONU', emoji: '🔐', rawReason };
+  }
+  if (rawReason) {
+    return { category: 'olt_event', label: rawReason, emoji: '⚠️', rawReason };
+  }
+  if (/(offline|down|inactive)/.test(status)) {
+    return { category: 'olt_offline', label: 'ONU Offline reportada por Smart OLT', emoji: '🔴', rawReason: '' };
+  }
+  return { category: 'unknown', label: 'Tipo no reportado por Smart OLT', emoji: '⚠️', rawReason: '' };
+}
+
 const getNapNameFromOnu = (onu) => String(
   onu?.odb_name || onu?.odb || extractNapBox(onu?.address) || extractNapBox(onu?.description) || ''
 ).trim();
@@ -1237,6 +1280,9 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
   let onu = prefetchedOnu;
   let oltStatusReason = prefetchedOltStatusReason;
   let smartOltEnriched = false;
+  let smartOltAlert = prefetchedOltStatusReason
+    ? classifySmartOltAlert(prefetchedOltStatusReason, onu)
+    : null;
 
   if (sn) {
     try {
@@ -1254,16 +1300,11 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
             // Override stale API cache status with real-time hardware status
             onu.status = liveStatus.onu_status || liveStatus.status_desc || (liveStatus.status === true ? 'online' : 'offline');
             
-            const reason = (liveStatus.last_down_reason || liveStatus.offline_reason || '').toLowerCase();
-            console.log(`Smart OLT live reason for ${sn}: "${reason}"`);
-            
-            if (reason.includes('dying') || reason.includes('power') || reason.includes('gasp')) {
-              oltStatusReason = 'Corte de Energía (Dying Gasp)';
-            } else if (reason.includes('los') || reason.includes('signal') || reason.includes('fibra') || reason.includes('link') || reason.includes('down')) {
-              oltStatusReason = 'Pérdida de Señal (LOS)';
-            } else if (reason) {
-              oltStatusReason = liveStatus.last_down_reason || liveStatus.offline_reason;
-            }
+            const rawReason = liveStatus.last_down_reason || liveStatus.offline_reason ||
+              liveStatus.status_reason || liveStatus.reason || '';
+            smartOltAlert = classifySmartOltAlert(rawReason, liveStatus);
+            oltStatusReason = smartOltAlert.rawReason;
+            console.log(`Smart OLT live type for ${sn}: "${smartOltAlert.label}"${rawReason ? ` (raw: ${rawReason})` : ''}`);
           }
         }
         smartOltEnriched = true;
@@ -1322,37 +1363,39 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
 
   // Parse alert category & status info
   const statusInfo = parseStatusInfo(eventName + ' ' + triggerDesc);
-  
-  // The alert type comes from Zabbix. Smart OLT corroborates it; it must not
-  // silently turn a Zabbix LOS event into a Power Fail (or the reverse).
-  const category = statusInfo.category;
-  const oltReasonCategory = getFailureCategoryFromOltReason(oltStatusReason);
+
+  // The live OLT reason is authoritative whenever it is available. Zabbix
+  // contributes the event timing and serial number, but never overwrites the
+  // diagnosed cause reported by Smart OLT.
+  if (!smartOltAlert && oltStatusReason) {
+    smartOltAlert = classifySmartOltAlert(oltStatusReason, onu);
+  }
+  let category = smartOltAlert && smartOltAlert.category !== 'unknown'
+    ? smartOltAlert.category
+    : statusInfo.category;
+  const alertLabel = eventStatus === 'OK'
+    ? 'Servicio restablecido'
+    : smartOltAlert?.label || statusInfo.status || 'Alerta de red';
+  const alertEmoji = eventStatus === 'OK'
+    ? '🟢'
+    : smartOltAlert?.emoji || (category === 'power_fail' ? '🔌' : '⚠️');
 
   if (sn && eventStatus === 'PROBLEM') {
-    updateHistoryEventDetails(sn, category, oltStatusReason || statusInfo.status);
+    updateHistoryEventDetails(sn, category, smartOltAlert?.label || oltStatusReason || statusInfo.status);
   }
 
   // Corroboration verification
-  if (category === 'power_fail' || category === 'loss') {
+  if (eventStatus === 'PROBLEM') {
     // Route Loss of Signal alerts to the dedicated LOS chat group
     if (category === 'loss') {
       targetChatId = getLossChatId();
     }
-    if (!smartOltEnriched || !onu) {
+    if ((!smartOltEnriched || !onu) && (category === 'power_fail' || category === 'loss')) {
       if (REQUIRE_SMARTOLT_CORROBORATION) {
         console.log(`[Corroboration Blocked] Event category "${category}" for SN "${sn}" was not enriched with Smart OLT. Skipping Telegram notification.`);
         return { sn, enriched: false, sent: false, reason: 'Not enriched' };
       }
       console.warn(`[Smart OLT fallback] Sending ${category} alert for SN "${sn}" using Zabbix data only.`);
-    }
-
-    if (oltReasonCategory !== 'unknown' && oltReasonCategory !== category) {
-      const reason = `Cause mismatch (Zabbix ${category}, Smart OLT ${oltReasonCategory})`;
-      if (REQUIRE_SMARTOLT_CORROBORATION) {
-        console.log(`[Corroboration Blocked] ${reason} for SN "${sn}". Skipping Telegram notification.`);
-        return { sn, enriched: true, sent: false, reason };
-      }
-      console.warn(`[Corroboration Mismatch Ignored] ${reason}.`);
     }
     
     // Compare states only when Smart OLT returned an ONU to compare against.
@@ -1378,7 +1421,7 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
     }
   }
 
-  // ── Apply Custom Notification Rules based on Risk Levels & Status ──
+  // ── Apply notification rules ──────────────────────────────────────────────
   if (eventStatus === 'OK') {
     // Suppress Telegram notifications for recovery (stable green NAP)
     console.log(`[Notification Filter] Suppressing Telegram recovery alert for SN "${sn}" as green connections are not notified.`);
@@ -1400,12 +1443,9 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
         if (isTotalOffline) {
           console.log(`[Notification Filter] NAP "${cachedNap.name}" is fully offline. Allowing Telegram alert (Riesgo Alto).`);
         } else if (isPartialOffline) {
-          if (category === 'power_fail') {
-            console.log(`[Notification Filter] Partial drop on NAP "${cachedNap.name}" due to power fail. Allowing Telegram alert (Riesgo Bajo/Medio).`);
-          } else {
-            console.log(`[Notification Filter] Suppressing Telegram alert for partial drop on NAP "${cachedNap.name}" (not a power failure).`);
-            options.suppressSend = true;
-          }
+          // A Smart OLT-confirmed partial outage still needs a notification:
+          // the live OLT type is valuable even when the NAP is not fully down.
+          console.log(`[Notification] Partial outage on NAP "${cachedNap.name}". Sending Smart OLT type "${alertLabel}".`);
         }
       }
     }
@@ -1413,8 +1453,8 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
 
   const eventTime = extractEventTime(payload);
 
-  const statusEmoji = eventStatus === 'OK' ? '🟢' : (category === 'power_fail' ? '🔌' : '🔴');
-  const statusLabel = eventStatus === 'OK' ? 'OK (Restablecido)' : (category === 'power_fail' ? 'Corte de Energía' : 'Pérdida de Señal');
+  const statusEmoji = alertEmoji;
+  const statusLabel = alertLabel;
 
   // Set visual priority title based on category & status & custom risk levels
   let priorityTitle = '';
@@ -1450,11 +1490,11 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
     if (eventStatus === 'OK') {
       priorityTitle = `🟢 <b>SERVICIO RESTABLECIDO</b>`;
     } else if (category === 'loss') {
-      priorityTitle = `🚨🔴 <b>RIESGO ALTO: PÉRDIDA DE SEÑAL</b>`;
+      priorityTitle = `🚨🔴 <b>RIESGO ALTO: ${alertLabel.toUpperCase()}</b>`;
     } else if (category === 'power_fail') {
-      priorityTitle = `🔌⚡ <b>RIESGO MEDIO: CORTE DE ENERGÍA</b>`;
+      priorityTitle = `🔌⚡ <b>RIESGO MEDIO: ${alertLabel.toUpperCase()}</b>`;
     } else {
-      priorityTitle = `${statusEmoji} <b>ALERTA DE INFRAESTRUCTURA</b>`;
+      priorityTitle = `${statusEmoji} <b>ALERTA SMART OLT: ${alertLabel.toUpperCase()}</b>`;
     }
   }
 
@@ -1739,16 +1779,10 @@ export async function processZabbixAlert(payload) {
           // Override stale API cache status with real-time hardware status
           freshOnu.status = liveStatus.onu_status || liveStatus.status_desc || (liveStatus.status === true ? 'online' : 'offline');
 
-          const reason = (liveStatus.last_down_reason || liveStatus.offline_reason || '').toLowerCase();
-          console.log(`[Settle] SN ${cleanSn}: Smart OLT live reason = "${reason}"`);
-
-          if (reason.includes('dying') || reason.includes('power') || reason.includes('gasp')) {
-            freshOltStatusReason = 'Corte de Energía (Dying Gasp)';
-          } else if (reason.includes('los') || reason.includes('signal') || reason.includes('fibra') || reason.includes('link') || reason.includes('down')) {
-            freshOltStatusReason = 'Pérdida de Señal (LOS)';
-          } else if (reason) {
-            freshOltStatusReason = liveStatus.last_down_reason || liveStatus.offline_reason;
-          }
+          freshOltStatusReason = liveStatus.last_down_reason || liveStatus.offline_reason ||
+            liveStatus.status_reason || liveStatus.reason || '';
+          const liveAlert = classifySmartOltAlert(freshOltStatusReason, liveStatus);
+          console.log(`[Settle] SN ${cleanSn}: Smart OLT live type = "${liveAlert.label}"${freshOltStatusReason ? ` (raw: ${freshOltStatusReason})` : ''}`);
         }
       }
     } catch (err) {
@@ -2186,8 +2220,8 @@ Comandos disponibles:
     }
 
     const statusInfo = parseStatusInfo(text);
-    const statusEmoji = isProblem ? '🔴' : '🟢';
-    const statusLabel = isProblem ? statusInfo.status : 'Servicio Operativo / Online';
+    let statusEmoji = isProblem ? '🔴' : '🟢';
+    let statusLabel = isProblem ? statusInfo.status : 'Servicio Operativo / Online';
     
     // Set priority title
     let priorityTitle = '';
@@ -2209,31 +2243,33 @@ Comandos disponibles:
       
       if (onu) {
         let oltStatusReason = '';
+        let smartOltAlert = null;
         try {
           console.log(`Querying live status for ONU ${onu.external_id} (${sn}) on Smart OLT...`);
           const liveStatus = await getOnuStatus(onu.external_id);
           if (liveStatus && liveStatus.status) {
-            const reason = (liveStatus.last_down_reason || liveStatus.offline_reason || '').toLowerCase();
-            console.log(`Smart OLT live reason for ${sn}: "${reason}"`);
-            
-            if (reason.includes('dying') || reason.includes('power') || reason.includes('gasp')) {
-              oltStatusReason = 'Corte de Energía (Dying Gasp)';
-            } else if (reason.includes('los') || reason.includes('signal') || reason.includes('fibra') || reason.includes('link') || reason.includes('down')) {
-              oltStatusReason = 'Pérdida de Señal (LOS)';
-            } else if (reason) {
-              oltStatusReason = liveStatus.last_down_reason || liveStatus.offline_reason;
-            }
+            const rawReason = liveStatus.last_down_reason || liveStatus.offline_reason ||
+              liveStatus.status_reason || liveStatus.reason || '';
+            smartOltAlert = classifySmartOltAlert(rawReason, liveStatus);
+            oltStatusReason = smartOltAlert.rawReason;
+            console.log(`Smart OLT live type for ${sn}: "${smartOltAlert.label}"`);
           }
         } catch (err) {
           console.error(`[Telegram bot Smart OLT live status query failed]:`, err.message);
         }
 
-        const category = statusInfo.category;
-        const oltReasonCategory = getFailureCategoryFromOltReason(oltStatusReason);
+        const category = smartOltAlert && smartOltAlert.category !== 'unknown'
+          ? smartOltAlert.category
+          : statusInfo.category;
+        if (isProblem && smartOltAlert) {
+          statusEmoji = smartOltAlert.emoji;
+          statusLabel = smartOltAlert.label;
+          priorityTitle = `${smartOltAlert.emoji} <b>ALERTA SMART OLT: ${smartOltAlert.label.toUpperCase()}</b>`;
+        }
 
         // Corroboration verification for bot
         let canSend = true;
-        if (category === 'power_fail' || category === 'loss') {
+        if (isProblem) {
           const isOltOnline = (onu.status || '').toLowerCase() === 'online' || (onu.status || '').toLowerCase() === 'active';
           
           if (isProblem && isOltOnline) {
@@ -2241,10 +2277,6 @@ Comandos disponibles:
             canSend = false;
           } else if (!isProblem && !isOltOnline) {
             console.log(`[Corroboration Blocked] Bot: Zabbix reports OK but Smart OLT reports ONU as Offline/Down for SN "${sn}". Skipping reply.`);
-            canSend = false;
-          }
-          if (oltReasonCategory !== 'unknown' && oltReasonCategory !== category) {
-            console.log(`[Corroboration Blocked] Bot: cause mismatch (Zabbix ${category}, Smart OLT ${oltReasonCategory}) for SN "${sn}".`);
             canSend = false;
           }
         }
