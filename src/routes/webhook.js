@@ -2077,10 +2077,22 @@ Comandos disponibles:
 
   if (upperText.startsWith('/ID')) {
     try {
+      const chatType = message.chat.type || 'unknown';
+      const chatTypeLabels = {
+        private: 'Conversación privada con el bot',
+        group: 'Grupo',
+        supergroup: 'Supergrupo',
+        channel: 'Canal'
+      };
       await replyToMessage(
         chatId,
         messageId,
-        `🆔 <b>ID de este chat:</b> <code>${chatId}</code>\n<b>Tipo:</b> ${message.chat.type || 'desconocido'}`
+        `🆔 <b>ID de esta conversación:</b> <code>${chatId}</code>\n` +
+        `💬 <b>Tipo:</b> ${chatTypeLabels[chatType] || chatType}\n` +
+        `🌐 <b>Acceso al bot:</b> ${TELEGRAM_BOT_PUBLIC ? 'Público — cualquier usuario puede abrirlo' : 'Privado'}\n\n` +
+        (chatType === 'private'
+          ? '<i>Telegram siempre identifica como “private” una conversación individual. Para que todos vean las alertas automáticamente, agrega el bot a un grupo o canal público.</i>'
+          : '<i>Esta conversación puede utilizarse como destino compartido de alertas.</i>')
       );
     } catch (err) {
       console.error('Error handling /id command:', err.message);
