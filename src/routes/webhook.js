@@ -174,7 +174,7 @@ router.get('/test-telegram', async (req, res) => {
       `🤖 El bot está activo y puede enviar mensajes correctamente.\n` +
       `📅 Hora: <code>${new Date().toLocaleString('es-EC', { timeZone: 'America/Guayaquil' })}</code>\n` +
       `💬 Chat ID: <code>${chatId}</code>\n` +
-      `🌐 Servidor: <code>${process.env.PUBLIC_URL || 'local'}</code>`
+      `🌐 Servidor: <code>${PUBLIC_URL}</code>`
     );
     return res.json({ status: 'ok', message: 'Test message sent to Telegram successfully', chat_id: chatId, result });
   } catch (err) {
@@ -415,7 +415,7 @@ export async function syncActiveProblems(targetChatId = DEFAULT_CHAT_ID) {
           const statusDot = isOltOnline ? '🟢' : '🔴';
           const oltDownTime = onu.last_down_time || (liveStatus && liveStatus.last_down_time) || 'N/A';
           
-          const publicUrl = (process.env.PUBLIC_URL || '').trim();
+          const publicUrl = PUBLIC_URL;
           const sNapBox = extractNapBox(onu.address) || extractNapBox(onu.description) || 'N/A';
           const sNapLink = (sNapBox !== 'N/A' && publicUrl) ? `<a href="${publicUrl}/?nap=${encodeURIComponent(sNapBox)}">${sNapBox}</a>` : sNapBox;
           
@@ -792,7 +792,7 @@ async function generateNapReport(onu, eventStatus, severity, hostName, eventName
                  extractNapBox(onu.name) || 
                  extractNapBox(onu.zone);
 
-  const publicUrl = (process.env.PUBLIC_URL || '').trim();
+  const publicUrl = PUBLIC_URL;
   
   // Search NAP in local cache for geographic coordinates
   let coordsText = '';
@@ -1308,7 +1308,7 @@ ${triggerDesc ? `\n<i>Descripción: ${triggerDesc}</i>` : ''}
       const inlineButtons = [];
       const firstRow = [];
       
-      const publicUrl = (process.env.PUBLIC_URL || '').trim();
+      const publicUrl = PUBLIC_URL;
       const napBox = (onu.odb_name ? onu.odb_name.trim() : '') || (onu.odb ? onu.odb.trim() : '') || extractNapBox(onu.address) || extractNapBox(onu.description);
       if (publicUrl && napBox) {
         firstRow.push({
@@ -1699,7 +1699,7 @@ export async function runLiveDiagnostics(chatId, messageId, snParam) {
       const inlineButtons = [];
       const firstRow = [];
       
-      const publicUrl = (process.env.PUBLIC_URL || '').trim();
+      const publicUrl = PUBLIC_URL;
       const napBox = (onu.odb_name ? onu.odb_name.trim() : '') || (onu.odb ? onu.odb.trim() : '') || extractNapBox(onu.address) || extractNapBox(onu.description);
       if (publicUrl && napBox) {
         firstRow.push({
@@ -1780,7 +1780,7 @@ Comandos disponibles:
 
   if (upperText.startsWith('/MAPA')) {
     try {
-      const publicUrl = (process.env.PUBLIC_URL || '').trim();
+      const publicUrl = PUBLIC_URL;
       const mapMsg = publicUrl 
         ? `🗺️ <b>Monitor de Cajas NAP en Tiempo Real</b>\n\nAccede al mapa interactivo aquí:\n🔗 <a href="${publicUrl}">${publicUrl}</a>`
         : `🗺️ <b>Monitor de Cajas NAP:</b> <code>PUBLIC_URL</code> no configurado en el servidor.`;
@@ -1977,7 +1977,7 @@ Comandos disponibles:
             const inlineButtons = [];
             const firstRow = [];
             
-            const publicUrl = (process.env.PUBLIC_URL || '').trim();
+            const publicUrl = PUBLIC_URL;
             const napBox = (onu.odb_name ? onu.odb_name.trim() : '') || (onu.odb ? onu.odb.trim() : '') || extractNapBox(onu.address) || extractNapBox(onu.description);
             if (publicUrl && napBox) {
               firstRow.push({
@@ -2185,7 +2185,7 @@ async function handleSearchQuery(chatId, messageId, query) {
                      cachedNaps.find(n => n.name.toUpperCase().includes(upperQuery));
 
   if (matchedNap) {
-    const publicUrl = (process.env.PUBLIC_URL || '').trim();
+    const publicUrl = PUBLIC_URL;
     const napLink = publicUrl ? `<a href="${publicUrl}/?nap=${encodeURIComponent(matchedNap.name)}"><b>${matchedNap.name}</b></a>` : `<b>${matchedNap.name}</b>`;
     
     let coordsText = '<i>Sin coordenadas GPS registradas</i>';
