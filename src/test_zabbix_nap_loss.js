@@ -23,7 +23,8 @@ const onus = ['FHTTZAB00001', 'FHTTZAB00002'].map((sn, index) => ({
   board: '2',
   port: '5',
   gps_lat: '-2.9110',
-  gps_lng: '-78.9665'
+  gps_lng: '-78.9665',
+  offline_reason: 'Loss of Signal'
 }));
 
 globalThis.fetch = async (url, options = {}) => {
@@ -75,6 +76,44 @@ try {
   assert.ok(message.includes('NAP-ZABBIX-1'), 'The cache-backed alert must identify the NAP');
   assert.ok(message.includes('maps.google.com'), 'The cache-backed alert must include its approximate location');
   assert.strictEqual(getCachedNaps()[0].status, 'offline', 'The NAP must be fully offline in cache');
+
+  // Reset the incident, then simulate misleading Zabbix LOS events while
+  // Smart OLT definitively reports that every device lost electrical power.
+  await processZabbixAlert({
+    event_name: 'ONU FHTTZAB00001: Loss of Signal',
+    host_name: 'OLT-TEST',
+    event_status: 'OK',
+    event_severity: 'High'
+  });
+  await processZabbixAlert({
+    event_name: 'ONU FHTTZAB00002: Loss of Signal',
+    host_name: 'OLT-TEST',
+    event_status: 'OK',
+    event_severity: 'High'
+  });
+  onus.forEach((onu) => { onu.offline_reason = 'Dying Gasp'; });
+
+  const beforeTotalPowerAlert = telegramMessages.length;
+  await processZabbixAlert({
+    event_name: 'ONU FHTTZAB00001: Loss of Signal',
+    host_name: 'OLT-TEST',
+    event_status: 'PROBLEM',
+    event_severity: 'High'
+  });
+  await processZabbixAlert({
+    event_name: 'ONU FHTTZAB00002: Loss of Signal',
+    host_name: 'OLT-TEST',
+    event_status: 'PROBLEM',
+    event_severity: 'High'
+  });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  assert.strictEqual(telegramMessages.length, beforeTotalPowerAlert + 1, 'A total electrical outage must send one consolidated Power Fail alert');
+  const totalPowerMessage = telegramMessages.at(-1).text;
+  assert.ok(totalPowerMessage.includes('CORTE DE ENERGÍA'), 'Total electrical outage must use the Power Fail title');
+  assert.ok(totalPowerMessage.includes('Power Fail'), 'Total electrical outage must identify its power classification');
+  assert.ok(!totalPowerMessage.includes('CAÍDA TOTAL EN CAJA NAP'), 'Total electrical outage must not be called a NAP outage');
+  assert.ok(!totalPowerMessage.includes('Pérdida de Señal (Loss of Signal)'), 'Total electrical outage must not be called LOS');
 
   // A Power Fail stays an ONU/router energy incident even if the cached NAP
   // happens to be fully offline; it must never be relabelled as a NAP LOS.

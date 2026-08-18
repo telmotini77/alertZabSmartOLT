@@ -64,7 +64,7 @@ const getMinimumNapClients = () => {
 
 // Avoid repeat notifications while the same NAP remains fully offline. The
 // state is cleared as soon as any ONU in that NAP recovers.
-const activeNapLossNotifications = new Set();
+const activeNapIncidentNotifications = new Set();
 
 // A total NAP outage must be observed by both monitoring sources.  Zabbix
 // contributes one fresh LOS event per ONU and Smart OLT contributes the live
@@ -133,7 +133,7 @@ function hasCompleteFreshNapLossEvidence(nap) {
   });
 }
 
-async function corroborateTotalNapLossWithSmartOlt(nap) {
+async function corroborateTotalNapIncidentWithSmartOlt(nap) {
   const napName = String(nap?.name || '').trim();
   if (!napName) return { confirmed: false, reason: 'NAP not identified' };
 
@@ -157,7 +157,49 @@ async function corroborateTotalNapLossWithSmartOlt(nap) {
     if (onus.some(isOnuOnline)) {
       return { confirmed: false, reason: 'Smart OLT still reports online ONUs in the NAP' };
     }
-    return { confirmed: true, onus };
+
+    // Being 100% offline describes the impact, not the cause. If Smart OLT
+    // reports Dying Gasp/Power Fail, this is an electrical incident affecting
+    // the ONUs/routers and must never be announced as a fibre or NAP LOS.
+    const causeCategories = onus.map((onu) => getFailureCategoryFromOltReason(
+      onu.offline_reason || onu.last_down_reason || onu.status_reason || onu.reason || ''
+    ));
+    let powerFailureCount = causeCategories.filter((category) => category === 'power_fail').length;
+    let lossCount = causeCategories.filter((category) => category === 'loss').length;
+
+    // Some Smart OLT installations omit the last-down reason from the bulk
+    // endpoint. Query one live ONU only when the whole snapshot has no cause,
+    // keeping API usage low while avoiding an assumed/false LOS diagnosis.
+    if (powerFailureCount === 0 && lossCount === 0) {
+      const referenceOnu = onus.find((onu) => onu.external_id);
+      if (referenceOnu) {
+        try {
+          const liveStatus = await getOnuStatus(referenceOnu.external_id);
+          const liveCategory = getFailureCategoryFromOltReason(
+            liveStatus?.last_down_reason || liveStatus?.offline_reason || ''
+          );
+          powerFailureCount = liveCategory === 'power_fail' ? 1 : 0;
+          lossCount = liveCategory === 'loss' ? 1 : 0;
+        } catch (error) {
+          return { confirmed: false, reason: `Smart OLT cause lookup failed: ${error.message}` };
+        }
+      }
+    }
+
+    if (powerFailureCount > 0 && lossCount > 0) {
+      return {
+        confirmed: false,
+        category: 'mixed',
+        reason: `Smart OLT reports mixed causes (${powerFailureCount} power, ${lossCount} LOS)`
+      };
+    }
+    if (powerFailureCount > 0) {
+      return { confirmed: true, category: 'power_fail', onus, powerFailureCount };
+    }
+    if (lossCount > 0) {
+      return { confirmed: true, category: 'loss', onus };
+    }
+    return { confirmed: false, reason: 'Smart OLT did not provide an electrical or optical failure cause' };
   } catch (error) {
     return { confirmed: false, reason: `Smart OLT query failed: ${error.message}` };
   }
@@ -595,6 +637,49 @@ async function sendCachedNapLossAlert(payload, nap, eventTime = '') {
   return result;
 }
 
+/**
+ * Send one consolidated power-failure report when every ONU/router in a NAP
+ * is offline and Smart OLT explicitly reports an electrical cause.
+ */
+async function sendCachedNapPowerFailAlert(payload, nap, confirmation, eventTime = '') {
+  const referenceClient = nap.clients?.find((client) => client.sn);
+  if (!referenceClient) return { sent: false, reason: 'NAP has no clients' };
+
+  const totalClients = nap.totalClients || nap.clients.length;
+  const representativeOnu = {
+    ...(confirmation.onus?.[0] || {}),
+    sn: String(referenceClient.sn).toUpperCase(),
+    name: referenceClient.name || nap.name,
+    status: 'Offline',
+    odb_name: nap.name,
+    olt_name: nap.olt_name,
+    board: nap.board,
+    port: nap.port
+  };
+  const enrichedPayload = {
+    ...payload,
+    onu_sn: representativeOnu.sn,
+    chat_id: payload.chat_id || DEFAULT_CHAT_ID,
+    event_name: `NAP ${nap.name}: Power failure detected`,
+    trigger_description: `Corte de energía confirmado: ${totalClients}/${totalClients} ONU/router de la NAP ${nap.name} están apagados por falta de alimentación eléctrica.`,
+    event_time: payload.event_time || eventTime
+  };
+
+  // Correct the optimistic LOS history entries created before Smart OLT
+  // supplied the definitive electrical cause.
+  nap.clients.forEach((client) => {
+    updateHistoryEventDetails(client.sn, 'power_fail', 'Corte de Energía (Dying Gasp)');
+  });
+
+  const result = await processAndSendAlert(
+    enrichedPayload,
+    representativeOnu,
+    'Corte de Energía (Dying Gasp)'
+  );
+  console.log(`[NAP Power Fail] Sent consolidated power alert for ${nap.name}: ${totalClients}/${totalClients} ONU/router offline.`);
+  return result;
+}
+
 const getSettleMs = () => {
   if (process.env.NODE_ENV === 'test') return 100; // fast in tests
   const secs = parseFloat(process.env.SMARTOLT_SETTLE_SECS);
@@ -920,10 +1005,10 @@ async function generateNapReport(onu, eventStatus, severity, hostName, eventName
 
   if (eventStatus === 'OK') {
     techExplanation = `\n💡 <b>Diagnóstico:</b> El enlace óptico y la alimentación eléctrica se encuentran estables. La ONU volvió a registrarse exitosamente en la OLT.`;
-  } else if (isLoss) {
-    techExplanation = `\n💡 <b>Diagnóstico Técnico:</b> Pérdida de potencia óptica (LOS). La ONU no recibe luz de la OLT.\n• <b>Causas probables:</b> Corte de acometida, rotura de fibra en troncal, conector desconectado o daño físico en la caja NAP.`;
   } else if (isPower) {
     techExplanation = `\n💡 <b>Diagnóstico Técnico:</b> Corte de energía eléctrica (Dying Gasp). La ONU se apagó por falta de suministro eléctrico.\n• <b>Causas probables:</b> Corte de luz en el sector/domicilio, desconexión de fuente de poder o daño en el transformador.`;
+  } else if (isLoss) {
+    techExplanation = `\n💡 <b>Diagnóstico Técnico:</b> Pérdida de potencia óptica (LOS). La ONU no recibe luz de la OLT.\n• <b>Causas probables:</b> Corte de acometida, rotura de fibra en troncal, conector desconectado o daño físico en la caja NAP.`;
   } else {
     techExplanation = `\n💡 <b>Diagnóstico Técnico:</b> Interrupción de comunicación detectada entre la OLT y la ONU.`;
   }
@@ -1002,6 +1087,7 @@ ${eventTime ? `• 📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : '
 
   // A Power Fail is always reported as an ONU/router power incident.  Even if
   // several clients are down, it must never be relabelled as a fibre/NAP loss.
+  const isNapTotalPowerFailure = isPower && totalClients > 0 && totalOffline === totalClients;
   const isNapTotalLoss = !isPower && ((totalClients > 1 && totalOffline === totalClients) || (totalClients > 1 && totalOnline === 0));
   const isNapPartialLoss = !isPower && totalOffline > 1 && totalOnline > 0;
   const isIndividualIncident = totalOffline <= 1 || totalOnline > 0;
@@ -1017,6 +1103,12 @@ ${eventTime ? `• 📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : '
     effectiveStatusLabel = 'OK (Restablecido)';
     effectiveTitle = '🟢 <b>SERVICIO RESTABLECIDO</b>';
     effectiveTechExplanation = '\n💡 <b>Diagnóstico:</b> El enlace óptico y la alimentación eléctrica se encuentran estables. La conexión volvió a registrarse exitosamente en la OLT.';
+  } else if (isNapTotalPowerFailure) {
+    effectiveEmoji = '🔌';
+    effectiveStatusLabel = 'Corte de Energía (Power Fail)';
+    effectiveTitle = '🔌⚡ <b>CORTE DE ENERGÍA EN ONU/ROUTERS DE LA NAP</b>';
+    effectiveReason = oltStatusReason || 'Corte de Energía (Dying Gasp)';
+    effectiveTechExplanation = '\n💡 <b>Diagnóstico Técnico:</b> Smart OLT confirma falta de alimentación eléctrica en las ONU/routers.\n• <b>Clasificación:</b> Power Fail; no es caída de caja NAP ni pérdida de señal óptica (LOS).';
   } else if (isNapTotalLoss) {
     effectiveEmoji = '🔴';
     effectiveStatusLabel = 'Pérdida de Señal (Loss of Signal)';
@@ -1046,8 +1138,10 @@ ${eventTime ? `• 📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : '
       : '\n💡 <b>Diagnóstico Técnico:</b> Pérdida de potencia óptica (LOS) en la acometida individual.\n• <b>Causas probables:</b> Acometida rota, conector suelto o atenuación excesiva.';
   }
 
-  const napWarning = isNapTotalLoss
-    ? '🛑 <b>¡CAÍDA TOTAL DE LA CAJA NAP!</b> (Todas las conexiones están sin servicio)'
+  const napWarning = isNapTotalPowerFailure
+    ? '🔌 <b>Power Fail en ONU/routers</b> (no clasificado como caída de NAP ni LOS)'
+    : isNapTotalLoss
+      ? '🛑 <b>¡CAÍDA TOTAL DE LA CAJA NAP!</b> (Todas las conexiones están sin servicio)'
     : isNapPartialLoss
       ? `⚠️ <b>¡CAÍDA PARCIAL EN LA CAJA NAP!</b> (${totalOffline} de ${totalClients} conexiones caídas)`
       : isPower
@@ -1510,37 +1604,43 @@ export async function processZabbixAlert(payload) {
     }
 
     if (eventStatus === 'OK' && updatedNap?.status !== 'offline') {
-      activeNapLossNotifications.delete(napNotificationKey);
+      activeNapIncidentNotifications.delete(napNotificationKey);
     }
 
-    // A NAP alert is reserved exclusively for a fibre/LOS incident.  Zabbix
-    // must have reported a fresh LOS for every ONU, and Smart OLT must confirm
-    // that every ONU in the same NAP is currently offline.
-    const isTotalNapLoss = eventStatus === 'PROBLEM' &&
+    // Zabbix must have reported a fresh event for every ONU and Smart OLT must
+    // confirm both the total impact and its real cause. Electrical causes are
+    // reclassified as Power Fail instead of being announced as NAP/LOS.
+    const isTotalNapIncidentCandidate = eventStatus === 'PROBLEM' &&
       statusInfo.category === 'loss' &&
       updatedNap?.status === 'offline' &&
       updatedNap.totalClients >= getMinimumNapClients();
-    if (isTotalNapLoss) {
+    if (isTotalNapIncidentCandidate) {
       if (!hasCompleteFreshNapLossEvidence(updatedNap)) {
         console.log(`[NAP Corroboration] ${updatedNap.name}: waiting for fresh Zabbix LOS evidence from every ONU.`);
         return;
       }
 
-      const oltConfirmation = await corroborateTotalNapLossWithSmartOlt(updatedNap);
+      const oltConfirmation = await corroborateTotalNapIncidentWithSmartOlt(updatedNap);
       if (!oltConfirmation.confirmed) {
-        console.log(`[NAP Corroboration] ${updatedNap.name}: Smart OLT did not confirm total LOS (${oltConfirmation.reason}).`);
+        console.log(`[NAP Corroboration] ${updatedNap.name}: Smart OLT did not confirm the total incident and its cause (${oltConfirmation.reason}).`);
         return;
       }
 
-      if (!activeNapLossNotifications.has(napNotificationKey)) {
+      if (!activeNapIncidentNotifications.has(napNotificationKey)) {
         // Reserve the notification before awaiting Telegram so simultaneous
         // duplicate Zabbix events cannot produce duplicate NAP reports.
-        activeNapLossNotifications.add(napNotificationKey);
+        activeNapIncidentNotifications.add(napNotificationKey);
         cancelPendingAlertsForNap(updatedNap);
         try {
-          await sendCachedNapLossAlert(payload, updatedNap, eventTime);
+          if (oltConfirmation.category === 'power_fail') {
+            // All devices are offline, but the confirmed cause is electrical.
+            // Report Power Fail in the normal alert group, never NAP/LOS.
+            await sendCachedNapPowerFailAlert(payload, updatedNap, oltConfirmation, eventTime);
+          } else {
+            await sendCachedNapLossAlert(payload, updatedNap, eventTime);
+          }
         } catch (error) {
-          activeNapLossNotifications.delete(napNotificationKey);
+          activeNapIncidentNotifications.delete(napNotificationKey);
           throw error;
         }
       }
