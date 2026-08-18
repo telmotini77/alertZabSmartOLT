@@ -2505,16 +2505,14 @@ ${priorityTitle}
  * Queries Smart OLT for all ONUs on the port, filters offline clients,
  * and sends a consolidated Telegram message.
  */
-async function processPortAlert(payload, board, port) {
-  const eventName = payload.event_name || payload.trigger_name || '';
+export async function processPortAlert(payload, board, port) {
   const hostName = payload.host_name || payload.host || '';
   const eventStatus = payload.event_status || payload.status || 'PROBLEM';
   const targetChatId = payload.chat_id || DEFAULT_CHAT_ID;
 
   if (eventStatus !== 'PROBLEM') {
-    const recMsg = `🟢 <b>SERVICIO RESTABLECIDO EN PUERTO OLT</b>\n\n• <b>Puerto:</b> Tarjeta ${board} / Puerto ${port}\n• <b>OLT:</b> ${hostName}\n\n<i>Las ONUs de este puerto deberían volver a estar Online en breve.</i>`;
-    await sendMessage(targetChatId, recMsg);
-    return;
+    console.log(`[Port Alert] Recovery suppressed for Board ${board} Port ${port}; only detailed outage reports are sent.`);
+    return { sent: false, reason: 'Recovery notification filtered' };
   }
 
   console.log(`[Port Alert] Detected GPON Port failure: Board ${board}, Port ${port} on OLT ${hostName}`);
@@ -2523,10 +2521,8 @@ async function processPortAlert(payload, board, port) {
   const onusOnPort = await findOnusByPort(null, board, port, hostName);
   
   if (!onusOnPort || onusOnPort.length === 0) {
-    console.log(`[Port Alert] No ONUs found on Smart OLT for Board ${board} Port ${port}. Sending fallback.`);
-    const fallbackMsg = `🚨🔴 <b>CAÍDA DE PUERTO GPON</b>\n\n• <b>Puerto:</b> Tarjeta ${board} / Puerto ${port}\n• <b>OLT:</b> ${hostName}\n\n⚠️ <i>No se encontraron clientes registrados en este puerto en Smart OLT.</i>`;
-    await sendMessage(targetChatId, fallbackMsg);
-    return;
+    console.log(`[Port Alert] Suppressed Board ${board} Port ${port}: Smart OLT returned no registered ONUs, so a detailed alert cannot be built.`);
+    return { sent: false, reason: 'No ONUs found in Smart OLT' };
   }
   
   // 2. Filter ONUs that are offline
@@ -2549,16 +2545,8 @@ async function processPortAlert(payload, board, port) {
   const eventTime = extractEventTime(payload);
   
   if (offlineCount === 0) {
-    let reportText = `🚨🔴 <b>CAÍDA MASIVA DE PUERTO GPON</b>\n\n`;
-    reportText += `<b>Puerto Afectado:</b> Tarjeta ${board} | Puerto PON ${port}\n`;
-    reportText += `<b>OLT:</b> ${hostName}\n`;
-    reportText += `📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n\n`;
-    reportText += `📊 <b>Resumen de Afectación:</b>\n`;
-    reportText += `• Total Clientes en el Puerto: <b>${totalClients}</b>\n`;
-    reportText += `• Clientes Caídos (Offline): <b>0</b>\n\n`;
-    reportText += `⚠️ <i>Smart OLT aún reporta los clientes como Online. Esto puede deberse al delay de sincronización de la OLT.</i>\n`;
-    await sendMessage(targetChatId, reportText.trim());
-    return;
+    console.log(`[Port Alert] Suppressed Board ${board} Port ${port}: Smart OLT reports ${totalClients}/${totalClients} ONUs Online.`);
+    return { sent: false, reason: 'Smart OLT reports no offline ONUs', totalClients, offlineCount };
   }
 
   const BATCH_SIZE = 32;
@@ -2606,6 +2594,7 @@ async function processPortAlert(payload, board, port) {
   }
   
   console.log(`[Port Alert] Successfully sent port summary for Board ${board} Port ${port} in ${totalChunks} messages. Affected: ${offlineCount}`);
+  return { sent: true, messages: totalChunks, totalClients, offlineCount };
 }
 
 /**
