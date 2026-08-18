@@ -143,6 +143,17 @@ const getNapNameFromOnu = (onu) => String(
   onu?.odb_name || onu?.odb || extractNapBox(onu?.address) || extractNapBox(onu?.description) || ''
 ).trim();
 
+/**
+ * Make the physical box unmistakable in Telegram. Smart OLT commonly stores
+ * only the site code (for example SM-7030-1), while technicians refer to it as
+ * "NAP SM-7030-1". Codes that already start with NAP are left unchanged.
+ */
+export function formatNapLabel(napName) {
+  const code = String(napName || '').trim().toUpperCase();
+  if (!code) return 'NAP no identificada';
+  return /^NAP(?:[-_.\s]|$)/i.test(code) ? code : `NAP ${code}`;
+}
+
 function registerNapLossEvidence(nap, sn) {
   const key = normalizeNapName(nap?.name);
   const normalizedSn = String(sn || '').trim().toUpperCase();
@@ -1045,8 +1056,12 @@ async function generateNapReport(onu, eventStatus, severity, hostName, eventName
     coordsText = `\n📍 <b>Ubicación aproximada de la NAP:</b> <code>[${latitude.toFixed(6)}, ${longitude.toFixed(6)}]</code> | 🗺️ <a href="${gmapsLink}">Ver en Google Maps</a>`;
   }
 
-  const napDisplay = napBox ? `<code>${napBox}</code>` : '<i>No identificada en el sistema</i>';
-  const napLink = (napBox && publicUrl) ? `<a href="${publicUrl}/?nap=${encodeURIComponent(napBox)}"><b>${napBox}</b></a>` : napDisplay;
+  const napLabel = formatNapLabel(napBox);
+  const napDisplay = napBox ? `<code>${napLabel}</code>` : '<i>NAP no identificada en Smart OLT</i>';
+  const napLink = (napBox && publicUrl) ? `<a href="${publicUrl}/?nap=${encodeURIComponent(napBox)}"><b>${napLabel}</b></a>` : napDisplay;
+  const onuName = String(onu.name || onu.customer_name || '').trim() || 'Sin nombre';
+  const onuSn = String(onu.sn || '').trim().toUpperCase();
+  const onuIdentityLine = `👤 <b>ONU/cliente reportado:</b> ${onuName}${onuSn ? ` — <code>${onuSn}</code>` : ''}`;
 
   // Build technical diagnostic explanation based on failure type
   let techExplanation = '';
@@ -1109,12 +1124,17 @@ async function generateNapReport(onu, eventStatus, severity, hostName, eventName
       }
     }
 
-    const boxLabel = napBox ? napLink + coordsText : '<i>No identificada en el sistema</i>';
+    const boxLabel = napBox ? napLink + coordsText : '<i>NAP no identificada en Smart OLT</i>';
+    const singleIsPower = eventStatus !== 'OK' && /energ|power|dying|gasp/i.test(`${singleLabel} ${singleReason}`);
+    const singlePowerNapLine = singleIsPower && napBox
+      ? `\n🔌 <b>Corte de energía en equipo conectado a:</b> <b>${napLabel}</b>`
+      : '';
 
     return `
 ${singleTitle}
 
-📦 <b>Caja NAP:</b> ${boxLabel}
+📦 <b>Caja afectada:</b> ${boxLabel}
+${onuIdentityLine}${singlePowerNapLine}
 🏢 <b>OLT:</b> ${onu.olt_name || hostName} | <b>Puerto PON:</b> Slot ${onu.board || 'N/A'} / Puerto ${onu.port || 'N/A'}
 
 ⚡ <b>Detalle del Incidente:</b>
@@ -1199,6 +1219,10 @@ ${eventTime ? `• 📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : '
         ? 'ℹ️ <b>Incidente de energía en ONU/router</b> (no clasificado como caída de NAP)'
         : 'ℹ️ <b>Incidente Individual</b> (1 conexión afectada; las demás conexiones de la NAP operan normal)';
 
+  const powerNapDetail = eventStatus !== 'OK' && isPower
+    ? `\n🔌 <b>Corte de energía en equipos conectados a:</b> <b>${napLabel}</b>\n🎯 <b>Alcance eléctrico:</b> <b>${totalOffline} de ${totalClients}</b> ONU/router sin alimentación`
+    : '';
+
   let lastActiveNapInfo = '';
   if (eventStatus !== 'OK' && isNapTotalLoss) {
     try {
@@ -1241,14 +1265,15 @@ ${eventTime ? `• 📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : '
   return `
 ${effectiveTitle}
 
-📦 <b>Caja NAP:</b> ${napLink}${coordsText}
+📦 <b>Caja afectada:</b> ${napLink}${coordsText}
+${onuIdentityLine}${powerNapDetail}
 🏢 <b>OLT:</b> ${onu.olt_name || hostName} | <b>Puerto PON:</b> Slot ${onu.board || 'N/A'} / Puerto ${onu.port || 'N/A'}
 
 ⚡ <b>Detalle del Incidente:</b>
 • <b>Estado:</b> ${effectiveEmoji} <b>${effectiveStatusLabel}</b> (${severity})
 ${eventTime ? `• 📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : ''}${effectiveReason ? `• 🔌 <b>Causa Reportada OLT:</b> <code>${effectiveReason}</code>\n` : ''}${effectiveTechExplanation}
 
-📊 <b>Estado de la Caja NAP (${napBox}):</b>
+📊 <b>Estado de la caja ${napLabel}:</b>
 • Total Conexiones: <b>${totalClients}</b>
 • 🟢 Operativas (Online): <b>${totalOnline}</b>
 • 🔴 Afectadas (Offline): <b>${totalOffline}</b> (<b>${percentageDown}%</b>)
@@ -2428,7 +2453,7 @@ async function processPortAlert(payload, board, port) {
   // Group by NAP for better readability
   const naps = {};
   offlineOnus.forEach(o => {
-    const nap = extractNapBox(o.address) || extractNapBox(o.description) || 'NAP Desconocida';
+    const nap = getNapNameFromOnu(o) || 'NAP Desconocida';
     if (!naps[nap]) naps[nap] = [];
     naps[nap].push(o);
   });
@@ -2467,6 +2492,8 @@ async function processPortAlert(payload, board, port) {
       reportText += `• Total Clientes en el Puerto: <b>${totalClients}</b>\n`;
       reportText += `• 🔴 Clientes Caídos (Offline): <b>${offlineCount}</b> (<b>${percentage}%</b> de afectación)\n`;
       reportText += `• 🟢 Clientes Operativos (Online): <b>${totalClients - offlineCount}</b>\n`;
+      const affectedNapLabels = Object.keys(naps).map(formatNapLabel);
+      reportText += `• 📦 Cajas NAP afectadas: <b>${affectedNapLabels.length}</b> — ${affectedNapLabels.map(label => `<code>${label}</code>`).join(', ')}\n`;
     }
     
     reportText += `\n👥 <b>Afectación Desglosada por Caja NAP:</b>\n`;
@@ -2484,7 +2511,7 @@ async function processPortAlert(payload, board, port) {
       const mapLink = (cachedNap && cachedNap.latitude && cachedNap.longitude) 
         ? ` (<a href="https://maps.google.com/?q=${cachedNap.latitude},${cachedNap.longitude}">GPS</a>)` 
         : '';
-      reportText += `\n📦 <b>Caja NAP: ${nap}</b>${mapLink} - <b>${clients.length} cliente(s) caído(s):</b>\n`;
+      reportText += `\n📦 <b>Caja afectada: ${formatNapLabel(nap)}</b>${mapLink} - <b>${clients.length} cliente(s) caído(s):</b>\n`;
       clients.forEach(c => {
         reportText += `  🔴 ${c.name} (<code>${c.sn}</code>)\n`;
       });

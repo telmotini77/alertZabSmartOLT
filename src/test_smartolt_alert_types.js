@@ -1,7 +1,7 @@
 import assert from 'assert';
 
 process.env.TELEGRAM_CHAT_ID = 'test-chat';
-const { classifySmartOltAlert } = await import('./routes/webhook.js');
+const { classifySmartOltAlert, formatNapLabel } = await import('./routes/webhook.js');
 
 const cases = [
   ['Dying Gasp', 'power_fail', 'Corte de energía'],
@@ -22,4 +22,9 @@ for (const [reason, category, label] of cases) {
 const offlineWithoutReason = classifySmartOltAlert('', { onu_status: 'Offline' });
 assert.equal(offlineWithoutReason.category, 'olt_offline');
 
-console.log('Smart OLT alert type classification: PASS');
+assert.equal(formatNapLabel('sm-7030-1'), 'NAP SM-7030-1');
+assert.equal(formatNapLabel('SM0201-5'), 'NAP SM0201-5');
+assert.equal(formatNapLabel('NAP-04-A'), 'NAP-04-A');
+assert.equal(formatNapLabel(''), 'NAP no identificada');
+
+console.log('Smart OLT alert type and NAP label formatting: PASS');

@@ -112,6 +112,9 @@ try {
   const totalPowerMessage = telegramMessages.at(-1).text;
   assert.ok(totalPowerMessage.includes('CORTE DE ENERGÍA'), 'Total electrical outage must use the Power Fail title');
   assert.ok(totalPowerMessage.includes('Power Fail'), 'Total electrical outage must identify its power classification');
+  assert.ok(totalPowerMessage.includes('Caja afectada:'), 'The alert must explicitly identify the affected NAP box');
+  assert.ok(totalPowerMessage.includes('Corte de energía en equipos conectados a:'), 'The alert must associate the power failure with its NAP box');
+  assert.ok(totalPowerMessage.includes('NAP-ZABBIX-1'), 'The power alert must include the exact NAP code');
   assert.ok(!totalPowerMessage.includes('CAÍDA TOTAL EN CAJA NAP'), 'Total electrical outage must not be called a NAP outage');
   assert.ok(!totalPowerMessage.includes('Pérdida de Señal (Loss of Signal)'), 'Total electrical outage must not be called LOS');
 
@@ -126,6 +129,8 @@ try {
   assert.strictEqual(powerResult.sent, true, 'A corroborated Power Fail must be sent');
   const powerMessage = telegramMessages.at(-1).text;
   assert.ok(powerMessage.includes('CORTE DE ENERGÍA'), 'Power Fail must use the energy alert title');
+  assert.ok(powerMessage.includes('ONU/cliente reportado:'), 'Power Fail must identify the ONU/customer that originated the alert');
+  assert.ok(powerMessage.includes('NAP-ZABBIX-1'), 'Power Fail must show its associated NAP code');
   assert.ok(!powerMessage.includes('CAÍDA TOTAL EN CAJA NAP'), 'Power Fail must not be relabelled as a NAP outage');
 
   const oltPriorityResult = await processAndSendAlert({
