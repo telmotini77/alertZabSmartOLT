@@ -6,7 +6,7 @@ import { fetchAllOnus, findOnuBySn, findOnusByAddressQuery, findOnusByPort, getO
 import { sendMessage, replyToMessage } from '../services/telegram.js';
 import { extractSerialNumber, extractNapBox, parseStatusInfo, extractEventTime, formatDateTime, extractBoardAndPort } from '../utils/parser.js';
 import { broadcast } from '../services/websocket.js';
-import { updateOnuStatusInCache, getCachedNaps, updateNapCoordinates, updateNapCoordinatesBulk, getStatusHistory, deleteHistoryItem, clearHistory, resolveHistoryItem, updateHistoryEventDetails } from '../services/cache.js';
+import { applyOnuStatusSnapshot, updateOnuStatusInCache, getCachedNaps, updateNapCoordinates, updateNapCoordinatesBulk, getStatusHistory, deleteHistoryItem, clearHistory, resolveHistoryItem, updateHistoryEventDetails } from '../services/cache.js';
 import { getActiveTriggers } from '../services/zabbix.js';
 import { dbGetOpticalHistory, dbSaveOpticalRecord } from '../services/db.js';
 import { PUBLIC_URL } from '../config/publicUrl.js';
@@ -55,6 +55,14 @@ const findCachedNap = (napName) => {
   const normalizedName = normalizeNapName(napName);
   if (!normalizedName) return null;
   return getCachedNaps().find((nap) => normalizeNapName(nap.name) === normalizedName) || null;
+};
+
+const findCachedNapBySn = (sn) => {
+  const normalizedSn = String(sn || '').trim().toUpperCase();
+  if (!normalizedSn) return null;
+  return getCachedNaps().find((nap) =>
+    nap.clients?.some((client) => String(client.sn || '').trim().toUpperCase() === normalizedSn)
+  ) || null;
 };
 
 const getCoordinates = (source) => {
@@ -137,6 +145,73 @@ export function classifySmartOltAlert(reason, liveStatus = {}) {
     return { category: 'olt_offline', label: 'ONU Offline reportada por Smart OLT', emoji: '🔴', rawReason: '' };
   }
   return { category: 'unknown', label: 'Tipo no reportado por Smart OLT', emoji: '⚠️', rawReason: '' };
+}
+
+/**
+ * Compare the diagnosis already obtained from Smart OLT with the trigger sent
+ * by Zabbix. Smart OLT owns the state and failure type; Zabbix contributes the
+ * independent event evidence, severity and timestamp.
+ */
+export function compareSmartOltWithZabbix(smartOltAlert, zabbixStatusInfo = {}, eventStatus = 'PROBLEM', onu = {}) {
+  const smartCategory = smartOltAlert?.category || 'unknown';
+  const zabbixCategory = zabbixStatusInfo?.category || 'unknown';
+  const smartLabel = smartOltAlert?.label || 'Tipo no reportado por Smart OLT';
+  const zabbixLabel = zabbixStatusInfo?.status || 'Evento genérico de Zabbix';
+  const smartIsOnline = isOnuOnline(onu);
+
+  if (eventStatus === 'PROBLEM' && smartIsOnline) {
+    return {
+      confirmed: false,
+      agreement: 'state_mismatch',
+      smartCategory,
+      zabbixCategory,
+      smartLabel,
+      zabbixLabel,
+      verdict: 'No confirmada: Zabbix reporta PROBLEM, pero Smart OLT mantiene la ONU Online.'
+    };
+  }
+
+  if (eventStatus === 'OK') {
+    return {
+      confirmed: smartIsOnline,
+      agreement: smartIsOnline ? 'recovery_match' : 'state_mismatch',
+      smartCategory,
+      zabbixCategory,
+      smartLabel,
+      zabbixLabel,
+      verdict: smartIsOnline
+        ? 'Restablecimiento confirmado por ambas fuentes.'
+        : 'Restablecimiento no confirmado: Smart OLT todavía reporta la ONU Offline.'
+    };
+  }
+
+  const comparableSmartCategory = !['unknown', 'olt_offline'].includes(smartCategory);
+  const comparableZabbixCategory = zabbixCategory !== 'unknown';
+  const sameCategory = comparableSmartCategory && comparableZabbixCategory && smartCategory === zabbixCategory;
+
+  return {
+    confirmed: !smartIsOnline,
+    agreement: sameCategory ? 'match' : 'reclassified',
+    smartCategory,
+    zabbixCategory,
+    smartLabel,
+    zabbixLabel,
+    verdict: sameCategory
+      ? `Confirmada: Smart OLT y Zabbix coinciden en ${smartLabel}.`
+      : `Confirmada y clasificada por Smart OLT como ${smartLabel}; Zabbix se usa como evidencia del evento.`
+  };
+}
+
+function formatSourceComparison(comparison, eventStatus, onu, oltStatusReason = '') {
+  if (!comparison) return '';
+  const smartState = isOnuOnline(onu) ? 'Online' : 'Offline';
+  const reasonSuffix = oltStatusReason ? ` — <code>${oltStatusReason}</code>` : '';
+  return `
+🔎 <b>Comparación Smart OLT ↔ Zabbix:</b>
+• <b>1. Smart OLT (principal):</b> ${smartState} — ${comparison.smartLabel}${reasonSuffix}
+• <b>2. Zabbix (confirmación):</b> ${eventStatus} — ${comparison.zabbixLabel}
+• <b>Resultado:</b> ${comparison.verdict}
+`.trim();
 }
 
 const getNapNameFromOnu = (onu) => String(
@@ -663,9 +738,8 @@ function cancelPendingAlertsForNap(nap) {
 }
 
 /**
- * Send a single NAP-level LOS report using the local cache. This path is
- * intentionally independent of Smart OLT availability: Zabbix has already
- * reported every router in the NAP down and the cache confirms 100% impact.
+ * Send a single NAP-level LOS report after the Smart OLT snapshot confirmed
+ * the complete impact and Zabbix supplied fresh evidence for every ONU.
  */
 async function sendCachedNapLossAlert(payload, nap, eventTime = '') {
   const referenceClient = nap.clients?.find((client) => client.sn);
@@ -685,6 +759,8 @@ async function sendCachedNapLossAlert(payload, nap, eventTime = '') {
     ...payload,
     onu_sn: representativeOnu.sn,
     chat_id: getLossChatId(),  // Route LOS alerts to the dedicated LOS group
+    zabbix_event_name: payload.zabbix_event_name || payload.event_name || payload.trigger_name || '',
+    zabbix_trigger_description: payload.zabbix_trigger_description || payload.trigger_description || '',
     event_name: payload.event_name || `NAP ${nap.name}: Loss of Signal`,
     trigger_description: `${payload.trigger_description || ''}\nCaída total confirmada: ${totalClients}/${totalClients} ONUs de la NAP ${nap.name} están sin señal.`.trim(),
     event_time: payload.event_time || eventTime
@@ -722,6 +798,8 @@ async function sendCachedNapPowerFailAlert(payload, nap, confirmation, eventTime
     ...payload,
     onu_sn: representativeOnu.sn,
     chat_id: payload.chat_id || DEFAULT_CHAT_ID,
+    zabbix_event_name: payload.zabbix_event_name || payload.event_name || payload.trigger_name || '',
+    zabbix_trigger_description: payload.zabbix_trigger_description || payload.trigger_description || '',
     event_name: `NAP ${nap.name}: Power failure detected`,
     trigger_description: `Corte de energía confirmado: ${totalClients}/${totalClients} ONU/router de la NAP ${nap.name} están apagados por falta de alimentación eléctrica.`,
     event_time: payload.event_time || eventTime
@@ -740,6 +818,49 @@ async function sendCachedNapPowerFailAlert(payload, nap, confirmation, eventTime
   );
   console.log(`[NAP Power Fail] Sent consolidated power alert for ${nap.name}: ${totalClients}/${totalClients} ONU/router offline.`);
   return result;
+}
+
+/**
+ * Decide a NAP-wide incident only after Smart OLT has been queried. Zabbix
+ * evidence is required for every ONU, but it never changes the live Smart OLT
+ * snapshot or decides whether the cause is optical or electrical.
+ */
+async function trySendSmartOltFirstNapIncident(payload, nap, zabbixStatusInfo, eventTime = '') {
+  if (!nap || zabbixStatusInfo.category !== 'loss' || !hasCompleteFreshNapLossEvidence(nap)) {
+    return false;
+  }
+
+  const confirmation = await corroborateTotalNapIncidentWithSmartOlt(nap);
+  if (!confirmation.confirmed) {
+    console.log(`[NAP Correlation] ${nap.name}: Smart OLT did not confirm a total incident (${confirmation.reason}).`);
+    return false;
+  }
+
+  // Replace stale/local states with the coherent Smart OLT snapshot
+  // before calculating totals or rendering the Telegram notification.
+  const changedNaps = applyOnuStatusSnapshot(confirmation.onus || []);
+  changedNaps.forEach((changedNap) => broadcast('nap_status_update', changedNap));
+  const confirmedNap = findCachedNap(nap.name) || nap;
+  const notificationKey = normalizeNapName(confirmedNap.name);
+
+  if (activeNapIncidentNotifications.has(notificationKey)) {
+    return true;
+  }
+
+  activeNapIncidentNotifications.add(notificationKey);
+  cancelPendingAlertsForNap(confirmedNap);
+  try {
+    if (confirmation.category === 'power_fail') {
+      await sendCachedNapPowerFailAlert(payload, confirmedNap, confirmation, eventTime);
+    } else {
+      await sendCachedNapLossAlert(payload, confirmedNap, eventTime);
+    }
+  } catch (error) {
+    activeNapIncidentNotifications.delete(notificationKey);
+    throw error;
+  }
+
+  return true;
 }
 
 const getSettleMs = () => {
@@ -991,6 +1112,16 @@ export async function sendCorrelatedPortReport(incident) {
   const minPercentage = getPositiveNumber(process.env.PORT_OUTAGE_MIN_PERCENT, 30);
   const isPortOutage = offlineCount >= minOffline && Number(percentage) >= minPercentage;
   const zabbixSns = [...sns].filter(Boolean);
+  const portSourceComparison = compareSmartOltWithZabbix(
+    classifySmartOltAlert(oltStatusReason, onu),
+    parseStatusInfo(`${payload.event_name || payload.trigger_name || ''} ${payload.trigger_description || ''}`),
+    payload.event_status || payload.status || 'PROBLEM',
+    { ...onu, status: offlineCount > 0 ? 'Offline' : 'Online' }
+  );
+  if (!portSourceComparison.confirmed) {
+    console.log(`[Port correlation] Suppressed ${hostName} board ${onu.board}/port ${onu.port}: Smart OLT reports no offline ONUs.`);
+    return { sent: false, reason: portSourceComparison.verdict };
+  }
   const offlineDetail = offlineOnus.slice(0, 20)
     .map(candidate => `• 🔴 ${candidate.name || 'Sin nombre'} (<code>${candidate.sn || 'N/A'}</code>)`)
     .join('\n') || '• Smart OLT aún no reporta ONUs Offline.';
@@ -1001,10 +1132,11 @@ export async function sendCorrelatedPortReport(incident) {
   const report = `${title}\n\n` +
     `<b>OLT:</b> ${hostName}\n` +
     `<b>Puerto afectado:</b> Tarjeta ${onu.board} | PON ${onu.port}\n` +
-    `<b>Eventos detectados por Zabbix:</b> ${zabbixSns.length}\n` +
-    `<b>ONUs reportadas por Zabbix:</b> ${zabbixSns.map(sn => `<code>${sn}</code>`).join(', ') || 'N/A'}\n` +
-    `<b>Validación Smart OLT:</b> ${offlineCount}/${totalClients} ONUs Offline (${percentage}%)\n` +
+    `\n🔎 <b>Comparación Smart OLT ↔ Zabbix:</b>\n` +
+    `<b>1. Smart OLT (principal):</b> ${offlineCount}/${totalClients} ONUs Offline (${percentage}%)\n` +
     (oltStatusReason ? `<b>Última causa OLT:</b> ${oltStatusReason}\n` : '') +
+    `<b>2. Zabbix (confirmación):</b> ${zabbixSns.length} evento(s) — ${zabbixSns.map(sn => `<code>${sn}</code>`).join(', ') || 'N/A'}\n` +
+    `<b>Resultado:</b> ${portSourceComparison.verdict}\n` +
     `📅 <b>Hora del evento:</b> <code>${extractEventTime(payload)}</code>\n\n` +
     `<b>Detalle Smart OLT:</b>\n${offlineDetail}` +
     (offlineCount > 20 ? `\n<i>…y ${offlineCount - 20} ONUs más.</i>` : '') +
@@ -1012,6 +1144,7 @@ export async function sendCorrelatedPortReport(incident) {
 
   await sendMessage(targetChatId, report);
   console.log(`[Port correlation] Sent report for ${hostName}, board ${onu.board}, port ${onu.port}. Offline: ${offlineCount}/${totalClients}.`);
+  return { sent: true, offlineCount, totalClients };
 }
 
 /**
@@ -1022,7 +1155,7 @@ export async function sendCorrelatedPortReport(incident) {
  * Helper to generate a detailed NAP connectivity report.
  * If no NAP box is found in the ONU details, falls back to a clean individual customer report.
  */
-async function generateNapReport(onu, eventStatus, severity, hostName, eventName, statusEmoji, statusLabel, priorityTitle, oltStatusReason = '', eventTime = '') {
+async function generateNapReport(onu, eventStatus, severity, hostName, eventName, statusEmoji, statusLabel, priorityTitle, oltStatusReason = '', eventTime = '', sourceComparison = null) {
   // Extract NAP Box identifier from all possible fields
   const napBox = (onu.odb_name ? onu.odb_name.trim() : '') || 
                  (onu.odb ? onu.odb.trim() : '') || 
@@ -1062,6 +1195,7 @@ async function generateNapReport(onu, eventStatus, severity, hostName, eventName
   const onuName = String(onu.name || onu.customer_name || '').trim() || 'Sin nombre';
   const onuSn = String(onu.sn || '').trim().toUpperCase();
   const onuIdentityLine = `👤 <b>ONU/cliente reportado:</b> ${onuName}${onuSn ? ` — <code>${onuSn}</code>` : ''}`;
+  const comparisonText = formatSourceComparison(sourceComparison, eventStatus, onu, oltStatusReason);
 
   // Build technical diagnostic explanation based on failure type
   let techExplanation = '';
@@ -1141,7 +1275,7 @@ ${onuIdentityLine}${singlePowerNapLine}
 • <b>Estado:</b> ${singleEmoji} <b>${singleLabel}</b> (${severity})
 ${eventTime ? `• 📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : ''}${singleReason ? `• 🔌 <b>Causa Reportada OLT:</b> <code>${singleReason}</code>\n` : ''}${singleTechExplanation}
 
-ℹ️ <i>Evento Zabbix: ${eventName}</i>
+${comparisonText ? `${comparisonText}\n\n` : ''}ℹ️ <i>Evento Zabbix: ${eventName}</i>
 `.trim();
   }
 
@@ -1279,7 +1413,7 @@ ${eventTime ? `• 📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : '
 • 🔴 Afectadas (Offline): <b>${totalOffline}</b> (<b>${percentageDown}%</b>)
 • <b>Diagnóstico:</b> ${napWarning}${lastActiveNapInfo}
 
-ℹ️ <i>Evento Zabbix: ${eventName}</i>
+${comparisonText ? `${comparisonText}\n\n` : ''}ℹ️ <i>Evento Zabbix: ${eventName}</i>
 `.trim();
 }
 
@@ -1289,6 +1423,8 @@ ${eventTime ? `• 📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : '
 export async function processAndSendAlert(payload, prefetchedOnu = null, prefetchedOltStatusReason = '', options = {}) {
   const eventName = payload.event_name || payload.trigger_name || '';
   const triggerDesc = payload.trigger_description || '';
+  const zabbixEventName = payload.zabbix_event_name || eventName;
+  const zabbixTriggerDesc = payload.zabbix_trigger_description || triggerDesc;
   const hostName = payload.host_name || payload.host || 'OLT Desconocida';
   const severity = payload.event_severity || payload.severity || 'Warning';
   const eventStatus = payload.event_status || payload.status || 'PROBLEM';
@@ -1357,8 +1493,7 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
             port: nap.port,
             onu_id: client.onu_id || 'N/A'
           };
-          smartOltEnriched = true;
-          console.log(`[Cache Fallback] Resolved SN ${cleanSn} to NAP ${nap.name} from local cache.`);
+          console.log(`[Cache Metadata Fallback] Resolved SN ${cleanSn} to NAP ${nap.name}; this is not treated as live Smart OLT corroboration.`);
           break;
         }
       }
@@ -1380,14 +1515,13 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
           board: cachedNap.board,
           port: cachedNap.port
         };
-        smartOltEnriched = true;
-        console.log(`[Cache Fallback] Resolved direct NAP name "${napFromEvent}" from local cache.`);
+        console.log(`[Cache Metadata Fallback] Resolved direct NAP name "${napFromEvent}"; this is not treated as live Smart OLT corroboration.`);
       }
     }
   }
 
   // Parse alert category & status info
-  const statusInfo = parseStatusInfo(eventName + ' ' + triggerDesc);
+  const statusInfo = parseStatusInfo(zabbixEventName + ' ' + zabbixTriggerDesc);
 
   // The live OLT reason is authoritative whenever it is available. Zabbix
   // contributes the event timing and serial number, but never overwrites the
@@ -1404,8 +1538,26 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
   const alertEmoji = eventStatus === 'OK'
     ? '🟢'
     : smartOltAlert?.emoji || (category === 'power_fail' ? '🔌' : '⚠️');
+  const sourceComparison = smartOltEnriched && onu
+    ? compareSmartOltWithZabbix(smartOltAlert, statusInfo, eventStatus, onu)
+    : null;
 
-  if (sn && eventStatus === 'PROBLEM') {
+  // Smart OLT is the only source allowed to change the operational map state.
+  // Zabbix data is retained as event evidence but does not mark an ONU up/down.
+  if (smartOltEnriched && onu && sn) {
+    const smartStatus = isOnuOnline(onu) ? 'Online' : 'Offline';
+    const smartUpdatedNap = updateOnuStatusInCache(sn, smartStatus, {
+      reason: smartOltAlert?.label || oltStatusReason || 'Estado consultado en Smart OLT',
+      category,
+      eventTime: extractEventTime(payload)
+    });
+    if (smartUpdatedNap) broadcast('nap_status_update', smartUpdatedNap);
+    if (smartStatus === 'Online') {
+      activeNapIncidentNotifications.delete(normalizeNapName(smartUpdatedNap?.name));
+    }
+  }
+
+  if (sn && eventStatus === 'PROBLEM' && smartOltEnriched && sourceComparison?.confirmed) {
     updateHistoryEventDetails(sn, category, smartOltAlert?.label || oltStatusReason || statusInfo.status);
   }
 
@@ -1532,12 +1684,13 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
       eventStatus,
       severity,
       hostName,
-      eventName,
+      zabbixEventName,
       statusEmoji,
       statusLabel,
       priorityTitle,
       oltStatusReason,
-      eventTime
+      eventTime,
+      sourceComparison
     );
   }
 
@@ -1648,77 +1801,27 @@ export async function processZabbixAlert(payload) {
   const eventName   = payload.event_name   || payload.trigger_name || '';
   const triggerDesc = payload.trigger_description || '';
   const eventStatus = payload.event_status || payload.status || 'PROBLEM';
+  const zabbixStatusInfo = parseStatusInfo(eventName + ' ' + triggerDesc);
 
   const sn = payload.onu_sn || payload.sn ||
              extractSerialNumber(eventName) ||
              extractSerialNumber(triggerDesc);
 
-  // ── Immediate cache update & WebSocket broadcast ──────────────────────────
-  // Update the map right away so the frontend reflects the Zabbix event
-  // even before Smart OLT confirms.
+  // ── Register Zabbix evidence without changing the Smart OLT state ─────────
+  // The map/cache must never be changed optimistically from a Zabbix trigger.
+  // Resolve only the NAP identity here so the event can be correlated later;
+  // live status, scope and cause are obtained from Smart OLT first.
   if (sn) {
-    const optimisticStatus = eventStatus === 'PROBLEM' ? 'Offline' : 'Online';
-    const statusInfo = parseStatusInfo(eventName + ' ' + triggerDesc);
-    const eventTime = extractEventTime(payload);
-    const updatedNap = updateOnuStatusInCache(sn, optimisticStatus, {
-      reason: eventName || triggerDesc || (eventStatus === 'PROBLEM' ? 'Falla detectada' : 'Restablecido'),
-      category: statusInfo.category,
-      eventTime
-    });
-    if (updatedNap) broadcast('nap_status_update', updatedNap);
-    const napNotificationKey = normalizeNapName(updatedNap?.name);
+    const cachedNap = findCachedNapBySn(sn);
 
-    if (statusInfo.category === 'loss') {
+    if (zabbixStatusInfo.category === 'loss') {
       if (eventStatus === 'PROBLEM') {
-        registerNapLossEvidence(updatedNap, sn);
+        registerNapLossEvidence(cachedNap, sn);
       } else {
-        clearNapLossEvidence(updatedNap, sn);
+        clearNapLossEvidence(cachedNap, sn);
       }
     }
 
-    if (eventStatus === 'OK' && updatedNap?.status !== 'offline') {
-      activeNapIncidentNotifications.delete(napNotificationKey);
-    }
-
-    // Zabbix must have reported a fresh event for every ONU and Smart OLT must
-    // confirm both the total impact and its real cause. Electrical causes are
-    // reclassified as Power Fail instead of being announced as NAP/LOS.
-    const isTotalNapIncidentCandidate = eventStatus === 'PROBLEM' &&
-      statusInfo.category === 'loss' &&
-      updatedNap?.status === 'offline' &&
-      updatedNap.totalClients >= getMinimumNapClients();
-    if (isTotalNapIncidentCandidate) {
-      if (!hasCompleteFreshNapLossEvidence(updatedNap)) {
-        console.log(`[NAP Corroboration] ${updatedNap.name}: waiting for fresh Zabbix LOS evidence from every ONU.`);
-        return;
-      }
-
-      const oltConfirmation = await corroborateTotalNapIncidentWithSmartOlt(updatedNap);
-      if (!oltConfirmation.confirmed) {
-        console.log(`[NAP Corroboration] ${updatedNap.name}: Smart OLT did not confirm the total incident and its cause (${oltConfirmation.reason}).`);
-        return;
-      }
-
-      if (!activeNapIncidentNotifications.has(napNotificationKey)) {
-        // Reserve the notification before awaiting Telegram so simultaneous
-        // duplicate Zabbix events cannot produce duplicate NAP reports.
-        activeNapIncidentNotifications.add(napNotificationKey);
-        cancelPendingAlertsForNap(updatedNap);
-        try {
-          if (oltConfirmation.category === 'power_fail') {
-            // All devices are offline, but the confirmed cause is electrical.
-            // Report Power Fail in the normal alert group, never NAP/LOS.
-            await sendCachedNapPowerFailAlert(payload, updatedNap, oltConfirmation, eventTime);
-          } else {
-            await sendCachedNapLossAlert(payload, updatedNap, eventTime);
-          }
-        } catch (error) {
-          activeNapIncidentNotifications.delete(napNotificationKey);
-          throw error;
-        }
-      }
-      return;
-    }
   }
 
   // ── OK / Recovery ─────────────────────────────────────────────────────────
@@ -1814,47 +1917,34 @@ export async function processZabbixAlert(payload) {
       console.error(`[Settle] SN ${cleanSn}: Smart OLT query failed after settle — ${err.message}`);
     }
 
-    // ── Compare and either queue a port report or send an individual fallback ─
+    // ── Smart OLT first: persist its live state, then compare with Zabbix ────
     try {
-      // ── LOS Validation: For a Loss of Signal alert, ALL ONUs on this NAP
-      //    must be offline (100%) before we classify it as a full NAP outage.
-      //    If some ONUs are still online, it's an individual ONU failure, not LOS.
-      let losNapName = null;
-      let losCachedNap = null;
-      if (eventStatus !== 'OK') {
-        // Determine NAP from freshOnu or cache fallback
-        const resolvedNap = freshOnu?.odb_name || freshOnu?.odb || null;
-        if (resolvedNap) {
-          losCachedNap = getCachedNaps().find(n => n.name.toUpperCase() === resolvedNap.toUpperCase());
-        } else if (!freshOnu) {
-          // Try resolving from cache by SN
-          for (const nap of getCachedNaps()) {
-            if (nap.clients?.some(c => (c.sn || '').toUpperCase() === cleanSn)) {
-              losCachedNap = nap;
-              break;
-            }
-          }
-        }
+      let smartNap = null;
+      if (freshOnu) {
+        const smartStatus = isOnuOnline(freshOnu) ? 'Online' : 'Offline';
+        smartNap = updateOnuStatusInCache(cleanSn, smartStatus, {
+          reason: freshOltStatusReason || 'Estado consultado en Smart OLT',
+          category: classifySmartOltAlert(freshOltStatusReason, freshOnu).category,
+          eventTime: extractEventTime(payload)
+        });
+        if (smartNap) broadcast('nap_status_update', smartNap);
+        smartNap = smartNap || findCachedNap(getNapNameFromOnu(freshOnu));
+      } else {
+        smartNap = findCachedNapBySn(cleanSn);
+      }
 
-        if (losCachedNap && losCachedNap.clients && losCachedNap.clients.length > 0) {
-          const totalClients = losCachedNap.clients.length;
-          const offlineClients = losCachedNap.clients.filter(c => {
-            const s = (c.status || '').toLowerCase();
-            return s !== 'online' && s !== 'active';
-          }).length;
-          const allOffline = offlineClients === totalClients;
-          console.log(`[LOS Validation] NAP "${losCachedNap.name}": ${offlineClients}/${totalClients} ONUs offline. All offline: ${allOffline}`);
-
-          if (!allOffline && totalClients > 1) {
-            // Not a full LOS — only some ONUs dropped. Send as individual alert without LOS classification.
-            console.log(`[LOS Validation] Partial drop on NAP "${losCachedNap.name}" (${offlineClients}/${totalClients} offline). Not a full LOS. Sending as individual power-fail alert.`);
-            // Override the reason so it doesn't get classified as LOS
-            if (freshOltStatusReason && freshOltStatusReason.includes('Señal')) {
-              freshOltStatusReason = 'Falla Individual (otras ONUs de la NAP operativas)';
-            }
-          } else if (allOffline) {
-            losNapName = losCachedNap.name;
-          }
+      // A NAP-wide alert is emitted only when Smart OLT confirms the complete
+      // scope and cause after Zabbix supplied fresh evidence for every ONU.
+      if (freshOnu && !isOnuOnline(freshOnu)) {
+        const napIncidentSent = await trySendSmartOltFirstNapIncident(
+          payload,
+          smartNap,
+          zabbixStatusInfo,
+          extractEventTime(payload)
+        );
+        if (napIncidentSent) {
+          console.log(`[Correlation] ${smartNap?.name || cleanSn}: consolidated incident sent after Smart OLT-first analysis.`);
+          return;
         }
       }
 
@@ -1874,11 +1964,6 @@ export async function processZabbixAlert(payload) {
         }
       } else {
         console.log(`[Settle] Alert sent for SN ${cleanSn} after Smart OLT corroboration.`);
-        // Feed area outage buffer only when a full LOS on a named NAP is confirmed
-        if (losNapName && losCachedNap && eventStatus !== 'OK') {
-          feedNapOutageBuffer(losNapName, losCachedNap, payload);
-          console.log(`[Area Outage] NAP "${losNapName}" added to area outage buffer.`);
-        }
       }
     } catch (err) {
       console.error(`[Settle] Failed to send Telegram alert for ${cleanSn}:`, err.message);

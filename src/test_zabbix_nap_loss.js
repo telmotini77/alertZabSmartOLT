@@ -79,6 +79,7 @@ try {
 
   // Reset the incident, then simulate misleading Zabbix LOS events while
   // Smart OLT definitively reports that every device lost electrical power.
+  onus.forEach((onu) => { onu.status = 'Online'; });
   await processZabbixAlert({
     event_name: 'ONU FHTTZAB00001: Loss of Signal',
     host_name: 'OLT-TEST',
@@ -91,7 +92,10 @@ try {
     event_status: 'OK',
     event_severity: 'High'
   });
-  onus.forEach((onu) => { onu.offline_reason = 'Dying Gasp'; });
+  onus.forEach((onu) => {
+    onu.status = 'Offline';
+    onu.offline_reason = 'Dying Gasp';
+  });
 
   const beforeTotalPowerAlert = telegramMessages.length;
   await processZabbixAlert({
@@ -116,7 +120,9 @@ try {
   assert.ok(totalPowerMessage.includes('Corte de energía en equipos conectados a:'), 'The alert must associate the power failure with its NAP box');
   assert.ok(totalPowerMessage.includes('NAP-ZABBIX-1'), 'The power alert must include the exact NAP code');
   assert.ok(!totalPowerMessage.includes('CAÍDA TOTAL EN CAJA NAP'), 'Total electrical outage must not be called a NAP outage');
-  assert.ok(!totalPowerMessage.includes('Pérdida de Señal (Loss of Signal)'), 'Total electrical outage must not be called LOS');
+  assert.ok(totalPowerMessage.includes('Smart OLT (principal)'), 'The alert must show Smart OLT as the primary source');
+  assert.ok(totalPowerMessage.includes('Zabbix (confirmación)'), 'The alert must show Zabbix as the confirmation source');
+  assert.ok(totalPowerMessage.includes('Confirmada y clasificada por Smart OLT como Corte de energía'), 'The mismatch must be explicitly reclassified using Smart OLT');
 
   // A Power Fail stays an ONU/router energy incident even if the cached NAP
   // happens to be fully offline; it must never be relabelled as a NAP LOS.

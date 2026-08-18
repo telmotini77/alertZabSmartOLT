@@ -341,12 +341,18 @@ try {
   // Wait for the settle window to expire (100ms in test mode) then Smart OLT re-query + Telegram
   await new Promise(resolve => setTimeout(resolve, 200));
 
-  // Verify that the sent Telegram message includes the Loss header, the Last Active NAP, and event time
+  // Verify that Telegram exposes the Smart OLT-first comparison and the final
+  // reclassification instead of silently copying the Zabbix trigger type.
   let tgMessage = fetchLog.find(log => log.url.includes('/sendMessage'))?.body?.text || '';
-  if ((tgMessage.includes('ALERTA') || tgMessage.includes('RIESGO')) && tgMessage.includes('Hora del Evento:')) {
-    console.log('✅ Visual Priority Styling, Last Active NAP calculation, and Event Time (Loss): PASS');
+  if ((tgMessage.includes('ALERTA') || tgMessage.includes('RIESGO')) &&
+      tgMessage.includes('Hora del Evento:') &&
+      tgMessage.includes('Smart OLT (principal)') &&
+      tgMessage.includes('Zabbix (confirmación)') &&
+      tgMessage.includes('Confirmada y clasificada por Smart OLT como Corte de energía')) {
+    console.log('✅ Smart OLT-first comparison, classification, and event time: PASS');
   } else {
-    console.log('✅ Visual Priority Styling, Last Active NAP calculation, and Event Time (Loss): PASS (message sent)');
+    console.error('❌ Smart OLT-first comparison is missing from the Telegram alert:', tgMessage);
+    process.exit(1);
   }
 
   console.log('\n[2] Testing Direct Zabbix Webhook (Push workflow - Power Fail Event - Settle Window & Send)...');
