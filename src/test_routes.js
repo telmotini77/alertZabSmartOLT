@@ -260,7 +260,7 @@ globalThis.fetch = async (url, options) => {
       json: async () => ({
         ok: true,
         result: {
-          url: 'https://test-url.ngrok-free.app/webhook/telegram',
+          url: 'https://test-api.onrender.com/webhook/telegram',
           has_custom_certificate: false,
           pending_update_count: 0,
           max_connections: 100
@@ -298,7 +298,7 @@ process.env.NAP_CACHE_FILE = 'data/.nap_cache.routes.test.json';
 process.env.TELEGRAM_BOT_TOKEN = '123456:test_token';
 process.env.TELEGRAM_CHAT_ID = '-100987654321';
 process.env.TELEGRAM_MODE = 'webhook'; // Webhook mode is easier to test as it disables the long poll loop
-process.env.PUBLIC_URL = 'https://test-url.ngrok-free.app';
+process.env.PUBLIC_URL = 'https://test-api.onrender.com';
 process.env.PORT = '3001';
 process.env.ZABBIX_API_URL = 'http://test-zabbix.com/api_jsonrpc.php';
 process.env.ZABBIX_API_TOKEN = 'test_zabbix_token';

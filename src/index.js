@@ -124,7 +124,7 @@ process.on('SIGINT',  () => { server.close(() => process.exit(0)); });
 async function setupTelegramWebhook() {
   if (!PUBLIC_URL) {
     console.error('❌ ERROR: PUBLIC_URL must be configured in .env when using webhook mode.');
-    console.error('   Set it to your ngrok or production HTTPS URL (e.g. https://xxxx.ngrok-free.app)');
+    console.error('   Set it to the public HTTPS URL of the deployed API (e.g. https://alertzabsmartolt.onrender.com)');
     return;
   }
 
@@ -212,4 +212,3 @@ async function startTelegramPolling() {
 
   poll();
 }
-
