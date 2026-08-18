@@ -8,6 +8,7 @@ import { getUpdates, setWebhook, getWebhookInfo, deleteWebhook } from './service
 import { initWebSocketServer } from './services/websocket.js';
 import { initCache } from './services/cache.js';
 import { startScanner } from './services/scanner.js';
+import { PUBLIC_URL } from './config/publicUrl.js';
 
 dotenv.config();
 
@@ -32,7 +33,10 @@ if (missing.length > 0) {
 
 const PORT          = process.env.PORT || 3000;
 const TELEGRAM_MODE = (process.env.TELEGRAM_MODE || 'polling').toLowerCase().trim();
-const PUBLIC_URL    = (process.env.PUBLIC_URL || '').trim().replace(/\/$/, ''); // strip trailing slash
+const configuredPublicUrl = (process.env.PUBLIC_URL || '').trim().replace(/\/$/, '');
+if (configuredPublicUrl && configuredPublicUrl !== PUBLIC_URL) {
+  console.warn(`Ignoring stale PUBLIC_URL (${configuredPublicUrl}); using Render URL ${PUBLIC_URL}.`);
+}
 
 // ─── Express app ─────────────────────────────────────────────────────────────
 const app = express();

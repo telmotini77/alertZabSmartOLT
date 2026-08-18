@@ -50,18 +50,15 @@ try {
   await runScanCycle();
   assert.strictEqual(telegramMessages.length, 0, 'The baseline scan must not send a false alert');
 
-  // Both ONUs lose signal before the next scan: one consolidated LOS alert is expected.
+  // Smart OLT alone updates the map but does not notify Telegram. A NAP alert
+  // requires the matching fresh LOS events from Zabbix as corroboration.
   allOffline = true;
   await runScanCycle();
 
-  assert.strictEqual(telegramMessages.length, 1, 'A total NAP outage must send exactly one Telegram alert');
-  const message = telegramMessages[0].text;
-  assert.ok(message.includes('NAP-TEST-1'), 'The alert must identify the affected NAP');
-  assert.ok(message.includes('2</b>'), 'The alert must include the affected ONU count');
-  assert.ok(message.includes('maps.google.com'), 'The alert must include an approximate Google Maps location');
+  assert.strictEqual(telegramMessages.length, 0, 'Smart OLT-only outages must wait for Zabbix corroboration');
   assert.strictEqual(getCachedNaps()[0].status, 'offline', 'The cached NAP status must be fully offline');
 
-  console.log('Total NAP LOS scanner alert: PASS');
+  console.log('Smart OLT NAP outage waits for Zabbix corroboration: PASS');
 } catch (error) {
   console.error('Total NAP LOS scanner alert: FAIL', error);
   process.exitCode = 1;

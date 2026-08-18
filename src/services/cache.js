@@ -273,27 +273,50 @@ export function applyOnuStatusSnapshot(onus) {
     return [];
   }
 
-  const statusBySn = new Map();
+  const snapshotBySn = new Map();
   onus.forEach((onu) => {
     const sn = String(onu?.sn || '').trim().toUpperCase();
     if (sn && onu?.status !== undefined && onu?.status !== null) {
-      statusBySn.set(sn, String(onu.status));
+      const latitude = Number(onu.gps_lat ?? onu.latitude);
+      const longitude = Number(onu.gps_lng ?? onu.longitude);
+      snapshotBySn.set(sn, {
+        status: String(onu.status),
+        latitude: Number.isFinite(latitude) && latitude !== 0 ? latitude : null,
+        longitude: Number.isFinite(longitude) && longitude !== 0 ? longitude : null
+      });
     }
   });
 
-  if (statusBySn.size === 0) return [];
+  if (snapshotBySn.size === 0) return [];
 
   const changedNaps = [];
   cachedNaps.forEach((nap) => {
     let changed = false;
 
     nap.clients.forEach((client) => {
-      const currentStatus = statusBySn.get(String(client.sn || '').toUpperCase());
-      if (currentStatus && String(client.status || '') !== currentStatus) {
-        client.status = currentStatus;
+      const snapshot = snapshotBySn.get(String(client.sn || '').toUpperCase());
+      if (snapshot?.status && String(client.status || '') !== snapshot.status) {
+        client.status = snapshot.status;
         changed = true;
       }
+      if (snapshot?.latitude !== null && snapshot?.longitude !== null) {
+        client.latitude = snapshot.latitude;
+        client.longitude = snapshot.longitude;
+      }
     });
+
+    const coordinates = nap.clients
+      .filter((client) => Number.isFinite(client.latitude) && Number.isFinite(client.longitude))
+      .map((client) => ({ latitude: client.latitude, longitude: client.longitude }));
+    if (coordinates.length > 0) {
+      const latitude = coordinates.reduce((sum, coordinate) => sum + coordinate.latitude, 0) / coordinates.length;
+      const longitude = coordinates.reduce((sum, coordinate) => sum + coordinate.longitude, 0) / coordinates.length;
+      if (nap.latitude !== latitude || nap.longitude !== longitude) {
+        nap.latitude = latitude;
+        nap.longitude = longitude;
+        changed = true;
+      }
+    }
 
     if (!changed) return;
 

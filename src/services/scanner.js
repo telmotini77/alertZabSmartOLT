@@ -1,5 +1,4 @@
 import { fetchAllOnus } from './smartOlt.js';
-import { processAndSendAlert } from '../routes/webhook.js';
 import { applyOnuStatusSnapshot, getCachedNaps } from './cache.js';
 import { broadcast } from './websocket.js';
 import { extractNapBox } from '../utils/parser.js';
@@ -115,21 +114,16 @@ export async function runScanCycle() {
         // Telegram message per ONU.
         if (previousStatus === 'Online' && currentStatus === 'Offline' && !fullyOfflineNapKeys.has(napKey(getNapName(onu)))) {
           individualDropsDetected++;
-          await handleIndividualDrop(onu);
         }
       }
       previousStateMap.set(sn, currentStatus);
-    }
-
-    for (const nap of newlyOfflineNaps) {
-      await handleNapLoss(nap);
     }
 
     if (isFirstScan) {
       console.log(`Radar baseline built: tracking ${previousStateMap.size} ONUs.`);
       isFirstScan = false;
     } else {
-      console.log(`Radar scan complete. Detected ${newlyOfflineNaps.length} total NAP outage(s) and ${individualDropsDetected} individual drop(s).`);
+      console.log(`Radar scan complete. Smart OLT observed ${newlyOfflineNaps.length} total NAP outage(s) and ${individualDropsDetected} individual drop(s); awaiting Zabbix corroboration before Telegram notification.`);
     }
   } catch (error) {
     console.error('Radar scanner encountered an error:', error.message);

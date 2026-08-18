@@ -10,13 +10,13 @@ process.env.TELEGRAM_BOT_TOKEN = '123456:test_token';
 process.env.TELEGRAM_CHAT_ID = '-100987654321';
 process.env.NAP_CACHE_FILE = cacheFile;
 process.env.NAP_LOSS_MIN_ONUS = '2';
-process.env.SMARTOLT_REQUIRE_CORROBORATION = 'false';
+process.env.SMARTOLT_REQUIRE_CORROBORATION = 'true';
 
 const telegramMessages = [];
 const onus = ['FHTTZAB00001', 'FHTTZAB00002'].map((sn, index) => ({
   sn,
   name: `Cliente ${index + 1}`,
-  status: 'Online',
+  status: 'Offline',
   odb_name: 'NAP-ZABBIX-1',
   olt_name: 'OLT-TEST',
   olt_id: '1',
@@ -34,11 +34,18 @@ globalThis.fetch = async (url, options = {}) => {
   if (String(url).includes('/onu/get_all_onus_details')) {
     return { ok: true, status: 200, json: async () => ({ status: true, onus }) };
   }
+  if (String(url).includes('/onu/get_onu_status/')) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ status: true, onu_status: 'Offline', last_down_reason: 'Loss of Signal' })
+    };
+  }
   throw new Error(`Unexpected request: ${url}`);
 };
 
 const { syncCacheWithSmartOlt, getCachedNaps } = await import('./services/cache.js');
-const { processZabbixAlert } = await import('./routes/webhook.js');
+const { processAndSendAlert, processZabbixAlert } = await import('./routes/webhook.js');
 
 try {
   await syncCacheWithSmartOlt();
@@ -69,7 +76,28 @@ try {
   assert.ok(message.includes('maps.google.com'), 'The cache-backed alert must include its approximate location');
   assert.strictEqual(getCachedNaps()[0].status, 'offline', 'The NAP must be fully offline in cache');
 
-  console.log('Zabbix cache-backed total NAP LOS alert: PASS');
+  // A Power Fail stays an ONU/router energy incident even if the cached NAP
+  // happens to be fully offline; it must never be relabelled as a NAP LOS.
+  const powerResult = await processAndSendAlert({
+    event_name: 'ONU FHTTZAB00001: Power failure detected',
+    host_name: 'OLT-TEST',
+    event_status: 'PROBLEM',
+    event_severity: 'High'
+  }, { ...onus[0], status: 'Offline' }, 'Corte de Energía (Dying Gasp)');
+  assert.strictEqual(powerResult.sent, true, 'A corroborated Power Fail must be sent');
+  const powerMessage = telegramMessages.at(-1).text;
+  assert.ok(powerMessage.includes('CORTE DE ENERGÍA'), 'Power Fail must use the energy alert title');
+  assert.ok(!powerMessage.includes('CAÍDA TOTAL EN CAJA NAP'), 'Power Fail must not be relabelled as a NAP outage');
+
+  const mismatchResult = await processAndSendAlert({
+    event_name: 'ONU FHTTZAB00001: Loss of Signal',
+    host_name: 'OLT-TEST',
+    event_status: 'PROBLEM',
+    event_severity: 'High'
+  }, { ...onus[0], status: 'Offline' }, 'Corte de Energía (Dying Gasp)');
+  assert.strictEqual(mismatchResult.sent, false, 'Conflicting Zabbix and Smart OLT causes must be suppressed');
+
+  console.log('Zabbix NAP/Power Fail corroboration rules: PASS');
 } catch (error) {
   console.error('Zabbix cache-backed total NAP LOS alert: FAIL', error);
   process.exitCode = 1;

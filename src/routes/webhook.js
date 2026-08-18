@@ -2,13 +2,14 @@ import express from 'express';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { findOnuBySn, findOnusByAddressQuery, findOnusByPort, getOnuStatus } from '../services/smartOlt.js';
+import { fetchAllOnus, findOnuBySn, findOnusByAddressQuery, findOnusByPort, getOnuStatus } from '../services/smartOlt.js';
 import { sendMessage, replyToMessage } from '../services/telegram.js';
 import { extractSerialNumber, extractNapBox, parseStatusInfo, extractEventTime, formatDateTime, extractBoardAndPort } from '../utils/parser.js';
 import { broadcast } from '../services/websocket.js';
 import { updateOnuStatusInCache, getCachedNaps, updateNapCoordinates, updateNapCoordinatesBulk, getStatusHistory, deleteHistoryItem, clearHistory, resolveHistoryItem, updateHistoryEventDetails } from '../services/cache.js';
 import { getActiveTriggers } from '../services/zabbix.js';
 import { dbGetOpticalHistory, dbSaveOpticalRecord } from '../services/db.js';
+import { PUBLIC_URL } from '../config/publicUrl.js';
 
 const router = express.Router();
 const DEFAULT_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
@@ -58,6 +59,103 @@ const getMinimumNapClients = () => {
 // Avoid repeat notifications while the same NAP remains fully offline. The
 // state is cleared as soon as any ONU in that NAP recovers.
 const activeNapLossNotifications = new Set();
+
+// A total NAP outage must be observed by both monitoring sources.  Zabbix
+// contributes one fresh LOS event per ONU and Smart OLT contributes the live
+// state of every ONU in the NAP.  Keeping this short-lived evidence prevents
+// old/offline cache entries from being mistaken for a new NAP outage.
+const zabbixNapLossEvidence = new Map();
+
+const getNapEvidenceTtlMs = () =>
+  getPositiveNumber(process.env.NAP_ZABBIX_EVIDENCE_SECS, 300) * 1_000;
+
+const isOnuOnline = (onu) => ['online', 'active'].includes(String(onu?.status || '').toLowerCase());
+
+const getFailureCategoryFromOltReason = (reason) => {
+  const text = String(reason || '').toLowerCase();
+  if (text.includes('dying') || text.includes('power') || text.includes('gasp') || text.includes('energ')) {
+    return 'power_fail';
+  }
+  if (text.includes('los') || text.includes('signal') || text.includes('señal') || text.includes('fibra')) {
+    return 'loss';
+  }
+  return 'unknown';
+};
+
+const getNapNameFromOnu = (onu) => String(
+  onu?.odb_name || onu?.odb || extractNapBox(onu?.address) || extractNapBox(onu?.description) || ''
+).trim();
+
+function registerNapLossEvidence(nap, sn) {
+  const key = normalizeNapName(nap?.name);
+  const normalizedSn = String(sn || '').trim().toUpperCase();
+  if (!key || !normalizedSn) return;
+
+  const now = Date.now();
+  const entry = zabbixNapLossEvidence.get(key) || new Map();
+  entry.set(normalizedSn, now);
+  zabbixNapLossEvidence.set(key, entry);
+}
+
+function clearNapLossEvidence(nap, sn) {
+  const key = normalizeNapName(nap?.name);
+  const normalizedSn = String(sn || '').trim().toUpperCase();
+  const entry = zabbixNapLossEvidence.get(key);
+  if (!entry || !normalizedSn) return;
+  entry.delete(normalizedSn);
+  if (entry.size === 0) zabbixNapLossEvidence.delete(key);
+}
+
+function hasCompleteFreshNapLossEvidence(nap) {
+  const key = normalizeNapName(nap?.name);
+  const entry = zabbixNapLossEvidence.get(key);
+  const clients = nap?.clients || [];
+  if (!entry || clients.length === 0) return false;
+
+  const cutoff = Date.now() - getNapEvidenceTtlMs();
+  for (const [sn, timestamp] of entry) {
+    if (timestamp < cutoff) entry.delete(sn);
+  }
+  if (entry.size === 0) {
+    zabbixNapLossEvidence.delete(key);
+    return false;
+  }
+
+  return clients.every((client) => {
+    const sn = String(client.sn || '').trim().toUpperCase();
+    return sn && entry.has(sn);
+  });
+}
+
+async function corroborateTotalNapLossWithSmartOlt(nap) {
+  const napName = String(nap?.name || '').trim();
+  if (!napName) return { confirmed: false, reason: 'NAP not identified' };
+
+  try {
+    let returnedOnus = await findOnusByAddressQuery(napName);
+    const targetKey = normalizeNapName(napName);
+    const minimumClients = getMinimumNapClients();
+    let onus = returnedOnus.filter((onu) => normalizeNapName(getNapNameFromOnu(onu)) === targetKey);
+
+    // Some Smart OLT installations store the NAP only in odb_name, which the
+    // address query cannot search. Fall back to a complete OLT snapshot and
+    // filter it locally so the corroboration remains accurate.
+    if (onus.length < minimumClients) {
+      returnedOnus = await fetchAllOnus();
+      onus = returnedOnus.filter((onu) => normalizeNapName(getNapNameFromOnu(onu)) === targetKey);
+    }
+
+    if (onus.length < minimumClients) {
+      return { confirmed: false, reason: `Smart OLT returned only ${onus.length} ONU(s) for ${napName}` };
+    }
+    if (onus.some(isOnuOnline)) {
+      return { confirmed: false, reason: 'Smart OLT still reports online ONUs in the NAP' };
+    }
+    return { confirmed: true, onus };
+  } catch (error) {
+    return { confirmed: false, reason: `Smart OLT query failed: ${error.message}` };
+  }
+}
 
 // GET /webhook/naps - Returns current status of all NAPs
 router.get('/naps', (req, res) => {
@@ -301,7 +399,7 @@ export async function syncActiveProblems(targetChatId = DEFAULT_CHAT_ID) {
             if (liveStatus && liveStatus.status) {
               onu.status = liveStatus.onu_status || liveStatus.status_desc || (liveStatus.status === true ? 'online' : 'offline'); // Override stale API cache with real-time hardware status
               const reason = (liveStatus.last_down_reason || liveStatus.offline_reason || '').toLowerCase();
-              if (reason.includes('dying') || reason.includes('power') || reason.includes('gasp') || reason.includes('off')) {
+              if (reason.includes('dying') || reason.includes('power') || reason.includes('gasp')) {
                 oltReason = 'Corte de Energía (Dying Gasp)';
               } else if (reason.includes('los') || reason.includes('signal') || reason.includes('fibra') || reason.includes('link') || reason.includes('down')) {
                 oltReason = 'Pérdida de Señal (LOS)';
@@ -810,11 +908,10 @@ ${eventTime ? `• 📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : '
   const totalOnline = totalClients - totalOffline;
   const percentageDown = ((totalOffline / totalClients) * 100).toFixed(1);
 
-  // Business Rules:
-  // - If the NAP loses signal (all clients down or totalOnline === 0 in multi-client NAP) -> Loss of Signal
-  // - If only an individual ONU in the NAP is not detected (totalOnline > 0) -> Power Fail
-  const isNapTotalLoss = (totalClients > 1 && totalOffline === totalClients) || (totalClients > 1 && totalOnline === 0);
-  const isNapPartialLoss = totalOffline > 1 && totalOnline > 0;
+  // A Power Fail is always reported as an ONU/router power incident.  Even if
+  // several clients are down, it must never be relabelled as a fibre/NAP loss.
+  const isNapTotalLoss = !isPower && ((totalClients > 1 && totalOffline === totalClients) || (totalClients > 1 && totalOnline === 0));
+  const isNapPartialLoss = !isPower && totalOffline > 1 && totalOnline > 0;
   const isIndividualIncident = totalOffline <= 1 || totalOnline > 0;
 
   let effectiveEmoji = statusEmoji;
@@ -857,11 +954,13 @@ ${eventTime ? `• 📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : '
       : '\n💡 <b>Diagnóstico Técnico:</b> Pérdida de potencia óptica (LOS) en la acometida individual.\n• <b>Causas probables:</b> Acometida rota, conector suelto o atenuación excesiva.';
   }
 
-  const napWarning = totalOffline === totalClients 
+  const napWarning = isNapTotalLoss
     ? '🛑 <b>¡CAÍDA TOTAL DE LA CAJA NAP!</b> (Todas las conexiones están sin servicio)'
-    : totalOffline > 1 
+    : isNapPartialLoss
       ? `⚠️ <b>¡CAÍDA PARCIAL EN LA CAJA NAP!</b> (${totalOffline} de ${totalClients} conexiones caídas)`
-      : 'ℹ️ <b>Incidente Individual</b> (1 conexión afectada; las demás conexiones de la NAP operan normal)';
+      : isPower
+        ? 'ℹ️ <b>Incidente de energía en ONU/router</b> (no clasificado como caída de NAP)'
+        : 'ℹ️ <b>Incidente Individual</b> (1 conexión afectada; las demás conexiones de la NAP operan normal)';
 
   let lastActiveNapInfo = '';
   if (eventStatus !== 'OK' && isNapTotalLoss) {
@@ -964,7 +1063,7 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
             const reason = (liveStatus.last_down_reason || liveStatus.offline_reason || '').toLowerCase();
             console.log(`Smart OLT live reason for ${sn}: "${reason}"`);
             
-            if (reason.includes('dying') || reason.includes('power') || reason.includes('gasp') || reason.includes('off')) {
+            if (reason.includes('dying') || reason.includes('power') || reason.includes('gasp')) {
               oltStatusReason = 'Corte de Energía (Dying Gasp)';
             } else if (reason.includes('los') || reason.includes('signal') || reason.includes('fibra') || reason.includes('link') || reason.includes('down')) {
               oltStatusReason = 'Pérdida de Señal (LOS)';
@@ -1030,12 +1129,10 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
   // Parse alert category & status info
   const statusInfo = parseStatusInfo(eventName + ' ' + triggerDesc);
   
-  let category = statusInfo.category;
-  if (oltStatusReason === 'Corte de Energía (Dying Gasp)') {
-    category = 'power_fail';
-  } else if (oltStatusReason === 'Pérdida de Señal (LOS)') {
-    category = 'loss';
-  }
+  // The alert type comes from Zabbix. Smart OLT corroborates it; it must not
+  // silently turn a Zabbix LOS event into a Power Fail (or the reverse).
+  const category = statusInfo.category;
+  const oltReasonCategory = getFailureCategoryFromOltReason(oltStatusReason);
 
   if (sn && eventStatus === 'PROBLEM') {
     updateHistoryEventDetails(sn, category, oltStatusReason || statusInfo.status);
@@ -1053,6 +1150,15 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
         return { sn, enriched: false, sent: false, reason: 'Not enriched' };
       }
       console.warn(`[Smart OLT fallback] Sending ${category} alert for SN "${sn}" using Zabbix data only.`);
+    }
+
+    if (oltReasonCategory !== 'unknown' && oltReasonCategory !== category) {
+      const reason = `Cause mismatch (Zabbix ${category}, Smart OLT ${oltReasonCategory})`;
+      if (REQUIRE_SMARTOLT_CORROBORATION) {
+        console.log(`[Corroboration Blocked] ${reason} for SN "${sn}". Skipping Telegram notification.`);
+        return { sn, enriched: true, sent: false, reason };
+      }
+      console.warn(`[Corroboration Mismatch Ignored] ${reason}.`);
     }
     
     // Compare states only when Smart OLT returned an ONU to compare against.
@@ -1303,19 +1409,37 @@ export async function processZabbixAlert(payload) {
     if (updatedNap) broadcast('nap_status_update', updatedNap);
     const napNotificationKey = normalizeNapName(updatedNap?.name);
 
+    if (statusInfo.category === 'loss') {
+      if (eventStatus === 'PROBLEM') {
+        registerNapLossEvidence(updatedNap, sn);
+      } else {
+        clearNapLossEvidence(updatedNap, sn);
+      }
+    }
+
     if (eventStatus === 'OK' && updatedNap?.status !== 'offline') {
       activeNapLossNotifications.delete(napNotificationKey);
     }
 
-    // Smart OLT can be unreachable precisely during a fibre outage. Once
-    // Zabbix has reported every router in the NAP Offline, notify Telegram
-    // immediately from the confirmed cache rather than waiting for an OLT API
-    // query that may time out.
+    // A NAP alert is reserved exclusively for a fibre/LOS incident.  Zabbix
+    // must have reported a fresh LOS for every ONU, and Smart OLT must confirm
+    // that every ONU in the same NAP is currently offline.
     const isTotalNapLoss = eventStatus === 'PROBLEM' &&
-      (statusInfo.category === 'loss' || statusInfo.category === 'power_fail') &&
+      statusInfo.category === 'loss' &&
       updatedNap?.status === 'offline' &&
       updatedNap.totalClients >= getMinimumNapClients();
     if (isTotalNapLoss) {
+      if (!hasCompleteFreshNapLossEvidence(updatedNap)) {
+        console.log(`[NAP Corroboration] ${updatedNap.name}: waiting for fresh Zabbix LOS evidence from every ONU.`);
+        return;
+      }
+
+      const oltConfirmation = await corroborateTotalNapLossWithSmartOlt(updatedNap);
+      if (!oltConfirmation.confirmed) {
+        console.log(`[NAP Corroboration] ${updatedNap.name}: Smart OLT did not confirm total LOS (${oltConfirmation.reason}).`);
+        return;
+      }
+
       if (!activeNapLossNotifications.has(napNotificationKey)) {
         // Reserve the notification before awaiting Telegram so simultaneous
         // duplicate Zabbix events cannot produce duplicate NAP reports.
@@ -1418,7 +1542,7 @@ export async function processZabbixAlert(payload) {
           const reason = (liveStatus.last_down_reason || liveStatus.offline_reason || '').toLowerCase();
           console.log(`[Settle] SN ${cleanSn}: Smart OLT live reason = "${reason}"`);
 
-          if (reason.includes('dying') || reason.includes('power') || reason.includes('gasp') || reason.includes('off')) {
+          if (reason.includes('dying') || reason.includes('power') || reason.includes('gasp')) {
             freshOltStatusReason = 'Corte de Energía (Dying Gasp)';
           } else if (reason.includes('los') || reason.includes('signal') || reason.includes('fibra') || reason.includes('link') || reason.includes('down')) {
             freshOltStatusReason = 'Pérdida de Señal (LOS)';
@@ -1800,7 +1924,7 @@ Comandos disponibles:
             const reason = (liveStatus.last_down_reason || liveStatus.offline_reason || '').toLowerCase();
             console.log(`Smart OLT live reason for ${sn}: "${reason}"`);
             
-            if (reason.includes('dying') || reason.includes('power') || reason.includes('gasp') || reason.includes('off')) {
+            if (reason.includes('dying') || reason.includes('power') || reason.includes('gasp')) {
               oltStatusReason = 'Corte de Energía (Dying Gasp)';
             } else if (reason.includes('los') || reason.includes('signal') || reason.includes('fibra') || reason.includes('link') || reason.includes('down')) {
               oltStatusReason = 'Pérdida de Señal (LOS)';
@@ -1812,12 +1936,8 @@ Comandos disponibles:
           console.error(`[Telegram bot Smart OLT live status query failed]:`, err.message);
         }
 
-        let category = statusInfo.category;
-        if (oltStatusReason === 'Corte de Energía (Dying Gasp)') {
-          category = 'power_fail';
-        } else if (oltStatusReason === 'Pérdida de Señal (LOS)') {
-          category = 'loss';
-        }
+        const category = statusInfo.category;
+        const oltReasonCategory = getFailureCategoryFromOltReason(oltStatusReason);
 
         // Corroboration verification for bot
         let canSend = true;
@@ -1829,6 +1949,10 @@ Comandos disponibles:
             canSend = false;
           } else if (!isProblem && !isOltOnline) {
             console.log(`[Corroboration Blocked] Bot: Zabbix reports OK but Smart OLT reports ONU as Offline/Down for SN "${sn}". Skipping reply.`);
+            canSend = false;
+          }
+          if (oltReasonCategory !== 'unknown' && oltReasonCategory !== category) {
+            console.log(`[Corroboration Blocked] Bot: cause mismatch (Zabbix ${category}, Smart OLT ${oltReasonCategory}) for SN "${sn}".`);
             canSend = false;
           }
         }

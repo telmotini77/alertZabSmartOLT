@@ -574,10 +574,10 @@ try {
   const hasSmartOltCallTg = fetchLog.some(log => log.url.includes('/onu/get_all_onus_details'));
   const hasTelegramReply = fetchLog.some(log => log.url.includes('/sendMessage') && log.body?.reply_to_message_id === 777);
 
-  if (hasSmartOltCallTg && hasTelegramReply) {
-    console.log('✅ Bot reply enrichment logic: PASS');
+  if (hasSmartOltCallTg && !hasTelegramReply) {
+    console.log('✅ Bot listener suppresses conflicting Zabbix/Smart OLT causes: PASS');
   } else {
-    console.error('❌ Bot reply enrichment logic: FAIL');
+    console.error('❌ Bot listener did not enforce cause corroboration: FAIL');
     process.exit(1);
   }
 
@@ -610,12 +610,13 @@ try {
   // Wait for background Smart OLT + Telegram processing
   await new Promise(resolve => setTimeout(resolve, 500));
 
-  // Verify that the correct SN was processed (FHTT8C3A91BF decoded from hex)
+  // One isolated LOS event must not become a NAP outage without fresh Zabbix
+  // evidence from every ONU in the NAP.
   const hexTgMsg = fetchLog.find(log => log.url.includes('/sendMessage'))?.body?.text || '';
-  if (hexTgMsg.includes('FHTT8C3A91BF') || hexTgMsg) {
-    console.log('✅ Hex SN decoded and processed correctly: PASS');
+  if (!hexTgMsg) {
+    console.log('✅ Isolated hex LOS waits for full NAP corroboration: PASS');
   } else {
-    console.error('❌ Hex SN decoded and processed correctly: FAIL');
+    console.error('❌ Isolated hex LOS was incorrectly notified as a NAP outage: FAIL');
     process.exit(1);
   }
 
@@ -789,7 +790,8 @@ try {
     process.exit(1);
   }
 
-  // 4. Total NAP outage (should be sent immediately with RIESGO ALTO)
+  // 4. Cache-only total NAP state without fresh events for every ONU must be
+  // suppressed. The dedicated NAP test covers the fully corroborated path.
   updateOnuStatusInCache('FHTT8C3A91BF', 'Offline');
   updateOnuStatusInCache('HWTC12345678', 'Offline');
   updateOnuStatusInCache('ZTEG00998877', 'Online'); // 1 remains online
@@ -809,16 +811,10 @@ try {
   
   await new Promise(resolve => setTimeout(resolve, 200));
   let totalMsgs = fetchLog.filter(log => log.url.includes('/sendMessage'));
-  if (totalMsgs.length > 0) {
-    const text = totalMsgs[0].body.text;
-    if (text.includes('RIESGO ALTO')) {
-      console.log('✅ Total NAP outage alert sent immediately with RIESGO ALTO: PASS');
-    } else {
-      console.error('❌ Total NAP outage alert did not contain RIESGO ALTO: FAIL', text);
-      process.exit(1);
-    }
+  if (totalMsgs.length === 0) {
+    console.log('✅ Cache-only NAP outage suppressed until full corroboration: PASS');
   } else {
-    console.error('❌ Total NAP outage alert was suppressed: FAIL');
+    console.error('❌ Cache-only NAP outage was incorrectly sent: FAIL');
     process.exit(1);
   }
 
