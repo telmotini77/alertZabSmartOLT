@@ -318,7 +318,9 @@ function isSmartOltRateLimitError(error) {
 async function enrichOnusWithLiveState(onus = []) {
   const enriched = onus.map((onu) => ({ ...onu }));
   const configuredLimit = Number.parseInt(process.env.PORT_CAUSE_LOOKUP_LIMIT, 10);
-  const lookupLimit = Number.isInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : 32;
+  const lookupLimit = Number.isInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : 6;
+  const configuredConcurrency = Number.parseInt(process.env.PORT_CAUSE_LOOKUP_CONCURRENCY, 10);
+  const lookupConcurrency = Number.isInteger(configuredConcurrency) && configuredConcurrency > 0 ? configuredConcurrency : 2;
   const candidates = enriched
     .map((onu, index) => ({ onu, index }))
     .filter(({ onu }) => onu.external_id)
@@ -326,8 +328,8 @@ async function enrichOnusWithLiveState(onus = []) {
 
   // Keep a small concurrency window so a large port outage does not flood the
   // Smart OLT API, while still resolving small incidents quickly.
-  for (let offset = 0; offset < candidates.length; offset += 5) {
-    const batch = candidates.slice(offset, offset + 5);
+  for (let offset = 0; offset < candidates.length; offset += lookupConcurrency) {
+    const batch = candidates.slice(offset, offset + lookupConcurrency);
     await Promise.all(batch.map(async ({ onu, index }) => {
       try {
         const liveStatus = await getOnuStatus(onu.external_id);

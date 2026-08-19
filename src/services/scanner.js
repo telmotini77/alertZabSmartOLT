@@ -104,9 +104,10 @@ function seedPreviousStateFromCache() {
  * Start the Smart OLT background radar scanner.
  */
 export function startScanner() {
-  const scanIntervalMinutes = parseInt(process.env.SMARTOLT_SCAN_INTERVAL_MINUTES, 10);
+  const configuredIntervalMinutes = parseInt(process.env.SMARTOLT_SCAN_INTERVAL_MINUTES, 10);
+  const scanIntervalMinutes = Math.max(configuredIntervalMinutes || 0, 6);
 
-  if (isNaN(scanIntervalMinutes) || scanIntervalMinutes <= 0) {
+  if (isNaN(configuredIntervalMinutes) || configuredIntervalMinutes <= 0) {
     scannerRuntimeStatus.enabled = false;
     scannerRuntimeStatus.lastError = 'SMARTOLT_SCAN_INTERVAL_MINUTES is not configured';
     console.log('Smart OLT Radar Scanner is disabled (SMARTOLT_SCAN_INTERVAL_MINUTES is not set or invalid).');
@@ -117,6 +118,9 @@ export function startScanner() {
   scannerRuntimeStatus.enabled = true;
   scannerRuntimeStatus.intervalMinutes = scanIntervalMinutes;
   scannerRuntimeStatus.lastError = null;
+  if (configuredIntervalMinutes < 6) {
+    console.log(`Smart OLT Radar Scanner interval raised from ${configuredIntervalMinutes} to 6 minute(s) to protect the API quota.`);
+  }
   console.log(`Starting Smart OLT Radar Scanner. Interval: ${scanIntervalMinutes} minute(s).`);
 
   // Preserve the last confirmed Smart OLT state across deployments. If the

@@ -5,6 +5,64 @@ const SMARTOLT_SUBDOMAIN = (process.env.SMARTOLT_SUBDOMAIN || '').trim();
 const SMARTOLT_API_KEY   = (process.env.SMARTOLT_API_KEY   || '').trim();
 
 const DEFAULT_TIMEOUT_MS = 5_000;
+const FULL_SNAPSHOT_DEFAULT_TTL_MS = 4 * 60 * 1_000;
+
+let fullSnapshotCache = {
+  onus: null,
+  fetchedAt: 0,
+  inFlight: null
+};
+let liveStatusQueue = Promise.resolve();
+const liveStatusRequestTimes = [];
+
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const getPositiveInteger = (value, fallback) => {
+  const parsed = Number.parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+const getFullSnapshotTtlMs = () =>
+  getPositiveInteger(process.env.SMARTOLT_SNAPSHOT_CACHE_SECONDS, FULL_SNAPSHOT_DEFAULT_TTL_MS / 1_000) * 1_000;
+
+const getLiveStatusWindowMs = () =>
+  getPositiveInteger(process.env.SMARTOLT_LIVE_STATUS_WINDOW_SECONDS, 180) * 1_000;
+
+const getLiveStatusWindowLimit = () =>
+  getPositiveInteger(process.env.SMARTOLT_LIVE_STATUS_MAX_REQUESTS, 6);
+
+/**
+ * Limit live ONU status reads in a shared queue. Full inventory reads are
+ * already paced by the scanner; this protects bursty alert correlations from
+ * exhausting Smart OLT's hourly API allowance.
+ */
+async function acquireLiveStatusSlot() {
+  if (process.env.NODE_ENV === 'test') return;
+
+  const queuedTask = liveStatusQueue.then(async () => {
+    const windowMs = getLiveStatusWindowMs();
+    const limit = getLiveStatusWindowLimit();
+
+    while (true) {
+      const now = Date.now();
+      while (liveStatusRequestTimes.length > 0 && liveStatusRequestTimes[0] <= now - windowMs) {
+        liveStatusRequestTimes.shift();
+      }
+
+      if (liveStatusRequestTimes.length < limit) {
+        liveStatusRequestTimes.push(Date.now());
+        return;
+      }
+
+      const retryAt = liveStatusRequestTimes[0] + windowMs;
+      await wait(Math.max(1, retryAt - now));
+    }
+  });
+
+  // Keep the queue usable after any unexpected error in a caller.
+  liveStatusQueue = queuedTask.catch(() => {});
+  await queuedTask;
+}
 
 const getHeaders = () => ({
   'X-Token': SMARTOLT_API_KEY,
@@ -78,6 +136,8 @@ export async function findOnuBySn(sn) {
  */
 export async function getOnuStatus(externalId) {
   if (!externalId) return null;
+
+  await acquireLiveStatusSlot();
   
   const url = `${getBaseUrl()}/onu/get_onu_status/${encodeURIComponent(externalId)}`;
   
@@ -148,9 +208,9 @@ export async function findOnusByPort(oltId, board, port, oltName) {
     // If we don't have it, we must fetch all ONUs and filter locally.
     try {
       const allOnus = await fetchAllOnus();
-      
+
       const portOnus = allOnus.filter(o => String(o.board) === String(board) && String(o.port) === String(port));
-      
+
       if (oltName) {
         const zHost = String(oltName).toLowerCase();
         const matched = portOnus.filter(o => {
@@ -201,26 +261,49 @@ export async function findOnusByPort(oltId, board, port, oltName) {
  * Fetch all ONUs in the system.
  * @returns {Promise<Array>} - List of all ONUs
  */
-export async function fetchAllOnus() {
-  const url = `${getBaseUrl()}/onu/get_all_onus_details`;
-  
-  try {
-    const response = await fetchWithTimeout(url, { method: 'GET', headers: getHeaders() }, 25_000);
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Smart OLT API responded with status ${response.status}: ${errorText}`);
-    }
-    
-    const data = await response.json();
-    if (data && data.status && data.onus) {
-      return data.onus;
-    }
-    return [];
-  } catch (error) {
-    console.error('Error fetching all ONUs from Smart OLT:', error.message);
-    throw error;
+export async function fetchAllOnus({ forceRefresh = false } = {}) {
+  const now = Date.now();
+  const snapshotTtlMs = getFullSnapshotTtlMs();
+
+  if (process.env.NODE_ENV !== 'test' && !forceRefresh && fullSnapshotCache.onus &&
+      now - fullSnapshotCache.fetchedAt < snapshotTtlMs) {
+    return fullSnapshotCache.onus;
   }
+  if (process.env.NODE_ENV !== 'test' && !forceRefresh && fullSnapshotCache.inFlight) {
+    return fullSnapshotCache.inFlight;
+  }
+
+  const url = `${getBaseUrl()}/onu/get_all_onus_details`;
+
+  const request = (async () => {
+    try {
+      const response = await fetchWithTimeout(url, { method: 'GET', headers: getHeaders() }, 25_000);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Smart OLT API responded with status ${response.status}: ${errorText}`);
+      }
+
+      const data = await response.json();
+      if (data && data.status && data.onus) {
+        if (process.env.NODE_ENV !== 'test') {
+          fullSnapshotCache = { onus: data.onus, fetchedAt: Date.now(), inFlight: null };
+        }
+        return data.onus;
+      }
+      return [];
+    } catch (error) {
+      console.error('Error fetching all ONUs from Smart OLT:', error.message);
+      throw error;
+    } finally {
+      if (fullSnapshotCache.inFlight) fullSnapshotCache.inFlight = null;
+    }
+  })();
+
+  if (process.env.NODE_ENV !== 'test') {
+    fullSnapshotCache.inFlight = request;
+  }
+  return request;
 }
 
 
