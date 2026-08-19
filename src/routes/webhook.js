@@ -366,6 +366,20 @@ function determineRequiredFailureType(onus = [], fallbackText = '') {
   return null;
 }
 
+/**
+ * A bare Smart OLT Offline state is not an incident type. These ONUs are
+ * frequently permanently disconnected and must be excluded from automatic
+ * Telegram reports, port correlation and NAP impact totals.
+ */
+function getExplicitSmartOltFailureCategory(onu = {}) {
+  return getFailureCategoryFromOltReason(
+    onu.offline_reason || onu.last_down_reason || onu.status_reason || onu.reason || onu.status || ''
+  );
+}
+
+const isReportableSmartOltFailure = (onu) =>
+  ['power_fail', 'loss'].includes(getExplicitSmartOltFailureCategory(onu));
+
 function hasExplicitZabbixFailureType(eventName = '', triggerDescription = '', category = '') {
   const text = `${eventName} ${triggerDescription}`
     .normalize('NFD')
@@ -775,11 +789,21 @@ router.post('/smartolt', async (req, res) => {
       console.log(`[Smart OLT Webhook] Event for ${normalizedSn} suppressed because the ONU/customer is not registered in the local Smart OLT cache.`);
       return res.status(202).json({ status: 'ignored', reason: 'Unknown ONU/customer' });
     }
+    const webhookFailureCategory = classifySmartOltAlert(overrideReason, {
+      status: eventStatus === 'PROBLEM' ? 'Offline' : 'Online'
+    }).category;
+    const webhookStatus = eventStatus === 'OK'
+      ? 'Online'
+      : webhookFailureCategory === 'power_fail'
+        ? 'Power fail'
+        : webhookFailureCategory === 'loss'
+          ? 'LOS'
+          : 'Offline';
     const webhookOnu = {
       ...(payload.onu || {}),
       sn: normalizedSn,
       name: payload.onu?.name || payload.customer_name || cachedClient?.name,
-      status: eventStatus === 'PROBLEM' ? 'Offline' : 'Online',
+      status: webhookStatus,
       odb_name: payload.onu?.odb_name || payload.odb_name || cachedNap?.name,
       olt_name: payload.onu?.olt_name || payload.olt_name || cachedNap?.olt_name,
       board: payload.onu?.board ?? payload.board ?? cachedNap?.board,
@@ -789,8 +813,10 @@ router.post('/smartolt', async (req, res) => {
     const result = await processAndSendAlert(zabbixLikePayload, webhookOnu, overrideReason);
     
     // Update local map
-    const optimisticStatus = eventStatus === 'PROBLEM' ? 'Offline' : 'Online';
-    const updatedNap = updateOnuStatusInCache(normalizedSn, optimisticStatus);
+    const updatedNap = updateOnuStatusInCache(normalizedSn, webhookStatus, {
+      reason: overrideReason || 'Evento nativo de Smart OLT',
+      category: webhookFailureCategory
+    });
     if (updatedNap) broadcast('nap_status_update', updatedNap);
 
     return res.json({ status: 'success', processed: sn, result });
@@ -880,8 +906,17 @@ export async function syncActiveProblems(targetChatId = DEFAULT_CHAT_ID) {
             `• <b>Hora del corte Smart OLT:</b> <code>${oltDownTime}</code>`
           );
           
-          const cacheStatus = isOltOnline ? 'Online' : 'Offline';
-          const updatedNap = updateOnuStatusInCache(sn, cacheStatus);
+          const cacheStatus = isOltOnline
+            ? 'Online'
+            : failureCategory === 'power_fail'
+              ? 'Power fail'
+              : failureCategory === 'loss'
+                ? 'LOS'
+                : 'Offline';
+          const updatedNap = updateOnuStatusInCache(sn, cacheStatus, {
+            reason: oltReason,
+            category: failureCategory
+          });
           if (updatedNap) {
             broadcast('nap_status_update', updatedNap);
           }
@@ -939,10 +974,21 @@ async function sendCachedNapLossAlert(payload, nap, eventTime = '') {
   if (!referenceClient) return { sent: false, reason: 'NAP has no clients' };
 
   const totalClients = nap.totalClients || nap.clients.length;
+  // This path runs only after Smart OLT corroborated a NAP-wide LOS event.
+  // Store the confirmed type, not a generic Offline state, so the detailed
+  // report lists only the actual LOS clients.
+  nap.clients.forEach((client) => {
+    updateOnuStatusInCache(client.sn, 'LOS', {
+      reason: 'Pérdida de Señal (LOS)',
+      category: 'loss',
+      eventTime,
+      forceRecord: true
+    });
+  });
   const representativeOnu = {
     sn: String(referenceClient.sn).toUpperCase(),
     name: referenceClient.name || nap.name,
-    status: 'Offline',
+    status: 'LOS',
     odb_name: nap.name,
     olt_name: nap.olt_name,
     board: nap.board,
@@ -977,11 +1023,21 @@ async function sendCachedNapPowerFailAlert(payload, nap, confirmation, eventTime
   if (!referenceClient) return { sent: false, reason: 'NAP has no clients' };
 
   const totalClients = nap.totalClients || nap.clients.length;
+  // This path has already been confirmed by Smart OLT as an electrical
+  // incident for the NAP. Preserve Power fail rather than generic Offline.
+  nap.clients.forEach((client) => {
+    updateOnuStatusInCache(client.sn, 'Power fail', {
+      reason: 'Corte de Energía (Dying Gasp)',
+      category: 'power_fail',
+      eventTime,
+      forceRecord: true
+    });
+  });
   const representativeOnu = {
     ...(confirmation.onus?.[0] || {}),
     sn: String(referenceClient.sn).toUpperCase(),
     name: referenceClient.name || nap.name,
-    status: 'Offline',
+    status: 'Power fail',
     odb_name: nap.name,
     olt_name: nap.olt_name,
     board: nap.board,
@@ -1311,27 +1367,33 @@ export async function sendCorrelatedPortReport(incident) {
   const targetChatId = payload.chat_id || DEFAULT_CHAT_ID;
   const hostName = onu.olt_name || payload.host_name || payload.host || 'OLT Desconocida';
   const onusOnPort = await fetchMonitoringOnusOnPort(onu.board, onu.port, hostName);
-  const snapshotOfflineOnus = onusOnPort.filter((candidate) => !isOnline(candidate));
-  const localScope = selectNearbyNapOnusForAnalysis(snapshotOfflineOnus, getNapNameFromOnu(onu));
-  const offlineOnus = snapshotOfflineOnus;
-  const locallyOfflineOnus = localScope.onus.filter((candidate) => !isOnline(candidate));
+  // Exclude bare Offline clients. Only an explicit Smart OLT Power fail or
+  // LOS is actionable and may appear in an operational report.
+  const reportableOnus = onusOnPort.filter(isReportableSmartOltFailure);
+  const localScope = selectNearbyNapOnusForAnalysis(reportableOnus, getNapNameFromOnu(onu));
+  const locallyReportableOnus = localScope.onus.filter(isReportableSmartOltFailure);
   console.log(`[Port correlation] Bulk status scope: ${formatNapLabel(localScope.focusNapName)} + ${localScope.nearbyNapCount} NAP(s) within ${localScope.radiusKm} km.`);
-  const totalClients = onusOnPort.length;
+  const failureType = determineRequiredFailureType(locallyReportableOnus, oltStatusReason) ||
+    determineRequiredFailureType(reportableOnus, oltStatusReason);
+  if (!failureType) {
+    console.log(`[Port correlation] Suppressed ${hostName} board ${onu.board}/port ${onu.port}: Smart OLT did not report Power Fail or LOS.`);
+    return { sent: false, reason: 'Smart OLT failure cause unavailable' };
+  }
+  const expectedCategory = failureType === 'Corte de energía' ? 'power_fail' : 'loss';
+  const offlineOnus = reportableOnus.filter((candidate) =>
+    getExplicitSmartOltFailureCategory(candidate) === expectedCategory
+  );
+  const totalClients = onusOnPort.filter((candidate) =>
+    isOnline(candidate) || getExplicitSmartOltFailureCategory(candidate) === expectedCategory
+  ).length;
   const offlineCount = offlineOnus.length;
   const percentage = totalClients ? ((offlineCount / totalClients) * 100).toFixed(1) : 'N/A';
   const minOffline = getPositiveNumber(process.env.PORT_OUTAGE_MIN_OFFLINE, 3);
   const minPercentage = getPositiveNumber(process.env.PORT_OUTAGE_MIN_PERCENT, 30);
   const isPortOutage = offlineCount >= minOffline && Number(percentage) >= minPercentage;
   const zabbixEventCount = [...sns].filter(Boolean).length;
-  const failureType = determineRequiredFailureType(locallyOfflineOnus, oltStatusReason) ||
-    determineRequiredFailureType(offlineOnus, oltStatusReason);
   const affectedClientNames = getAffectedClientNames(offlineOnus);
   const eventTime = extractEventTime(payload);
-  if (!failureType) {
-    console.log(`[Port correlation] Suppressed ${hostName} board ${onu.board}/port ${onu.port}: Smart OLT did not report Power Fail or LOS.`);
-    return { sent: false, reason: 'Smart OLT failure cause unavailable' };
-  }
-  const expectedCategory = failureType === 'Corte de energía' ? 'power_fail' : 'loss';
   const representativeCause = offlineOnus
     .map((candidate) => candidate.offline_reason || candidate.last_down_reason || '')
     .find((reason) => getFailureCategoryFromOltReason(reason) === expectedCategory) || oltStatusReason;
@@ -1514,15 +1576,32 @@ ${comparisonText || ''}
 `.trim();
   }
 
-  // Calculate NAP statistics
-  const totalClients = onusOnNap.length;
-  const offlineOnus = onusOnNap.filter(o => {
-    const s = (o.status || '').toLowerCase();
-    return s !== 'online' && s !== 'active';
-  });
+  // Calculate the NAP impact only from the same explicit Smart OLT cause as
+  // this alert. A plain Offline status is permanently disconnected inventory
+  // and is excluded from the totals and customer list.
+  const incidentCategory = isPower ? 'power_fail' : 'loss';
+  const onusInAlertScope = onusOnNap.filter((candidate) =>
+    isOnline(candidate) || getExplicitSmartOltFailureCategory(candidate) === incidentCategory
+  );
+  // Native Smart OLT webhooks and a Zabbix event can arrive milliseconds
+  // before the cache reflects their explicit cause. Never lose the confirmed
+  // triggering ONU merely because an older cache entry still says Offline.
+  const triggerSn = String(onu?.sn || '').trim().toUpperCase();
+  if (triggerSn && !onusInAlertScope.some((candidate) =>
+    String(candidate?.sn || '').trim().toUpperCase() === triggerSn
+  )) {
+    onusInAlertScope.push({
+      ...onu,
+      status: incidentCategory === 'power_fail' ? 'Power fail' : 'LOS'
+    });
+  }
+  const totalClients = onusInAlertScope.length;
+  const offlineOnus = onusInAlertScope.filter((candidate) =>
+    getExplicitSmartOltFailureCategory(candidate) === incidentCategory
+  );
 
   const totalOffline = offlineOnus.length;
-  const totalOnline = totalClients - totalOffline;
+  const totalOnline = onusInAlertScope.filter(isOnline).length;
   const percentageDown = ((totalOffline / totalClients) * 100).toFixed(1);
   const affectedClientNames = getAffectedClientNames(offlineOnus);
   if (affectedClientNames.length === 0 && onuName !== 'Cliente no identificado') {
@@ -1800,7 +1879,16 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
   // Smart OLT is the only source allowed to change the operational map state.
   // Zabbix data is retained as event evidence but does not mark an ONU up/down.
   if (smartOltEnriched && onu && sn) {
-    const smartStatus = isOnuOnline(onu) ? 'Online' : 'Offline';
+    // Preserve the explicit Smart OLT state (Power fail / LOS) in the local
+    // cache. Collapsing it to generic Offline made permanently disconnected
+    // equipment indistinguishable from a reportable electrical/fibre event.
+    const smartStatus = isOnuOnline(onu)
+      ? 'Online'
+      : category === 'power_fail'
+        ? 'Power fail'
+        : category === 'loss'
+          ? 'LOS'
+          : String(onu.status || 'Offline');
     const smartUpdatedNap = updateOnuStatusInCache(sn, smartStatus, {
       reason: smartOltAlert?.label || oltStatusReason || 'Estado consultado en Smart OLT',
       category,
@@ -2179,10 +2267,17 @@ export async function processZabbixAlert(payload) {
     try {
       let smartNap = null;
       if (freshOnu) {
-        const smartStatus = isOnuOnline(freshOnu) ? 'Online' : 'Offline';
+        const freshCategory = classifySmartOltAlert(freshOltStatusReason, freshOnu).category;
+        const smartStatus = isOnuOnline(freshOnu)
+          ? 'Online'
+          : freshCategory === 'power_fail'
+            ? 'Power fail'
+            : freshCategory === 'loss'
+              ? 'LOS'
+              : 'Offline';
         smartNap = updateOnuStatusInCache(cleanSn, smartStatus, {
           reason: freshOltStatusReason || 'Estado consultado en Smart OLT',
-          category: classifySmartOltAlert(freshOltStatusReason, freshOnu).category,
+          category: freshCategory,
           eventTime: extractEventTime(payload)
         });
         if (smartNap) broadcast('nap_status_update', smartNap);
@@ -2771,13 +2866,27 @@ export async function processPortAlert(payload, board, port) {
     return { sent: false, reason: 'No ONUs found in Smart OLT' };
   }
   
-  // 2. The bulk status snapshot measures the total impact. The local NAP
-  // scope determines the cause without per-ONU real-time API calls.
-  const snapshotOfflineOnus = onusOnPort.filter((onu) => !isOnline(onu));
-  const localScope = selectNearbyNapOnusForAnalysis(snapshotOfflineOnus);
-  const offlineOnus = snapshotOfflineOnus;
-  const locallyOfflineOnus = localScope.onus.filter((onu) => !isOnline(onu));
+  // 2. The bulk status snapshot measures the total *actionable* impact.
+  // A plain Offline state is permanently disconnected inventory here and is
+  // deliberately omitted from alerts and all impact calculations.
+  const reportableOnus = onusOnPort.filter(isReportableSmartOltFailure);
+  const localScope = selectNearbyNapOnusForAnalysis(reportableOnus);
+  const locallyReportableOnus = localScope.onus.filter(isReportableSmartOltFailure);
   console.log(`[Port Alert] Bulk status scope: ${formatNapLabel(localScope.focusNapName)} + ${localScope.nearbyNapCount} NAP(s) within ${localScope.radiusKm} km.`);
+  const eventTime = extractEventTime(payload);
+  const zabbixFailureText = `${payload.event_name || payload.trigger_name || ''} ${payload.trigger_description || ''}`;
+  const failureType = determineRequiredFailureType(locallyReportableOnus, zabbixFailureText) ||
+    determineRequiredFailureType(reportableOnus, zabbixFailureText);
+
+  if (!failureType) {
+    console.log(`[Port Alert] Suppressed Board ${board} Port ${port}: Smart OLT did not report Power Fail or LOS.`);
+    return { sent: false, reason: 'Smart OLT failure cause unavailable', totalClients: onusOnPort.length, offlineCount: 0 };
+  }
+
+  const expectedCategory = failureType === 'Corte de energía' ? 'power_fail' : 'loss';
+  const offlineOnus = reportableOnus.filter((onu) =>
+    getExplicitSmartOltFailureCategory(onu) === expectedCategory
+  );
   
   // Group by NAP for better readability
   const naps = {};
@@ -2787,22 +2896,15 @@ export async function processPortAlert(payload, board, port) {
     naps[nap].push(o);
   });
   
-  const totalClients = onusOnPort.length;
+  const totalClients = onusOnPort.filter((onu) =>
+    isOnline(onu) || getExplicitSmartOltFailureCategory(onu) === expectedCategory
+  ).length;
   const offlineCount = offlineOnus.length;
   const percentage = ((offlineCount / totalClients) * 100).toFixed(1);
-  const eventTime = extractEventTime(payload);
-  const zabbixFailureText = `${payload.event_name || payload.trigger_name || ''} ${payload.trigger_description || ''}`;
-  const failureType = determineRequiredFailureType(locallyOfflineOnus, zabbixFailureText) ||
-    determineRequiredFailureType(offlineOnus, zabbixFailureText);
   
   if (offlineCount === 0) {
     console.log(`[Port Alert] Suppressed Board ${board} Port ${port}: Smart OLT reports ${totalClients}/${totalClients} ONUs Online.`);
     return { sent: false, reason: 'Smart OLT reports no offline ONUs', totalClients, offlineCount };
-  }
-
-  if (!failureType) {
-    console.log(`[Port Alert] Suppressed Board ${board} Port ${port}: Smart OLT did not report Power Fail or LOS.`);
-    return { sent: false, reason: 'Smart OLT failure cause unavailable', totalClients, offlineCount };
   }
 
   const affectedClientNames = getAffectedClientNames(offlineOnus);

@@ -12,10 +12,12 @@ process.env.TELEGRAM_ADDITIONAL_CHAT_IDS = '';
 process.env.NAP_CACHE_FILE = cacheFile;
 process.env.NAP_LOSS_MIN_ONUS = '2';
 
-let statuses = ['Online', 'Online'];
+// The third ONU is intentionally permanently Offline. It must neither trigger
+// a message nor inflate the impact of a real Power fail / LOS incident.
+let statuses = ['Online', 'Online', 'Offline'];
 const telegramMessages = [];
 
-const onus = () => ['FHTTTEST0001', 'FHTTTEST0002'].map((sn, index) => ({
+const onus = () => ['FHTTTEST0001', 'FHTTTEST0002', 'FHTTTEST0003'].map((sn, index) => ({
   sn,
   name: `Cliente ${index + 1}`,
   status: statuses[index],
@@ -73,13 +75,14 @@ try {
 
   // A full NAP transition with LOS must generate one fallback notification
   // even when Zabbix did not emit the expected events.
-  statuses = ['LOS', 'LOS'];
+  statuses = ['LOS', 'LOS', 'Offline'];
   await runScanCycle();
 
   assert.strictEqual(telegramMessages.length, 1, 'Smart OLT must deliver a full-NAP LOS fallback alert');
   const lossMessage = telegramMessages[0].text;
   assert.ok(lossMessage.includes('Pérdida de señal'));
   assert.ok(lossMessage.includes('Cliente 1') && lossMessage.includes('Cliente 2'));
+  assert.ok(!lossMessage.includes('Cliente 3'), 'Bare Offline clients must not appear in LOS reports');
   assert.ok(lossMessage.includes('Fecha y hora:'));
   assert.ok(lossMessage.includes('Sin evento oportuno'));
   assert.ok(!lossMessage.includes('FHTTTEST0001') && !lossMessage.includes('FHTTTEST0002'));
@@ -91,23 +94,24 @@ try {
 
   // Recovery rearms the incident, then one Dying Gasp on a single router must
   // produce a separate Power Fail notification.
-  statuses = ['Online', 'Online'];
+  statuses = ['Online', 'Online', 'Offline'];
   await runScanCycle();
-  statuses = ['Power fail', 'Online'];
+  statuses = ['Power fail', 'Online', 'Offline'];
   await runScanCycle();
 
   assert.strictEqual(telegramMessages.length, 2, 'An individual electrical outage must send a Power Fail fallback alert');
   const powerMessage = telegramMessages[1].text;
   assert.ok(powerMessage.includes('Corte de energía'));
   assert.ok(powerMessage.includes('Cliente 1'));
+  assert.ok(!powerMessage.includes('Cliente 3'), 'Bare Offline clients must not appear in power reports');
   assert.ok(powerMessage.includes('Fecha y hora:'));
   assert.ok(!powerMessage.includes('FHTTTEST0001'));
 
   // A sector-wide electrical outage must remain Power Fail and must never be
   // relabelled as a fibre cut merely because the complete NAP is offline.
-  statuses = ['Online', 'Online'];
+  statuses = ['Online', 'Online', 'Offline'];
   await runScanCycle();
-  statuses = ['Power fail', 'Power fail'];
+  statuses = ['Power fail', 'Power fail', 'Offline'];
   await runScanCycle();
   assert.strictEqual(telegramMessages.length, 3, 'A full-NAP electrical outage must send one consolidated alert');
   const totalPowerMessage = telegramMessages[2].text;
@@ -116,8 +120,9 @@ try {
   assert.ok(totalPowerMessage.includes('Cliente 1') && totalPowerMessage.includes('Cliente 2'));
   const scannerStatus = getScannerStatus();
   assert.ok(scannerStatus.lastSuccessAt, 'Scanner health must expose its latest successful Smart OLT query');
-  assert.strictEqual(scannerStatus.totalOnus, 2);
+  assert.strictEqual(scannerStatus.totalOnus, 3);
   assert.strictEqual(scannerStatus.offlineOnus, 2);
+  assert.strictEqual(scannerStatus.ignoredOfflineOnus, 1);
   assert.strictEqual(scannerStatus.lastError, null);
 
   console.log('Smart OLT fallback delivery for NAP LOS and individual Power Fail: PASS');

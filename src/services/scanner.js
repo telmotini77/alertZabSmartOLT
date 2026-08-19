@@ -8,10 +8,12 @@ import {
   processAndSendAlert
 } from '../routes/webhook.js';
 
-// SN -> "Online" or "Offline"
+// SN -> "online", a reportable operational failure type, or
+// "ignored_offline".  A bare Offline status is a permanent/disconnected ONU
+// in this installation and must never become an operational alert.
 let previousStateMap = new Map();
-// Normalized NAP name -> whether every ONU in the NAP was offline in the
-// preceding scan. This lets the scanner emit exactly one LOS alert per NAP.
+// Normalized NAP name -> whether every *reportable* ONU in the NAP was down in
+// the preceding scan. Bare Offline ONUs are intentionally excluded.
 let previousNapStateMap = new Map();
 let isFirstScan = true;
 let rateLimitBackoffUntil = 0;
@@ -27,6 +29,8 @@ const scannerRuntimeStatus = {
   backoffUntil: null,
   totalOnus: 0,
   offlineOnus: 0,
+  ignoredOfflineOnus: 0,
+  reportableFailureOnus: 0,
   lastFallbackAlerts: 0
 };
 
@@ -40,6 +44,23 @@ const isSupportedFailure = (category) => ['power_fail', 'loss'].includes(categor
 const getRawFailureReason = (onu) => String(
   onu?.offline_reason || onu?.last_down_reason || onu?.status_reason || onu?.reason || ''
 ).trim();
+
+/**
+ * Smart OLT's status label is the source of truth for automatic alerts.
+ * "Offline" without Power fail/Dying Gasp or LOS is deliberately ignored: it
+ * normally represents an ONU that is permanently disconnected or disabled.
+ */
+const getReportableFailureCategory = (onu) => {
+  if (isOnline(onu)) return null;
+  const reason = getRawFailureReason(onu) || String(onu?.status || '').trim();
+  const category = classifySmartOltAlert(reason, onu).category;
+  return isSupportedFailure(category) ? category : null;
+};
+
+const getOperationalState = (onu) => {
+  if (isOnline(onu)) return 'online';
+  return getReportableFailureCategory(onu) || 'ignored_offline';
+};
 
 const getNapName = (onu) => {
   const directName = onu?.odb_name || onu?.odb;
@@ -85,13 +106,12 @@ function seedPreviousStateFromCache() {
     clients.forEach((client) => {
       const sn = String(client.sn || '').trim().toUpperCase();
       if (!sn) return;
-      previousStateMap.set(sn, isOnline(client) ? 'Online' : 'Offline');
+      // Cached metadata does not include the live Smart OLT failure reason,
+      // therefore a cached Offline cannot be assumed to be Power fail or LOS.
+      previousStateMap.set(sn, isOnline(client) ? 'online' : 'ignored_offline');
       seededClients++;
     });
-    previousNapStateMap.set(
-      napKey(nap.name),
-      clients.length >= getMinimumNapClients() && clients.every((client) => !isOnline(client))
-    );
+    previousNapStateMap.set(napKey(nap.name), false);
   });
 
   if (seededClients > 0) {
@@ -156,7 +176,13 @@ export async function runScanCycle() {
     // export is limited by Smart OLT and is reserved for slow cache refreshes.
     const onus = await fetchMonitoringOnus();
     scannerRuntimeStatus.totalOnus = onus?.length || 0;
-    scannerRuntimeStatus.offlineOnus = (onus || []).filter((onu) => !isOnline(onu)).length;
+    const reportableFailureOnus = (onus || []).filter((onu) => getReportableFailureCategory(onu));
+    const ignoredOfflineOnus = (onus || []).filter((onu) => !isOnline(onu) && !getReportableFailureCategory(onu));
+    // Kept for backwards-compatible health output: it now means reportable
+    // failures only, never the permanent bare-Offline inventory.
+    scannerRuntimeStatus.offlineOnus = reportableFailureOnus.length;
+    scannerRuntimeStatus.reportableFailureOnus = reportableFailureOnus.length;
+    scannerRuntimeStatus.ignoredOfflineOnus = ignoredOfflineOnus.length;
     scannerRuntimeStatus.lastFallbackAlerts = 0;
     if (!onus || onus.length === 0) {
       throw new Error('Smart OLT returned no ONUs');
@@ -165,11 +191,6 @@ export async function runScanCycle() {
     // Make the cache reflect one coherent OLT snapshot before deciding whether
     // a NAP is down. Updating ONUs one at a time caused full LOS outages to be
     // presented as independent router/power failures.
-    const offlineBeforeSnapshot = new Set(
-      getCachedNaps()
-        .filter((nap) => nap.status === 'offline')
-        .map((nap) => napKey(nap.name))
-    );
     const changedNaps = applyOnuStatusSnapshot(onus);
     changedNaps.forEach((nap) => broadcast('nap_status_update', nap));
 
@@ -179,13 +200,19 @@ export async function runScanCycle() {
     const minimumNapClients = getMinimumNapClients();
 
     naps.forEach((nap, key) => {
-      const isFullyOffline = nap.onus.length >= minimumNapClients && nap.onus.every((onu) => !isOnline(onu));
-      if (isFullyOffline) fullyOfflineNapKeys.add(key);
+      // Do not allow permanent bare-Offline ONUs to convert a normal power
+      // incident into a "full NAP" outage. Only Online and explicitly
+      // classified Power fail/LOS ONUs participate in this decision.
+      const relevantOnus = nap.onus.filter((onu) => isOnline(onu) || getReportableFailureCategory(onu));
+      const reportableOutageOnus = relevantOnus.filter((onu) => getReportableFailureCategory(onu));
+      const isFullyReportableOutage = relevantOnus.length >= minimumNapClients &&
+        reportableOutageOnus.length === relevantOnus.length;
+      if (isFullyReportableOutage) fullyOfflineNapKeys.add(key);
 
-      if (!isFirstScan && isFullyOffline && !previousNapStateMap.get(key) && !offlineBeforeSnapshot.has(key)) {
+      if (!isFirstScan && isFullyReportableOutage && !previousNapStateMap.get(key)) {
         newlyOfflineNaps.push(nap);
       }
-      previousNapStateMap.set(key, isFullyOffline);
+      previousNapStateMap.set(key, isFullyReportableOutage);
     });
 
     const individualDrops = [];
@@ -193,20 +220,21 @@ export async function runScanCycle() {
       const sn = String(onu.sn || '').toUpperCase();
       if (!sn) continue;
 
-      const currentStatus = isOnline(onu) ? 'Online' : 'Offline';
-      if (currentStatus === 'Online') {
+      const currentState = getOperationalState(onu);
+      if (currentState === 'online') {
         clearActiveOperationalNotification(sn, getNapName(onu));
       }
       if (!isFirstScan) {
-        const previousStatus = previousStateMap.get(sn);
+        const previousState = previousStateMap.get(sn);
 
         // A fully down NAP gets one consolidated Power Fail or LOS report
         // below, never one Telegram message per ONU.
-        if (previousStatus === 'Online' && currentStatus === 'Offline' && !fullyOfflineNapKeys.has(napKey(getNapName(onu)))) {
+        if (isSupportedFailure(currentState) && previousState !== currentState &&
+            !fullyOfflineNapKeys.has(napKey(getNapName(onu)))) {
           individualDrops.push(onu);
         }
       }
-      previousStateMap.set(sn, currentStatus);
+      previousStateMap.set(sn, currentState);
     }
 
     if (isFirstScan) {
@@ -324,7 +352,11 @@ async function handleNapOutage(nap) {
     return { sent: false, reason: 'Incident already notified' };
   }
 
-  const totalClients = nap.onus.length;
+  // Do not describe permanently disconnected bare-Offline ONUs as part of
+  // this incident's scope.
+  const totalClients = nap.onus.filter((onu) =>
+    isOnline(onu) || getReportableFailureCategory(onu)
+  ).length;
   const failureType = category === 'power_fail' ? 'Power Fail' : 'Loss of Signal';
   const reason = category === 'power_fail'
     ? 'Corte de Energía (Dying Gasp)'
