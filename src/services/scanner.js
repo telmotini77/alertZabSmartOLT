@@ -1,7 +1,13 @@
-import { fetchAllOnus } from './smartOlt.js';
+import { fetchAllOnus, getOnuStatus } from './smartOlt.js';
 import { applyOnuStatusSnapshot, getCachedNaps } from './cache.js';
 import { broadcast } from './websocket.js';
 import { extractNapBox } from '../utils/parser.js';
+import {
+  classifySmartOltAlert,
+  clearActiveOperationalNotification,
+  hasActiveOperationalNotification,
+  processAndSendAlert
+} from '../routes/webhook.js';
 
 // SN -> "Online" or "Offline"
 let previousStateMap = new Map();
@@ -11,6 +17,11 @@ let previousNapStateMap = new Map();
 let isFirstScan = true;
 
 const isOnline = (onu) => ['online', 'active'].includes(String(onu?.status || '').toLowerCase());
+const isSupportedFailure = (category) => ['power_fail', 'loss'].includes(category);
+
+const getRawFailureReason = (onu) => String(
+  onu?.offline_reason || onu?.last_down_reason || onu?.status_reason || onu?.reason || ''
+).trim();
 
 const getNapName = (onu) => {
   const directName = onu?.odb_name || onu?.odb;
@@ -101,19 +112,22 @@ export async function runScanCycle() {
       previousNapStateMap.set(key, isFullyOffline);
     });
 
-    let individualDropsDetected = 0;
+    const individualDrops = [];
     for (const onu of onus) {
       const sn = String(onu.sn || '').toUpperCase();
       if (!sn) continue;
 
       const currentStatus = isOnline(onu) ? 'Online' : 'Offline';
+      if (currentStatus === 'Online') {
+        clearActiveOperationalNotification(sn, getNapName(onu));
+      }
       if (!isFirstScan) {
         const previousStatus = previousStateMap.get(sn);
 
-        // A fully down NAP gets the consolidated LOS report below, never one
-        // Telegram message per ONU.
+        // A fully down NAP gets one consolidated Power Fail or LOS report
+        // below, never one Telegram message per ONU.
         if (previousStatus === 'Online' && currentStatus === 'Offline' && !fullyOfflineNapKeys.has(napKey(getNapName(onu)))) {
-          individualDropsDetected++;
+          individualDrops.push(onu);
         }
       }
       previousStateMap.set(sn, currentStatus);
@@ -123,67 +137,145 @@ export async function runScanCycle() {
       console.log(`Radar baseline built: tracking ${previousStateMap.size} ONUs.`);
       isFirstScan = false;
     } else {
-      console.log(`Radar scan complete. Smart OLT observed ${newlyOfflineNaps.length} total NAP outage(s) and ${individualDropsDetected} individual drop(s); awaiting Zabbix corroboration before Telegram notification.`);
+      const results = [];
+      for (const nap of newlyOfflineNaps) {
+        results.push(await handleNapOutage(nap));
+      }
+      for (const onu of individualDrops) {
+        results.push(await handleIndividualDrop(onu));
+      }
+      const delivered = results.filter((result) => result?.sent).length;
+      console.log(`Radar scan complete. Smart OLT observed ${newlyOfflineNaps.length} total NAP outage(s) and ${individualDrops.length} individual drop(s); ${delivered} fallback alert(s) delivered.`);
     }
   } catch (error) {
     console.error('Radar scanner encountered an error:', error.message);
   }
 }
 
+async function resolveOnuFailure(onu) {
+  let reason = getRawFailureReason(onu);
+  let classification = classifySmartOltAlert(reason, onu);
+
+  if (!isSupportedFailure(classification.category) && onu?.external_id) {
+    try {
+      const liveStatus = await getOnuStatus(onu.external_id);
+      if (liveStatus) {
+        const liveState = String(liveStatus.onu_status || liveStatus.status_desc || '').toLowerCase();
+        if (['online', 'active'].includes(liveState)) {
+          return { category: 'recovered', reason: '', liveStatus };
+        }
+        reason = String(
+          liveStatus.last_down_reason || liveStatus.offline_reason ||
+          liveStatus.status_reason || liveStatus.reason || reason
+        ).trim();
+        classification = classifySmartOltAlert(reason, liveStatus);
+      }
+    } catch (error) {
+      console.error(`[Radar] Live cause lookup failed for ${onu.sn || 'ONU'}:`, error.message);
+    }
+  }
+
+  return { ...classification, reason };
+}
+
 async function handleIndividualDrop(onu) {
   const sn = String(onu.sn || '').toUpperCase();
-  console.log(`[Radar] Detected drop for ONU ${sn}. Firing alert...`);
+  const failure = await resolveOnuFailure(onu);
+  if (!isSupportedFailure(failure.category)) {
+    console.log(`[Radar] Individual drop ${sn} suppressed: Smart OLT did not classify it as Power Fail or LOS.`);
+    return { sent: false, reason: 'Unsupported or unresolved Smart OLT cause' };
+  }
+  if (hasActiveOperationalNotification(sn, failure.category)) {
+    console.log(`[Radar] Individual drop ${sn} already notified by Zabbix; fallback suppressed.`);
+    return { sent: false, reason: 'Incident already notified' };
+  }
 
-  const reason = onu.offline_reason || onu.last_down_reason || 'Desconexión detectada por escáner';
+  console.log(`[Radar] Detected ${failure.category} drop for ONU ${sn}. Firing fallback alert...`);
+
   const zabbixLikePayload = {
-    event_name: 'Smart OLT Radar: ONU Offline',
-    trigger_description: reason,
+    event_name: failure.category === 'power_fail'
+      ? 'Smart OLT Radar: ONU Power Fail'
+      : 'Smart OLT Radar: ONU Loss of Signal',
+    trigger_description: failure.reason,
     host_name: onu.olt_name || 'Smart OLT',
     event_severity: 'High',
     event_status: 'PROBLEM',
     chat_id: process.env.TELEGRAM_CHAT_ID,
-    onu_sn: sn
+    onu_sn: sn,
+    source_system: 'smartolt_radar'
   };
 
   try {
-    let overrideReason = reason;
-    if (reason.toLowerCase().includes('power') || reason.toLowerCase().includes('dying')) {
-      overrideReason = 'Corte de Energía (Dying Gasp)';
-    } else if (reason.toLowerCase().includes('los') || reason.toLowerCase().includes('signal')) {
-      overrideReason = 'Pérdida de Señal (LOS)';
-    }
-
-    await processAndSendAlert(zabbixLikePayload, onu, overrideReason);
+    return await processAndSendAlert(zabbixLikePayload, onu, failure.reason);
   } catch (err) {
     console.error(`[Radar] Error firing alert for ${sn}:`, err.message);
+    return { sent: false, reason: err.message };
   }
 }
 
 /**
- * Send one critical LOS notification after the complete scan confirms that all
- * registered ONUs in a NAP are offline. The cache snapshot provides the full
- * impact and its averaged GPS location for the Telegram message.
+ * Classify and send one complete-NAP incident. A total outage is not
+ * automatically called LOS: Dying Gasp/Power Fail remains an electrical
+ * outage, while LOS remains a fibre/signal outage.
  */
-async function handleNapLoss(nap) {
-  const referenceOnu = nap.onus.find((onu) => !isOnline(onu));
-  if (!referenceOnu) return;
+async function handleNapOutage(nap) {
+  let classified = nap.onus
+    .map((onu) => ({ onu, classification: classifySmartOltAlert(getRawFailureReason(onu), onu) }))
+    .filter(({ classification }) => isSupportedFailure(classification.category));
+
+  if (classified.length === 0) {
+    const reference = nap.onus.find((onu) => !isOnline(onu));
+    if (reference) {
+      const resolved = await resolveOnuFailure(reference);
+      if (isSupportedFailure(resolved.category)) {
+        classified = [{ onu: reference, classification: { ...resolved, rawReason: resolved.reason } }];
+      }
+    }
+  }
+
+  const powerCount = classified.filter(({ classification }) => classification.category === 'power_fail').length;
+  const lossCount = classified.filter(({ classification }) => classification.category === 'loss').length;
+  if (powerCount === 0 && lossCount === 0) {
+    console.log(`[Radar] NAP ${nap.name} is fully offline, but Smart OLT did not report Power Fail or LOS.`);
+    return { sent: false, reason: 'Unsupported or unresolved Smart OLT cause' };
+  }
+
+  // A full NAP with at least as much LOS evidence as electrical evidence is
+  // treated as a shared optical incident. Otherwise it remains Power Fail.
+  const category = lossCount >= powerCount ? 'loss' : 'power_fail';
+  const selected = classified.find(({ classification }) => classification.category === category);
+  const referenceOnu = selected?.onu || nap.onus.find((onu) => !isOnline(onu));
+  const sn = String(referenceOnu?.sn || '').toUpperCase();
+  if (!referenceOnu || !sn) return { sent: false, reason: 'NAP has no reference ONU' };
+  if (hasActiveOperationalNotification(sn, category)) {
+    console.log(`[Radar] NAP ${nap.name} already has a delivered ${category} alert; fallback suppressed.`);
+    return { sent: false, reason: 'Incident already notified' };
+  }
 
   const totalClients = nap.onus.length;
-  console.log(`[Radar] NAP ${nap.name}: ${totalClients}/${totalClients} ONUs offline. Sending consolidated LOS alert...`);
+  const failureType = category === 'power_fail' ? 'Power Fail' : 'Loss of Signal';
+  const reason = category === 'power_fail'
+    ? 'Corte de Energía (Dying Gasp)'
+    : 'Pérdida de Señal (LOS)';
+  console.log(`[Radar] NAP ${nap.name}: ${totalClients}/${totalClients} ONUs offline. Sending consolidated ${failureType} fallback alert...`);
 
   const payload = {
-    event_name: `Smart OLT Radar: NAP ${nap.name} Loss of Signal`,
-    trigger_description: `Caída total confirmada: ${totalClients}/${totalClients} ONUs de la NAP ${nap.name} están sin señal.`,
+    event_name: `Smart OLT Radar: NAP ${nap.name} ${failureType}`,
+    trigger_description: category === 'power_fail'
+      ? `Corte de energía confirmado: ${totalClients}/${totalClients} ONU/router de ${nap.name} están apagados.`
+      : `Pérdida de señal confirmada: ${totalClients}/${totalClients} ONUs de ${nap.name} están sin señal.`,
     host_name: referenceOnu.olt_name || 'Smart OLT',
     event_severity: 'High',
     event_status: 'PROBLEM',
     chat_id: process.env.TELEGRAM_CHAT_ID,
-    onu_sn: String(referenceOnu.sn || '').toUpperCase()
+    onu_sn: sn,
+    source_system: 'smartolt_radar'
   };
 
   try {
-    await processAndSendAlert(payload, referenceOnu, 'Pérdida de Señal (LOS)');
+    return await processAndSendAlert(payload, referenceOnu, reason);
   } catch (err) {
-    console.error(`[Radar] Error sending LOS alert for NAP ${nap.name}:`, err.message);
+    console.error(`[Radar] Error sending ${failureType} alert for NAP ${nap.name}:`, err.message);
+    return { sent: false, reason: err.message };
   }
 }

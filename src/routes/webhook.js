@@ -82,6 +82,32 @@ const getMinimumNapClients = () => {
 // state is cleared as soon as any ONU in that NAP recovers.
 const activeNapIncidentNotifications = new Set();
 
+// Tracks alerts already delivered for an ONU while the incident remains
+// active. The Smart OLT radar uses this shared state as a fallback without
+// duplicating an alert that Zabbix already delivered first.
+const activeOperationalNotifications = new Set();
+
+const operationalNotificationKey = (sn, category) =>
+  `${String(sn || '').trim().toUpperCase()}:${String(category || '').trim().toLowerCase()}`;
+
+export function hasActiveOperationalNotification(sn, category) {
+  return activeOperationalNotifications.has(operationalNotificationKey(sn, category));
+}
+
+export function clearActiveOperationalNotification(sn, napName = '') {
+  const prefix = `${String(sn || '').trim().toUpperCase()}:`;
+  for (const key of activeOperationalNotifications) {
+    if (key.startsWith(prefix)) activeOperationalNotifications.delete(key);
+  }
+  if (napName) activeNapIncidentNotifications.delete(normalizeNapName(napName));
+}
+
+function markActiveOperationalNotification(sn, category) {
+  if (sn && category) {
+    activeOperationalNotifications.add(operationalNotificationKey(sn, category));
+  }
+}
+
 // A total NAP outage must be observed by both monitoring sources.  Zabbix
 // contributes one fresh LOS event per ONU and Smart OLT contributes the live
 // state of every ONU in the NAP.  Keeping this short-lived evidence prevents
@@ -206,6 +232,14 @@ function formatSourceComparison(comparison, eventStatus, onu, oltStatusReason = 
   if (!comparison) return '';
   const smartState = isOnuOnline(onu) ? 'Online' : 'Offline';
   const reasonSuffix = oltStatusReason ? ` — <code>${oltStatusReason}</code>` : '';
+  if (comparison.radarOnly) {
+    return `
+🔎 <b>Validación de la alerta:</b>
+• <b>Smart OLT (principal):</b> ${smartState} — ${comparison.smartLabel}${reasonSuffix}
+• <b>Zabbix:</b> Sin evento oportuno para esta caída
+• <b>Resultado:</b> Smart OLT confirmó el estado y activó la alerta de respaldo.
+`.trim();
+  }
   return `
 🔎 <b>Comparación Smart OLT ↔ Zabbix:</b>
 • <b>1. Smart OLT (principal):</b> ${smartState} — ${comparison.smartLabel}${reasonSuffix}
@@ -1630,12 +1664,29 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
     ? '🟢'
     : smartOltAlert?.emoji || (category === 'power_fail' ? '🔌' : '⚠️');
   const sourceComparison = smartOltEnriched && onu
-    ? compareSmartOltWithZabbix(smartOltAlert, statusInfo, eventStatus, onu)
+    ? payload.source_system === 'smartolt_radar'
+      ? {
+          confirmed: !isOnuOnline(onu),
+          radarOnly: true,
+          smartCategory: category,
+          smartLabel: smartOltAlert?.label || statusInfo.status || 'ONU Offline'
+        }
+      : compareSmartOltWithZabbix(smartOltAlert, statusInfo, eventStatus, onu)
     : null;
+
+  if (eventStatus === 'OK' && sn) {
+    clearActiveOperationalNotification(sn, getNapNameFromOnu(onu));
+  }
 
   if (eventStatus === 'PROBLEM' && !['power_fail', 'loss'].includes(category)) {
     console.log(`[Notification Filter] Suppressing category "${category}": alerts must be classified as power failure or signal loss.`);
     return { sn, enriched: smartOltEnriched, sent: false, reason: 'Unsupported failure type' };
+  }
+
+  if (eventStatus === 'PROBLEM' && payload.source_system === 'smartolt_radar' &&
+      hasActiveOperationalNotification(sn, category)) {
+    console.log(`[Radar fallback] Suppressed duplicate ${category} alert for ${sn}; it was already delivered.`);
+    return { sn, enriched: smartOltEnriched, sent: false, reason: 'Incident already notified' };
   }
 
   if (eventStatus === 'PROBLEM' && onu && !getClientName(onu)) {
@@ -1857,6 +1908,9 @@ ${triggerDesc ? `\n<i>Descripción: ${triggerDesc}</i>` : ''}
       }
     }
     await sendNotification(targetChatId, enrichedText.trim(), sendOptions);
+    if (eventStatus === 'PROBLEM') {
+      markActiveOperationalNotification(sn, category);
+    }
   }
   return { sn, enriched: smartOltEnriched, sent: !options.suppressSend };
 }
