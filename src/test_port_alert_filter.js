@@ -21,13 +21,17 @@ globalThis.fetch = async (url, options = {}) => {
     };
   }
   if (requestUrl.includes('/onu/get_onu_status/')) {
+    const externalId = decodeURIComponent(requestUrl.split('/onu/get_onu_status/')[1]);
+    const sourceOnu = smartOltOnus.find((onu) => onu.external_id === externalId);
     return {
       ok: true,
       status: 200,
       json: async () => ({
         status: true,
-        onu_status: 'Offline',
-        last_down_reason: liveFailureReason
+        onu_status: sourceOnu?.status || 'Offline',
+        last_down_reason: ['online', 'active'].includes(String(sourceOnu?.status || '').toLowerCase())
+          ? ''
+          : liveFailureReason
       })
     };
   }

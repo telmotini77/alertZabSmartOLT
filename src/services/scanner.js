@@ -15,6 +15,7 @@ let previousStateMap = new Map();
 // preceding scan. This lets the scanner emit exactly one LOS alert per NAP.
 let previousNapStateMap = new Map();
 let isFirstScan = true;
+let rateLimitBackoffUntil = 0;
 const scannerRuntimeStatus = {
   enabled: false,
   intervalMinutes: null,
@@ -23,6 +24,7 @@ const scannerRuntimeStatus = {
   lastCompletedAt: null,
   lastSuccessAt: null,
   lastError: null,
+  backoffUntil: null,
   totalOnus: 0,
   offlineOnus: 0,
   lastFallbackAlerts: 0
@@ -108,6 +110,12 @@ export async function runScanCycle() {
     return;
   }
 
+  if (rateLimitBackoffUntil > Date.now()) {
+    scannerRuntimeStatus.backoffUntil = new Date(rateLimitBackoffUntil).toISOString();
+    console.log(`Radar scan deferred until ${scannerRuntimeStatus.backoffUntil} because Smart OLT requested rate-limit backoff.`);
+    return;
+  }
+
   scannerRuntimeStatus.running = true;
   scannerRuntimeStatus.lastStartedAt = new Date().toISOString();
   try {
@@ -183,8 +191,17 @@ export async function runScanCycle() {
     }
     scannerRuntimeStatus.lastSuccessAt = new Date().toISOString();
     scannerRuntimeStatus.lastError = null;
+    scannerRuntimeStatus.backoffUntil = null;
+    rateLimitBackoffUntil = 0;
   } catch (error) {
     scannerRuntimeStatus.lastError = error.message;
+    const retryAfterMatch = String(error.message).match(/"retry_after"\s*:\s*(\d+)/i);
+    if (retryAfterMatch) {
+      const retryAfterSeconds = Number.parseInt(retryAfterMatch[1], 10);
+      rateLimitBackoffUntil = Date.now() + (retryAfterSeconds * 1000);
+      scannerRuntimeStatus.backoffUntil = new Date(rateLimitBackoffUntil).toISOString();
+      console.error(`Smart OLT rate limit reached. Radar will resume after ${scannerRuntimeStatus.backoffUntil}.`);
+    }
     console.error('Radar scanner encountered an error:', error.message);
   } finally {
     scannerRuntimeStatus.running = false;

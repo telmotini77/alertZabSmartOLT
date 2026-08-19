@@ -295,7 +295,7 @@ function determineRequiredFailureType(onus = [], fallbackText = '') {
   return null;
 }
 
-async function enrichOfflineOnusWithLiveCauses(onus = []) {
+async function enrichOnusWithLiveState(onus = []) {
   const enriched = onus.map((onu) => ({ ...onu }));
   const configuredLimit = Number.parseInt(process.env.PORT_CAUSE_LOOKUP_LIMIT, 10);
   const lookupLimit = Number.isInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : 32;
@@ -1252,9 +1252,8 @@ export async function sendCorrelatedPortReport(incident) {
   const targetChatId = payload.chat_id || DEFAULT_CHAT_ID;
   const hostName = onu.olt_name || payload.host_name || payload.host || 'OLT Desconocida';
   const onusOnPort = await findOnusByPort(onu.olt_id || null, onu.board, onu.port, hostName);
-  let offlineOnus = onusOnPort.filter(candidate => !isOnline(candidate));
-  offlineOnus = await enrichOfflineOnusWithLiveCauses(offlineOnus);
-  offlineOnus = offlineOnus.filter(candidate => !isOnline(candidate));
+  const liveOnusOnPort = await enrichOnusWithLiveState(onusOnPort);
+  const offlineOnus = liveOnusOnPort.filter(candidate => !isOnline(candidate));
   const totalClients = onusOnPort.length;
   const offlineCount = offlineOnus.length;
   const percentage = totalClients ? ((offlineCount / totalClients) * 100).toFixed(1) : 'N/A';
@@ -2717,13 +2716,11 @@ export async function processPortAlert(payload, board, port) {
   }
   
   // 2. Filter ONUs that are offline
-  let offlineOnus = onusOnPort.filter(o => {
+  const liveOnusOnPort = await enrichOnusWithLiveState(onusOnPort);
+  const offlineOnus = liveOnusOnPort.filter(o => {
     const s = (o.status || '').toLowerCase();
     return s !== 'online' && s !== 'active';
   });
-
-  offlineOnus = await enrichOfflineOnusWithLiveCauses(offlineOnus);
-  offlineOnus = offlineOnus.filter(candidate => !isOnline(candidate));
   
   // Group by NAP for better readability
   const naps = {};
