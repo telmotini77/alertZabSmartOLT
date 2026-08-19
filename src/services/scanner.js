@@ -106,12 +106,21 @@ function seedPreviousStateFromCache() {
     clients.forEach((client) => {
       const sn = String(client.sn || '').trim().toUpperCase();
       if (!sn) return;
-      // Cached metadata does not include the live Smart OLT failure reason,
-      // therefore a cached Offline cannot be assumed to be Power fail or LOS.
-      previousStateMap.set(sn, isOnline(client) ? 'online' : 'ignored_offline');
+      // Persisted Power fail/LOS statuses are a valid baseline after a
+      // restart. A generic Offline remains ignored because it has no
+      // actionable cause. This prevents a deployment from re-sending every
+      // already active electrical/LOS incident.
+      previousStateMap.set(sn, getOperationalState(client));
       seededClients++;
     });
-    previousNapStateMap.set(napKey(nap.name), false);
+    const relevantClients = clients.filter((client) =>
+      isOnline(client) || getReportableFailureCategory(client)
+    );
+    previousNapStateMap.set(
+      napKey(nap.name),
+      relevantClients.length >= getMinimumNapClients() &&
+        relevantClients.every((client) => getReportableFailureCategory(client))
+    );
   });
 
   if (seededClients > 0) {
