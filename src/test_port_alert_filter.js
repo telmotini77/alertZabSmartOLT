@@ -46,7 +46,18 @@ globalThis.fetch = async (url, options = {}) => {
   throw new Error(`Unexpected request: ${requestUrl}`);
 };
 
-const { processPortAlert } = await import('./routes/webhook.js');
+const { processPortAlert, selectNearbyNapOnusForAnalysis } = await import('./routes/webhook.js');
+
+const nearbyScope = selectNearbyNapOnusForAnalysis([
+  { sn: 'FOCAL-1', odb_name: 'NAP-FOCAL', gps_lat: '-2.9000', gps_lng: '-79.0000' },
+  { sn: 'FOCAL-2', odb_name: 'NAP-FOCAL', gps_lat: '-2.9000', gps_lng: '-79.0000' },
+  { sn: 'NEAR-1', odb_name: 'NAP-NEAR', gps_lat: '-2.9050', gps_lng: '-79.0000' },
+  { sn: 'FAR-1', odb_name: 'NAP-FAR', gps_lat: '-2.9200', gps_lng: '-79.0000' }
+], 'NAP-FOCAL');
+assert.equal(nearbyScope.focusNapName, 'NAP-FOCAL');
+assert.equal(nearbyScope.nearbyNapCount, 1, 'Only NAPs within one kilometre must join the live-cause scope');
+assert.deepEqual(nearbyScope.onus.map((onu) => onu.sn), ['FOCAL-1', 'NEAR-1', 'FOCAL-2']);
+
 const payload = {
   event_name: 'GPON port 12/15 is down',
   host_name: 'OLT_GS',

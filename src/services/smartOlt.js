@@ -28,8 +28,10 @@ const getFullSnapshotTtlMs = () =>
 const getLiveStatusWindowMs = () =>
   getPositiveInteger(process.env.SMARTOLT_LIVE_STATUS_WINDOW_SECONDS, 180) * 1_000;
 
+// Four requests every three minutes is a hard ceiling. A stale deployment
+// variable with the former value must not reopen the Smart OLT rate-limit.
 const getLiveStatusWindowLimit = () =>
-  getPositiveInteger(process.env.SMARTOLT_LIVE_STATUS_MAX_REQUESTS, 6);
+  Math.min(getPositiveInteger(process.env.SMARTOLT_LIVE_STATUS_MAX_REQUESTS, 4), 4);
 
 /**
  * Limit live ONU status reads in a shared queue. Full inventory reads are

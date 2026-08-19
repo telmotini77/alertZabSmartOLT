@@ -73,6 +73,77 @@ const getCoordinates = (source) => {
     : null;
 };
 
+const getNearbyNapAnalysisRadiusKm = () =>
+  Math.min(getPositiveNumber(process.env.NAP_NEARBY_ANALYSIS_RADIUS_KM, 1), 5);
+
+/**
+ * Keep the expensive live Smart OLT checks physically local to the incident.
+ * The complete port snapshot is still used to calculate impact, but the cause
+ * is corroborated with the affected NAP and NAPs inside the configured radius.
+ * When GPS is unavailable, only the affected NAP is selected conservatively.
+ */
+export function selectNearbyNapOnusForAnalysis(onus = [], preferredNapName = '') {
+  const groupsByNap = new Map();
+
+  onus.forEach((onu) => {
+    const name = getNapNameFromOnu(onu) || 'NAP Desconocida';
+    const key = normalizeNapName(name) || 'NAPDESCONOCIDA';
+    if (!groupsByNap.has(key)) groupsByNap.set(key, { key, name, onus: [] });
+    groupsByNap.get(key).onus.push(onu);
+  });
+
+  const groups = [...groupsByNap.values()];
+  if (groups.length === 0) {
+    return { onus: [], focusNapName: '', nearbyNapCount: 0, radiusKm: getNearbyNapAnalysisRadiusKm() };
+  }
+
+  const preferredKey = normalizeNapName(preferredNapName);
+  const focusGroup = groups.find((group) => group.key === preferredKey) ||
+    [...groups].sort((left, right) =>
+      right.onus.length - left.onus.length || left.name.localeCompare(right.name, undefined, { numeric: true })
+    )[0];
+  const focusCoordinates = getCoordinates(findCachedNap(focusGroup.name)) ||
+    focusGroup.onus.map(getCoordinates).find(Boolean) || null;
+  const radiusKm = getNearbyNapAnalysisRadiusKm();
+
+  const nearbyGroups = groups
+    .map((group) => {
+      const coordinates = getCoordinates(findCachedNap(group.name)) || group.onus.map(getCoordinates).find(Boolean) || null;
+      const distanceKm = focusCoordinates && coordinates
+        ? haversineKm(focusCoordinates.latitude, focusCoordinates.longitude, coordinates.latitude, coordinates.longitude)
+        : null;
+      return { group, distanceKm };
+    })
+    .filter(({ group, distanceKm }) => group.key === focusGroup.key || (distanceKm !== null && distanceKm <= radiusKm))
+    .sort((left, right) => {
+      if (left.group.key === focusGroup.key) return -1;
+      if (right.group.key === focusGroup.key) return 1;
+      return (left.distanceKm || 0) - (right.distanceKm || 0) ||
+        left.group.name.localeCompare(right.group.name, undefined, { numeric: true });
+    });
+
+  // Interleave NAPs so the configured lookup cap samples the failed box and
+  // each nearby box, instead of spending every lookup on a large single NAP.
+  const selectedOnus = [];
+  for (let index = 0; ; index++) {
+    let added = false;
+    nearbyGroups.forEach(({ group }) => {
+      if (group.onus[index]) {
+        selectedOnus.push(group.onus[index]);
+        added = true;
+      }
+    });
+    if (!added) break;
+  }
+
+  return {
+    onus: selectedOnus,
+    focusNapName: focusGroup.name,
+    nearbyNapCount: Math.max(nearbyGroups.length - 1, 0),
+    radiusKm
+  };
+}
+
 const getMinimumNapClients = () => {
   const configured = Number.parseInt(process.env.NAP_LOSS_MIN_ONUS, 10);
   return Number.isInteger(configured) && configured > 0 ? configured : 2;
@@ -318,9 +389,15 @@ function isSmartOltRateLimitError(error) {
 async function enrichOnusWithLiveState(onus = []) {
   const enriched = onus.map((onu) => ({ ...onu }));
   const configuredLimit = Number.parseInt(process.env.PORT_CAUSE_LOOKUP_LIMIT, 10);
-  const lookupLimit = Number.isInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : 6;
+  const lookupLimit = Math.min(
+    Number.isInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : 4,
+    4
+  );
   const configuredConcurrency = Number.parseInt(process.env.PORT_CAUSE_LOOKUP_CONCURRENCY, 10);
-  const lookupConcurrency = Number.isInteger(configuredConcurrency) && configuredConcurrency > 0 ? configuredConcurrency : 2;
+  const lookupConcurrency = Math.min(
+    Number.isInteger(configuredConcurrency) && configuredConcurrency > 0 ? configuredConcurrency : 2,
+    2
+  );
   const candidates = enriched
     .map((onu, index) => ({ onu, index }))
     .filter(({ onu }) => onu.external_id)
@@ -352,6 +429,16 @@ async function enrichOnusWithLiveState(onus = []) {
   }
 
   return enriched;
+}
+
+function mergeLiveOnuStates(onus = [], liveOnus = []) {
+  const liveByExternalId = new Map(
+    liveOnus
+      .filter((onu) => onu?.external_id)
+      .map((onu) => [String(onu.external_id), onu])
+  );
+
+  return onus.map((onu) => liveByExternalId.get(String(onu?.external_id || '')) || onu);
 }
 
 function formatMandatoryAlertData(failureType, clientNames, eventTime) {
@@ -1299,8 +1386,13 @@ export async function sendCorrelatedPortReport(incident) {
   const targetChatId = payload.chat_id || DEFAULT_CHAT_ID;
   const hostName = onu.olt_name || payload.host_name || payload.host || 'OLT Desconocida';
   const onusOnPort = await findOnusByPort(onu.olt_id || null, onu.board, onu.port, hostName);
-  const liveOnusOnPort = await enrichOnusWithLiveState(onusOnPort);
+  const snapshotOfflineOnus = onusOnPort.filter((candidate) => !isOnline(candidate));
+  const localScope = selectNearbyNapOnusForAnalysis(snapshotOfflineOnus, getNapNameFromOnu(onu));
+  const locallyEnrichedOnus = await enrichOnusWithLiveState(localScope.onus);
+  const liveOnusOnPort = mergeLiveOnuStates(onusOnPort, locallyEnrichedOnus);
   const offlineOnus = liveOnusOnPort.filter(candidate => !isOnline(candidate));
+  const locallyOfflineOnus = locallyEnrichedOnus.filter((candidate) => !isOnline(candidate));
+  console.log(`[Port correlation] Live cause scope: ${formatNapLabel(localScope.focusNapName)} + ${localScope.nearbyNapCount} NAP(s) within ${localScope.radiusKm} km.`);
   const totalClients = onusOnPort.length;
   const offlineCount = offlineOnus.length;
   const percentage = totalClients ? ((offlineCount / totalClients) * 100).toFixed(1) : 'N/A';
@@ -1308,7 +1400,8 @@ export async function sendCorrelatedPortReport(incident) {
   const minPercentage = getPositiveNumber(process.env.PORT_OUTAGE_MIN_PERCENT, 30);
   const isPortOutage = offlineCount >= minOffline && Number(percentage) >= minPercentage;
   const zabbixEventCount = [...sns].filter(Boolean).length;
-  const failureType = determineRequiredFailureType(offlineOnus, oltStatusReason);
+  const failureType = determineRequiredFailureType(locallyOfflineOnus, oltStatusReason) ||
+    determineRequiredFailureType(offlineOnus, oltStatusReason);
   const affectedClientNames = getAffectedClientNames(offlineOnus);
   const eventTime = extractEventTime(payload);
   if (!failureType) {
@@ -2773,12 +2866,19 @@ export async function processPortAlert(payload, board, port) {
     return { sent: false, reason: 'No ONUs found in Smart OLT' };
   }
   
-  // 2. Filter ONUs that are offline
-  const liveOnusOnPort = await enrichOnusWithLiveState(onusOnPort);
+  // 2. Smart OLT's port snapshot measures the total impact. Live status
+  // checks are deliberately limited to the failed NAP and nearby NAPs, so a
+  // large PON incident does not create one API request per ONU.
+  const snapshotOfflineOnus = onusOnPort.filter((onu) => !isOnline(onu));
+  const localScope = selectNearbyNapOnusForAnalysis(snapshotOfflineOnus);
+  const locallyEnrichedOnus = await enrichOnusWithLiveState(localScope.onus);
+  const liveOnusOnPort = mergeLiveOnuStates(onusOnPort, locallyEnrichedOnus);
   const offlineOnus = liveOnusOnPort.filter(o => {
     const s = (o.status || '').toLowerCase();
     return s !== 'online' && s !== 'active';
   });
+  const locallyOfflineOnus = locallyEnrichedOnus.filter((onu) => !isOnline(onu));
+  console.log(`[Port Alert] Live cause scope: ${formatNapLabel(localScope.focusNapName)} + ${localScope.nearbyNapCount} NAP(s) within ${localScope.radiusKm} km.`);
   
   // Group by NAP for better readability
   const naps = {};
@@ -2792,10 +2892,9 @@ export async function processPortAlert(payload, board, port) {
   const offlineCount = offlineOnus.length;
   const percentage = ((offlineCount / totalClients) * 100).toFixed(1);
   const eventTime = extractEventTime(payload);
-  const failureType = determineRequiredFailureType(
-    offlineOnus,
-    `${payload.event_name || payload.trigger_name || ''} ${payload.trigger_description || ''}`
-  );
+  const zabbixFailureText = `${payload.event_name || payload.trigger_name || ''} ${payload.trigger_description || ''}`;
+  const failureType = determineRequiredFailureType(locallyOfflineOnus, zabbixFailureText) ||
+    determineRequiredFailureType(offlineOnus, zabbixFailureText);
   
   if (offlineCount === 0) {
     console.log(`[Port Alert] Suppressed Board ${board} Port ${port}: Smart OLT reports ${totalClients}/${totalClients} ONUs Online.`);
