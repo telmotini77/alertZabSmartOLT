@@ -295,6 +295,26 @@ function determineRequiredFailureType(onus = [], fallbackText = '') {
   return null;
 }
 
+function hasExplicitZabbixFailureType(eventName = '', triggerDescription = '', category = '') {
+  const text = `${eventName} ${triggerDescription}`
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+  if (category === 'power_fail') {
+    return /(power fail(?:ure)?|dying gasp|d-gasp|dgasp|sin energia|corte de luz|power down|alimentacion electrica)/.test(text);
+  }
+  if (category === 'loss') {
+    return /(loss of signal|\blos\b|perdida de senal|sin senal|corte de fibra|fibra cortada)/.test(text);
+  }
+  return false;
+}
+
+function isSmartOltRateLimitError(error) {
+  const text = String(error?.message || error || '').toLowerCase();
+  return text.includes('rate_limit_exceeded') || text.includes('status 429');
+}
+
 async function enrichOnusWithLiveState(onus = []) {
   const enriched = onus.map((onu) => ({ ...onu }));
   const configuredLimit = Number.parseInt(process.env.PORT_CAUSE_LOOKUP_LIMIT, 10);
@@ -1641,6 +1661,7 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
   let onu = prefetchedOnu;
   let oltStatusReason = prefetchedOltStatusReason;
   let smartOltEnriched = false;
+  let smartOltRateLimited = false;
   let smartOltAlert = prefetchedOltStatusReason
     ? classifySmartOltAlert(prefetchedOltStatusReason, onu)
     : null;
@@ -1671,6 +1692,7 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
         smartOltEnriched = true;
       }
     } catch (smartOltError) {
+      smartOltRateLimited = isSmartOltRateLimitError(smartOltError);
       console.error(`[Smart OLT error ignored to maintain independence]:`, smartOltError.message);
     }
   }
@@ -1798,11 +1820,17 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
       targetChatId = getLossChatId();
     }
     if ((!smartOltEnriched || !onu) && (category === 'power_fail' || category === 'loss')) {
-      if (REQUIRE_SMARTOLT_CORROBORATION) {
+      const canUseRateLimitFallback = smartOltRateLimited && onu && getClientName(onu) &&
+        hasExplicitZabbixFailureType(zabbixEventName, zabbixTriggerDesc, category);
+      if (REQUIRE_SMARTOLT_CORROBORATION && !canUseRateLimitFallback) {
         console.log(`[Corroboration Blocked] Event category "${category}" for SN "${sn}" was not enriched with Smart OLT. Skipping Telegram notification.`);
         return { sn, enriched: false, sent: false, reason: 'Not enriched' };
       }
-      console.warn(`[Smart OLT fallback] Sending ${category} alert for SN "${sn}" using Zabbix data only.`);
+      console.warn(
+        canUseRateLimitFallback
+          ? `[Smart OLT rate limit] Sending explicit Zabbix ${category} alert for SN "${sn}" with cached customer metadata.`
+          : `[Smart OLT fallback] Sending ${category} alert for SN "${sn}" using Zabbix data only.`
+      );
     }
     
     // Compare states only when Smart OLT returned an ONU to compare against.
@@ -1932,6 +1960,9 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
       console.log('[Notification Filter] Standalone alert suppressed because no affected client names are available.');
       return { sn, enriched: false, sent: false, reason: 'Affected client names unavailable' };
     }
+    const sourceNote = smartOltRateLimited
+      ? '⚠️ <i>Smart OLT alcanzó temporalmente su límite de consultas; tipo recibido explícitamente desde Zabbix y datos de cliente recuperados de la caché.</i>'
+      : '⚠️ <i>Nota: Alerta enviada sin enriquecimiento de Smart OLT (Modo Independiente).</i>';
     enrichedText = `
 ${priorityTitle}
 
@@ -1945,7 +1976,7 @@ ${formatMandatoryAlertData(category === 'power_fail' ? 'Corte de energía' : 'P�
 ${eventName}
 ${triggerDesc ? `\n<i>Descripción: ${triggerDesc}</i>` : ''}
 
-⚠️ <i>Nota: Alerta enviada sin enriquecimiento de Smart OLT (Modo Independiente).</i>
+${sourceNote}
 `;
   }
 

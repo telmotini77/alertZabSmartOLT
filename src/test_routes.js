@@ -5,6 +5,7 @@ import fs from 'fs';
 const originalFetch = globalThis.fetch;
 
 let fetchLog = [];
+let simulateSmartOltRateLimit = false;
 
 globalThis.fetch = async (url, options) => {
   // Zabbix JSON-RPC API mock response
@@ -64,6 +65,15 @@ globalThis.fetch = async (url, options) => {
     const address = urlObj.searchParams.get('address');
     const board = urlObj.searchParams.get('board');
     const port = urlObj.searchParams.get('port');
+
+    if (simulateSmartOltRateLimit) {
+      return {
+        ok: false,
+        status: 429,
+        text: async () => '{"status":false,"response_code":"rate_limit_exceeded","retry_after":120}',
+        json: async () => ({ status: false, response_code: 'rate_limit_exceeded', retry_after: 120 })
+      };
+    }
     
     // Simulate Smart OLT API connection error / timeout
     if (sn === 'FAILONU00000') {
@@ -539,7 +549,34 @@ try {
     process.exit(1);
   }
 
-  console.log('\n[3c] Testing Native Smart OLT Power Fail Webhook without an API re-query...');
+  console.log('\n[3c] Testing explicit Zabbix Power Fail fallback during Smart OLT rate limit...');
+  fetchLog = [];
+  simulateSmartOltRateLimit = true;
+  zabbixResponse = await originalFetch('http://localhost:3001/webhook/zabbix', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      event_name: 'ONU FHTT8C3A91BF: Power failure detected',
+      host_name: 'OLT-CENTRAL',
+      event_severity: 'High',
+      event_status: 'PROBLEM'
+    })
+  });
+  await new Promise(resolve => setTimeout(resolve, 300));
+  simulateSmartOltRateLimit = false;
+  const rateLimitMessage = fetchLog.find(log => log.url.includes('/sendMessage'))?.body?.text || '';
+  if (zabbixResponse.status === 200 &&
+      rateLimitMessage.includes('Corte de energía') &&
+      rateLimitMessage.includes('Juan Pérez') &&
+      rateLimitMessage.includes('límite de consultas') &&
+      !rateLimitMessage.includes('FHTT8C3A91BF')) {
+    console.log('✅ Explicit Power Fail is delivered with cached metadata during API rate limit: PASS');
+  } else {
+    console.error('❌ Rate-limit fallback for explicit Power Fail: FAIL', rateLimitMessage);
+    process.exit(1);
+  }
+
+  console.log('\n[3d] Testing Native Smart OLT Power Fail Webhook without an API re-query...');
   fetchLog = [];
 
   const smartOltWebhookResponse = await originalFetch('http://localhost:3001/webhook/smartolt', {
