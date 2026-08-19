@@ -58,6 +58,58 @@ globalThis.fetch = async (url, options) => {
     method: options?.method || 'GET', 
     body: options?.body ? JSON.parse(options.body) : null 
   });
+
+  // Smart OLT compact monitoring status feed mock
+  if (url.includes('/onu/get_onus_statuses')) {
+    if (simulateSmartOltRateLimit) {
+      return {
+        ok: false,
+        status: 429,
+        text: async () => '{"status":false,"response_code":"rate_limit_exceeded","retry_after":120}',
+        json: async () => ({ status: false, response_code: 'rate_limit_exceeded', retry_after: 120 })
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      text: async () => '',
+      json: async () => ({
+        status: true,
+        response: [
+          {
+            unique_external_id: 'ext_fhtt_123',
+            sn: 'FHTT8C3A91BF',
+            name: 'Juan Pérez',
+            olt_id: '1',
+            board: '1',
+            port: '3',
+            status: 'Power fail',
+            last_status_change: '2026-08-19 10:00:00'
+          },
+          {
+            unique_external_id: 'ext_hwtc_123',
+            sn: 'HWTC12345678',
+            name: 'María López',
+            olt_id: '1',
+            board: '1',
+            port: '3',
+            status: 'Online',
+            last_status_change: '2026-08-19 10:00:00'
+          },
+          {
+            unique_external_id: 'ext_zteg_123',
+            sn: 'ZTEG00998877',
+            name: 'Carlos Rodríguez',
+            olt_id: '1',
+            board: '1',
+            port: '3',
+            status: 'Online',
+            last_status_change: '2026-08-19 10:00:00'
+          }
+        ]
+      })
+    };
+  }
   
   // Smart OLT get_all_onus_details mock response
   if (url.includes('/onu/get_all_onus_details')) {

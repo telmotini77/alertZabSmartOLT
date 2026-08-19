@@ -13,7 +13,6 @@ process.env.NAP_CACHE_FILE = cacheFile;
 process.env.NAP_LOSS_MIN_ONUS = '2';
 
 let statuses = ['Online', 'Online'];
-let failureReason = 'Loss of Signal';
 const telegramMessages = [];
 
 const onus = () => ['FHTTTEST0001', 'FHTTTEST0002'].map((sn, index) => ({
@@ -27,7 +26,7 @@ const onus = () => ['FHTTTEST0001', 'FHTTTEST0002'].map((sn, index) => ({
   port: '5',
   gps_lat: '-2.9110',
   gps_lng: '-78.9665',
-  offline_reason: statuses[index] === 'Offline' ? failureReason : ''
+  offline_reason: ''
 }));
 
 globalThis.fetch = async (url, options = {}) => {
@@ -38,6 +37,25 @@ globalThis.fetch = async (url, options = {}) => {
 
   if (String(url).includes('/onu/get_all_onus_details')) {
     return { ok: true, status: 200, json: async () => ({ status: true, onus: onus() }) };
+  }
+
+  if (String(url).includes('/onu/get_onus_statuses')) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        status: true,
+        response: onus().map((onu, index) => ({
+          unique_external_id: `onu-${index + 1}`,
+          sn: onu.sn,
+          name: onu.name,
+          olt_id: onu.olt_id,
+          board: onu.board,
+          port: onu.port,
+          status: statuses[index]
+        }))
+      })
+    };
   }
 
   throw new Error(`Unexpected request: ${url}`);
@@ -55,7 +73,7 @@ try {
 
   // A full NAP transition with LOS must generate one fallback notification
   // even when Zabbix did not emit the expected events.
-  statuses = ['Offline', 'Offline'];
+  statuses = ['LOS', 'LOS'];
   await runScanCycle();
 
   assert.strictEqual(telegramMessages.length, 1, 'Smart OLT must deliver a full-NAP LOS fallback alert');
@@ -75,8 +93,7 @@ try {
   // produce a separate Power Fail notification.
   statuses = ['Online', 'Online'];
   await runScanCycle();
-  failureReason = 'Dying Gasp';
-  statuses = ['Offline', 'Online'];
+  statuses = ['Power fail', 'Online'];
   await runScanCycle();
 
   assert.strictEqual(telegramMessages.length, 2, 'An individual electrical outage must send a Power Fail fallback alert');
@@ -90,7 +107,7 @@ try {
   // relabelled as a fibre cut merely because the complete NAP is offline.
   statuses = ['Online', 'Online'];
   await runScanCycle();
-  statuses = ['Offline', 'Offline'];
+  statuses = ['Power fail', 'Power fail'];
   await runScanCycle();
   assert.strictEqual(telegramMessages.length, 3, 'A full-NAP electrical outage must send one consolidated alert');
   const totalPowerMessage = telegramMessages[2].text;

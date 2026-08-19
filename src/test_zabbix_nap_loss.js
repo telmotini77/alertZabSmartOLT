@@ -36,6 +36,19 @@ globalThis.fetch = async (url, options = {}) => {
   if (String(url).includes('/onu/get_all_onus_details')) {
     return { ok: true, status: 200, json: async () => ({ status: true, onus }) };
   }
+  if (String(url).includes('/onu/get_onus_statuses')) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        status: true,
+        response: onus.map((onu, index) => ({
+          ...onu,
+          unique_external_id: `onu-${index + 1}`
+        }))
+      })
+    };
+  }
   if (String(url).includes('/onu/get_onu_status/')) {
     return {
       ok: true,

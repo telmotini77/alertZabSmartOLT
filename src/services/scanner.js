@@ -1,5 +1,4 @@
-import { fetchAllOnus, getOnuStatus } from './smartOlt.js';
-import { applyOnuStatusSnapshot, getCachedNaps } from './cache.js';
+import { applyOnuStatusSnapshot, fetchMonitoringOnus, getCachedNaps } from './cache.js';
 import { broadcast } from './websocket.js';
 import { extractNapBox } from '../utils/parser.js';
 import {
@@ -18,6 +17,7 @@ let isFirstScan = true;
 let rateLimitBackoffUntil = 0;
 const scannerRuntimeStatus = {
   enabled: false,
+  dataSource: 'get_onus_statuses',
   intervalMinutes: null,
   running: false,
   lastStartedAt: null,
@@ -152,7 +152,9 @@ export async function runScanCycle() {
   scannerRuntimeStatus.running = true;
   scannerRuntimeStatus.lastStartedAt = new Date().toISOString();
   try {
-    const onus = await fetchAllOnus();
+    // Use Smart OLT's compact bulk status endpoint. The full ONU-details
+    // export is limited by Smart OLT and is reserved for slow cache refreshes.
+    const onus = await fetchMonitoringOnus();
     scannerRuntimeStatus.totalOnus = onus?.length || 0;
     scannerRuntimeStatus.offlineOnus = (onus || []).filter((onu) => !isOnline(onu)).length;
     scannerRuntimeStatus.lastFallbackAlerts = 0;
@@ -243,28 +245,8 @@ export async function runScanCycle() {
 }
 
 async function resolveOnuFailure(onu) {
-  let reason = getRawFailureReason(onu);
-  let classification = classifySmartOltAlert(reason, onu);
-
-  if (!isSupportedFailure(classification.category) && onu?.external_id) {
-    try {
-      const liveStatus = await getOnuStatus(onu.external_id);
-      if (liveStatus) {
-        const liveState = String(liveStatus.onu_status || liveStatus.status_desc || '').toLowerCase();
-        if (['online', 'active'].includes(liveState)) {
-          return { category: 'recovered', reason: '', liveStatus };
-        }
-        reason = String(
-          liveStatus.last_down_reason || liveStatus.offline_reason ||
-          liveStatus.status_reason || liveStatus.reason || reason
-        ).trim();
-        classification = classifySmartOltAlert(reason, liveStatus);
-      }
-    } catch (error) {
-      console.error(`[Radar] Live cause lookup failed for ${onu.sn || 'ONU'}:`, error.message);
-    }
-  }
-
+  const reason = getRawFailureReason(onu) || String(onu?.status || '').trim();
+  const classification = classifySmartOltAlert(reason, onu);
   return { ...classification, reason };
 }
 

@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { fetchAllOnus } from './smartOlt.js';
+import { fetchAllOnus, fetchAllOnuStatuses } from './smartOlt.js';
 import { extractNapBox } from '../utils/parser.js';
 import { broadcast } from './websocket.js';
 import {
@@ -23,6 +23,83 @@ const __dirname = path.dirname(__filename);
 let cachedNaps = [];
 let statusHistory = [];
 const MAX_HISTORY_ITEMS = 5000;
+const METADATA_SYNC_MINUTES = Math.max(
+  Number.parseInt(process.env.SMARTOLT_METADATA_SYNC_MINUTES, 10) || 60,
+  60
+);
+
+/**
+ * Merge the compact Smart OLT monitoring feed with locally persisted NAP,
+ * customer and GPS metadata. This prevents alert processing from repeatedly
+ * exporting the complete Smart OLT ONU database just to identify a client.
+ */
+export function mergeStatusSnapshotWithCache(statusOnus = []) {
+  const cachedBySn = new Map();
+  cachedNaps.forEach((nap) => {
+    (nap.clients || []).forEach((client) => {
+      const sn = String(client?.sn || '').trim().toUpperCase();
+      if (!sn) return;
+      cachedBySn.set(sn, {
+        ...client,
+        sn,
+        odb_name: nap.name,
+        olt_name: nap.olt_name,
+        board: nap.board,
+        port: nap.port,
+        latitude: client.latitude ?? nap.latitude,
+        longitude: client.longitude ?? nap.longitude
+      });
+    });
+  });
+
+  return statusOnus.map((statusOnu) => {
+    const sn = String(statusOnu?.sn || '').trim().toUpperCase();
+    const cached = cachedBySn.get(sn) || {};
+    return {
+      ...cached,
+      ...statusOnu,
+      sn: sn || cached.sn || '',
+      external_id: statusOnu?.external_id || statusOnu?.unique_external_id || cached.external_id || '',
+      name: statusOnu?.name || cached.name || '',
+      status: statusOnu?.status || cached.status || 'Offline',
+      odb_name: statusOnu?.odb_name || statusOnu?.odb || cached.odb_name || '',
+      olt_name: statusOnu?.olt_name || cached.olt_name || '',
+      board: statusOnu?.board ?? cached.board,
+      port: statusOnu?.port ?? cached.port,
+      latitude: statusOnu?.latitude ?? statusOnu?.gps_lat ?? cached.latitude ?? null,
+      longitude: statusOnu?.longitude ?? statusOnu?.gps_lng ?? cached.longitude ?? null
+    };
+  });
+}
+
+export async function fetchMonitoringOnus(options = {}) {
+  const statuses = await fetchAllOnuStatuses(options);
+  return mergeStatusSnapshotWithCache(statuses);
+}
+
+export function findCachedOnuBySn(sn) {
+  const normalizedSn = String(sn || '').trim().toUpperCase();
+  if (!normalizedSn) return null;
+
+  for (const nap of cachedNaps) {
+    const client = (nap.clients || []).find((candidate) =>
+      String(candidate?.sn || '').trim().toUpperCase() === normalizedSn
+    );
+    if (!client) continue;
+    return {
+      ...client,
+      sn: normalizedSn,
+      odb_name: nap.name,
+      olt_name: nap.olt_name,
+      board: nap.board,
+      port: nap.port,
+      latitude: client.latitude ?? nap.latitude,
+      longitude: client.longitude ?? nap.longitude
+    };
+  }
+
+  return null;
+}
 
 /**
  * Initialize cache by loading from SQLite database.
@@ -52,15 +129,17 @@ export async function initCache() {
     // Auto-seed coordinates from local CSV file
     applyCsvCoordinatesToCache();
 
-    // Auto-sync every 15 minutes in the background
+    // Full ONU details are static metadata and Smart OLT restricts this
+    // endpoint. Keep this slow; operational status is refreshed separately by
+    // the compact monitoring feed used by the radar.
     setInterval(async () => {
       try {
-        console.log('🔄 Running background periodic sync with Smart OLT...');
+        console.log('🔄 Running slow Smart OLT metadata sync...');
         await syncCacheWithSmartOlt();
       } catch (err) {
         console.error('❌ Failed periodic sync:', err.message);
       }
-    }, 15 * 60 * 1000);
+    }, METADATA_SYNC_MINUTES * 60 * 1000);
 
   } catch (err) {
     console.error('❌ Error initializing cache:', err.message);

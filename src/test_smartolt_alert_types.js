@@ -22,6 +22,17 @@ for (const [reason, category, label] of cases) {
 const offlineWithoutReason = classifySmartOltAlert('', { onu_status: 'Offline' });
 assert.equal(offlineWithoutReason.category, 'olt_offline');
 
+assert.equal(
+  classifySmartOltAlert('', { status: 'Power fail' }).category,
+  'power_fail',
+  'The bulk status feed must classify Power fail without a per-ONU query'
+);
+assert.equal(
+  classifySmartOltAlert('', { status: 'LOS' }).category,
+  'loss',
+  'The bulk status feed must classify LOS without a per-ONU query'
+);
+
 assert.equal(formatNapLabel('sm-7030-1'), 'NAP SM-7030-1');
 assert.equal(formatNapLabel('SM0201-5'), 'NAP SM0201-5');
 assert.equal(formatNapLabel('NAP-04-A'), 'NAP-04-A');

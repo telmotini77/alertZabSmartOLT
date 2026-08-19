@@ -5,9 +5,17 @@ const SMARTOLT_SUBDOMAIN = (process.env.SMARTOLT_SUBDOMAIN || '').trim();
 const SMARTOLT_API_KEY   = (process.env.SMARTOLT_API_KEY   || '').trim();
 
 const DEFAULT_TIMEOUT_MS = 5_000;
-const FULL_SNAPSHOT_DEFAULT_TTL_MS = 4 * 60 * 1_000;
+const FULL_SNAPSHOT_DEFAULT_TTL_MS = 60 * 60 * 1_000;
+const FULL_SNAPSHOT_MIN_TTL_MS = 60 * 60 * 1_000;
+const STATUS_SNAPSHOT_DEFAULT_TTL_MS = 5 * 60 * 1_000;
+const STATUS_FORCE_REFRESH_MIN_COOLDOWN_MS = 15 * 1_000;
 
 let fullSnapshotCache = {
+  onus: null,
+  fetchedAt: 0,
+  inFlight: null
+};
+let statusSnapshotCache = {
   onus: null,
   fetchedAt: 0,
   inFlight: null
@@ -23,7 +31,22 @@ const getPositiveInteger = (value, fallback) => {
 };
 
 const getFullSnapshotTtlMs = () =>
-  getPositiveInteger(process.env.SMARTOLT_SNAPSHOT_CACHE_SECONDS, FULL_SNAPSHOT_DEFAULT_TTL_MS / 1_000) * 1_000;
+  Math.max(
+    getPositiveInteger(process.env.SMARTOLT_SNAPSHOT_CACHE_SECONDS, FULL_SNAPSHOT_DEFAULT_TTL_MS / 1_000) * 1_000,
+    FULL_SNAPSHOT_MIN_TTL_MS
+  );
+
+const getStatusSnapshotTtlMs = () =>
+  Math.max(
+    getPositiveInteger(process.env.SMARTOLT_STATUS_CACHE_SECONDS, STATUS_SNAPSHOT_DEFAULT_TTL_MS / 1_000) * 1_000,
+    STATUS_SNAPSHOT_DEFAULT_TTL_MS
+  );
+
+const getStatusForceRefreshCooldownMs = () =>
+  Math.max(
+    getPositiveInteger(process.env.SMARTOLT_STATUS_FORCE_REFRESH_SECONDS, 15) * 1_000,
+    STATUS_FORCE_REFRESH_MIN_COOLDOWN_MS
+  );
 
 const getLiveStatusWindowMs = () =>
   getPositiveInteger(process.env.SMARTOLT_LIVE_STATUS_WINDOW_SECONDS, 180) * 1_000;
@@ -257,6 +280,63 @@ export async function findOnusByPort(oltId, board, port, oltName) {
     console.error(`Error fetching ONUs by port (${board}/${port}) from Smart OLT:`, error.message);
     throw error;
   }
+}
+
+/**
+ * Fetch the compact, monitoring-safe Smart OLT status feed. Smart OLT
+ * explicitly recommends this endpoint (cached for five minutes) instead of
+ * issuing get_onu_status calls for individual ONUs in an automated workflow.
+ */
+export async function fetchAllOnuStatuses({ forceRefresh = false } = {}) {
+  const now = Date.now();
+  const snapshotTtlMs = getStatusSnapshotTtlMs();
+  const cacheAgeMs = now - statusSnapshotCache.fetchedAt;
+  const canReuseCache = statusSnapshotCache.onus && cacheAgeMs < snapshotTtlMs;
+  const forceRefreshAllowed = cacheAgeMs >= getStatusForceRefreshCooldownMs();
+
+  if (process.env.NODE_ENV !== 'test' && canReuseCache && (!forceRefresh || !forceRefreshAllowed)) {
+    return statusSnapshotCache.onus;
+  }
+  if (process.env.NODE_ENV !== 'test' && statusSnapshotCache.inFlight) {
+    return statusSnapshotCache.inFlight;
+  }
+
+  const url = `${getBaseUrl()}/onu/get_onus_statuses`;
+  const request = (async () => {
+    try {
+      const response = await fetchWithTimeout(url, { method: 'GET', headers: getHeaders() }, 15_000);
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Smart OLT API responded with status ${response.status}: ${errorText}`);
+      }
+
+      const data = await response.json();
+      const rawOnus = Array.isArray(data?.response)
+        ? data.response
+        : Array.isArray(data?.onus)
+          ? data.onus
+          : [];
+      const onus = rawOnus.map((onu) => ({
+        ...onu,
+        external_id: onu.external_id || onu.unique_external_id || ''
+      }));
+
+      if (data?.status && process.env.NODE_ENV !== 'test') {
+        statusSnapshotCache = { onus, fetchedAt: Date.now(), inFlight: null };
+      }
+      return onus;
+    } catch (error) {
+      console.error('Error fetching Smart OLT ONU status snapshot:', error.message);
+      throw error;
+    } finally {
+      if (statusSnapshotCache.inFlight) statusSnapshotCache.inFlight = null;
+    }
+  })();
+
+  if (process.env.NODE_ENV !== 'test') {
+    statusSnapshotCache.inFlight = request;
+  }
+  return request;
 }
 
 /**

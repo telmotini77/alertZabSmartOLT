@@ -8,7 +8,6 @@ process.env.TELEGRAM_CHAT_ID = '-100987654321';
 process.env.TELEGRAM_ADDITIONAL_CHAT_IDS = '';
 
 let smartOltOnus = [];
-let liveFailureReason = 'Dying Gasp';
 const telegramMessages = [];
 
 globalThis.fetch = async (url, options = {}) => {
@@ -18,6 +17,19 @@ globalThis.fetch = async (url, options = {}) => {
       ok: true,
       status: 200,
       json: async () => ({ status: true, onus: smartOltOnus })
+    };
+  }
+  if (requestUrl.includes('/onu/get_onus_statuses')) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        status: true,
+        response: smartOltOnus.map((onu) => ({
+          ...onu,
+          unique_external_id: onu.external_id
+        }))
+      })
     };
   }
   if (requestUrl.includes('/onu/get_onu_status/')) {
@@ -78,7 +90,7 @@ const onlineResult = await processPortAlert(payload, '12', '15');
 assert.equal(onlineResult.sent, false);
 assert.equal(telegramMessages.length, 0, 'A port that Smart OLT reports online must not send a non-corroborated alert');
 
-smartOltOnus = smartOltOnus.map((onu) => ({ ...onu, status: 'Offline' }));
+smartOltOnus = smartOltOnus.map((onu) => ({ ...onu, status: 'Power fail' }));
 const detailedResult = await processPortAlert(payload, '12', '15');
 assert.equal(detailedResult.sent, true);
 assert.equal(telegramMessages.length, 1, 'A Smart OLT-confirmed outage must send one detailed report');
@@ -98,7 +110,7 @@ assert.ok(!telegramMessages[0].text.includes('HWTC11111111'));
 assert.ok(!telegramMessages[0].text.includes('HWTC22222222'));
 assert.ok(!telegramMessages[0].text.includes('No se encontraron clientes registrados'));
 
-liveFailureReason = 'Loss of Signal';
+smartOltOnus = smartOltOnus.map((onu) => ({ ...onu, status: 'LOS' }));
 const signalLossResult = await processPortAlert(payload, '12', '15');
 assert.equal(signalLossResult.sent, true);
 assert.equal(telegramMessages.length, 2, 'A live Smart OLT LOS cause must send a signal-loss report');
@@ -106,7 +118,7 @@ assert.ok(telegramMessages[1].text.includes('CAÍDA DE SEÑAL EN PUERTO GPON'));
 assert.ok(telegramMessages[1].text.includes('Pérdida de señal'));
 assert.ok(!telegramMessages[1].text.includes('Corte de energía'));
 
-liveFailureReason = 'Unknown';
+smartOltOnus = smartOltOnus.map((onu) => ({ ...onu, status: 'Offline' }));
 const unknownCauseResult = await processPortAlert(payload, '12', '15');
 assert.equal(unknownCauseResult.sent, false);
 assert.equal(telegramMessages.length, 2, 'An unknown Smart OLT cause must not be guessed from a generic Zabbix link-down event');

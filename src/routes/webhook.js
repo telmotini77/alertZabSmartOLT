@@ -2,11 +2,11 @@ import express from 'express';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { fetchAllOnus, findOnuBySn, findOnusByAddressQuery, findOnusByPort, getOnuStatus } from '../services/smartOlt.js';
+import { findOnuBySn, getOnuStatus } from '../services/smartOlt.js';
 import { sendMessage, sendNotification, replyToMessage } from '../services/telegram.js';
 import { extractSerialNumber, extractNapBox, parseStatusInfo, extractEventTime, formatDateTime, extractBoardAndPort } from '../utils/parser.js';
 import { broadcast } from '../services/websocket.js';
-import { applyOnuStatusSnapshot, updateOnuStatusInCache, getCachedNaps, updateNapCoordinates, updateNapCoordinatesBulk, getStatusHistory, deleteHistoryItem, clearHistory, resolveHistoryItem, updateHistoryEventDetails } from '../services/cache.js';
+import { applyOnuStatusSnapshot, fetchMonitoringOnus, findCachedOnuBySn, updateOnuStatusInCache, getCachedNaps, updateNapCoordinates, updateNapCoordinatesBulk, getStatusHistory, deleteHistoryItem, clearHistory, resolveHistoryItem, updateHistoryEventDetails } from '../services/cache.js';
 import { getActiveTriggers } from '../services/zabbix.js';
 import { dbGetOpticalHistory, dbSaveOpticalRecord } from '../services/db.js';
 import { PUBLIC_URL } from '../config/publicUrl.js';
@@ -220,10 +220,10 @@ export function classifySmartOltAlert(reason, liveStatus = {}) {
   if (/(low.*(power|signal|optic)|weak.*signal|rx.*low|optical.*power)/.test(text)) {
     return { category: 'low_optical_power', label: 'Potencia óptica baja', emoji: '📶', rawReason };
   }
-  if (/(dying|gasp|power|energia|electric)/.test(text)) {
+  if (/(dying|gasp|power|energia|electric|pwrfail)/.test(text) || /(?:power\s*fail|pwrfail)/.test(status)) {
     return { category: 'power_fail', label: 'Corte de energía', emoji: '🔌', rawReason };
   }
-  if (/(loss of signal|\blos\b|signal|fibra|optic.*loss|link.*down)/.test(text)) {
+  if (/(loss of signal|\blos\b|signal|fibra|optic.*loss|link.*down)/.test(text) || /(?:loss\s*of\s*signal|\blos\b)/.test(status)) {
     return { category: 'loss', label: 'Pérdida de señal (LOS)', emoji: '🔴', rawReason };
   }
   if (/(reboot|reset|restart)/.test(text)) {
@@ -351,7 +351,7 @@ const getAffectedClientNames = (clients = []) => [...new Set(
 
 function determineRequiredFailureType(onus = [], fallbackText = '') {
   const categories = onus.map((candidate) => getFailureCategoryFromOltReason(
-    candidate?.offline_reason || candidate?.last_down_reason || candidate?.status_reason || candidate?.reason || ''
+    candidate?.offline_reason || candidate?.last_down_reason || candidate?.status_reason || candidate?.reason || candidate?.status || ''
   ));
   const powerCount = categories.filter((category) => category === 'power_fail').length;
   const lossCount = categories.filter((category) => category === 'loss').length;
@@ -386,59 +386,20 @@ function isSmartOltRateLimitError(error) {
   return text.includes('rate_limit_exceeded') || text.includes('status 429');
 }
 
-async function enrichOnusWithLiveState(onus = []) {
-  const enriched = onus.map((onu) => ({ ...onu }));
-  const configuredLimit = Number.parseInt(process.env.PORT_CAUSE_LOOKUP_LIMIT, 10);
-  const lookupLimit = Math.min(
-    Number.isInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : 4,
-    4
+async function fetchMonitoringOnusOnPort(board, port, oltName = '') {
+  const allOnus = await fetchMonitoringOnus({ forceRefresh: true });
+  const portOnus = allOnus.filter((onu) =>
+    String(onu?.board) === String(board) && String(onu?.port) === String(port)
   );
-  const configuredConcurrency = Number.parseInt(process.env.PORT_CAUSE_LOOKUP_CONCURRENCY, 10);
-  const lookupConcurrency = Math.min(
-    Number.isInteger(configuredConcurrency) && configuredConcurrency > 0 ? configuredConcurrency : 2,
-    2
-  );
-  const candidates = enriched
-    .map((onu, index) => ({ onu, index }))
-    .filter(({ onu }) => onu.external_id)
-    .slice(0, lookupLimit);
+  if (!oltName) return portOnus;
 
-  // Keep a small concurrency window so a large port outage does not flood the
-  // Smart OLT API, while still resolving small incidents quickly.
-  for (let offset = 0; offset < candidates.length; offset += lookupConcurrency) {
-    const batch = candidates.slice(offset, offset + lookupConcurrency);
-    await Promise.all(batch.map(async ({ onu, index }) => {
-      try {
-        const liveStatus = await getOnuStatus(onu.external_id);
-        if (!liveStatus) return;
-        const rawReason = String(
-          liveStatus.last_down_reason || liveStatus.offline_reason ||
-          liveStatus.status_reason || liveStatus.reason ||
-          onu.offline_reason || onu.last_down_reason || ''
-        ).trim();
-        enriched[index] = {
-          ...onu,
-          status: liveStatus.onu_status || liveStatus.status_desc || onu.status,
-          offline_reason: rawReason,
-          last_down_reason: rawReason
-        };
-      } catch (error) {
-        console.error(`[Port Alert] Live cause lookup failed for ${onu.external_id}:`, error.message);
-      }
-    }));
-  }
-
-  return enriched;
-}
-
-function mergeLiveOnuStates(onus = [], liveOnus = []) {
-  const liveByExternalId = new Map(
-    liveOnus
-      .filter((onu) => onu?.external_id)
-      .map((onu) => [String(onu.external_id), onu])
-  );
-
-  return onus.map((onu) => liveByExternalId.get(String(onu?.external_id || '')) || onu);
+  const normalizedHost = String(oltName).toLowerCase();
+  const matched = portOnus.filter((onu) => {
+    const smartOltName = String(onu?.olt_name || '').toLowerCase();
+    return smartOltName && (smartOltName === normalizedHost ||
+      smartOltName.includes(normalizedHost) || normalizedHost.includes(smartOltName));
+  });
+  return matched.length > 0 ? matched : portOnus;
 }
 
 function formatMandatoryAlertData(failureType, clientNames, eventTime) {
@@ -498,18 +459,10 @@ async function corroborateTotalNapIncidentWithSmartOlt(nap) {
   if (!napName) return { confirmed: false, reason: 'NAP not identified' };
 
   try {
-    let returnedOnus = await findOnusByAddressQuery(napName);
+    const returnedOnus = await fetchMonitoringOnus({ forceRefresh: true });
     const targetKey = normalizeNapName(napName);
     const minimumClients = getMinimumNapClients();
-    let onus = returnedOnus.filter((onu) => normalizeNapName(getNapNameFromOnu(onu)) === targetKey);
-
-    // Some Smart OLT installations store the NAP only in odb_name, which the
-    // address query cannot search. Fall back to a complete OLT snapshot and
-    // filter it locally so the corroboration remains accurate.
-    if (onus.length < minimumClients) {
-      returnedOnus = await fetchAllOnus();
-      onus = returnedOnus.filter((onu) => normalizeNapName(getNapNameFromOnu(onu)) === targetKey);
-    }
+    const onus = returnedOnus.filter((onu) => normalizeNapName(getNapNameFromOnu(onu)) === targetKey);
 
     if (onus.length < minimumClients) {
       return { confirmed: false, reason: `Smart OLT returned only ${onus.length} ONU(s) for ${napName}` };
@@ -522,29 +475,10 @@ async function corroborateTotalNapIncidentWithSmartOlt(nap) {
     // reports Dying Gasp/Power Fail, this is an electrical incident affecting
     // the ONUs/routers and must never be announced as a fibre or NAP LOS.
     const causeCategories = onus.map((onu) => getFailureCategoryFromOltReason(
-      onu.offline_reason || onu.last_down_reason || onu.status_reason || onu.reason || ''
+      onu.offline_reason || onu.last_down_reason || onu.status_reason || onu.reason || onu.status || ''
     ));
     let powerFailureCount = causeCategories.filter((category) => category === 'power_fail').length;
     let lossCount = causeCategories.filter((category) => category === 'loss').length;
-
-    // Some Smart OLT installations omit the last-down reason from the bulk
-    // endpoint. Query one live ONU only when the whole snapshot has no cause,
-    // keeping API usage low while avoiding an assumed/false LOS diagnosis.
-    if (powerFailureCount === 0 && lossCount === 0) {
-      const referenceOnu = onus.find((onu) => onu.external_id);
-      if (referenceOnu) {
-        try {
-          const liveStatus = await getOnuStatus(referenceOnu.external_id);
-          const liveCategory = getFailureCategoryFromOltReason(
-            liveStatus?.last_down_reason || liveStatus?.offline_reason || ''
-          );
-          powerFailureCount = liveCategory === 'power_fail' ? 1 : 0;
-          lossCount = liveCategory === 'loss' ? 1 : 0;
-        } catch (error) {
-          return { confirmed: false, reason: `Smart OLT cause lookup failed: ${error.message}` };
-        }
-      }
-    }
 
     if (powerFailureCount > 0 && lossCount > 0) {
       return {
@@ -890,6 +824,12 @@ export async function syncActiveProblems(targetChatId = DEFAULT_CHAT_ID) {
       await sendMessage(targetChatId, emptyMsg);
       return { total: 0, synchronized: 0, sent: true };
     }
+
+    const monitoringOnus = await fetchMonitoringOnus({ forceRefresh: true });
+    const monitoringBySn = new Map(monitoringOnus.map((onu) => [
+      String(onu?.sn || '').trim().toUpperCase(),
+      onu
+    ]));
     
     const reports = [];
     let synchronizedCount = 0;
@@ -908,32 +848,17 @@ export async function syncActiveProblems(targetChatId = DEFAULT_CHAT_ID) {
       
       try {
         console.log(`Syncing SN ${sn} found in active problem trigger: "${trigger.description}"`);
-        const onu = await findOnuBySn(sn);
+        const onu = monitoringBySn.get(String(sn).trim().toUpperCase()) || null;
         
         if (onu) {
-          let oltReason = 'Desconocida / No disponible';
-          let liveStatus = null;
-          try {
-            liveStatus = await getOnuStatus(onu.external_id);
-            if (liveStatus && liveStatus.status) {
-              onu.status = liveStatus.onu_status || liveStatus.status_desc || (liveStatus.status === true ? 'online' : 'offline'); // Override stale API cache with real-time hardware status
-              const reason = (liveStatus.last_down_reason || liveStatus.offline_reason || '').toLowerCase();
-              if (reason.includes('dying') || reason.includes('power') || reason.includes('gasp')) {
-                oltReason = 'Corte de Energía (Dying Gasp)';
-              } else if (reason.includes('los') || reason.includes('signal') || reason.includes('fibra') || reason.includes('link') || reason.includes('down')) {
-                oltReason = 'Pérdida de Señal (LOS)';
-              } else if (reason) {
-                oltReason = liveStatus.last_down_reason || liveStatus.offline_reason;
-              }
-            }
-          } catch (statusErr) {
-            console.error(`Failed to fetch status for ${sn} during sync:`, statusErr.message);
-          }
+          const rawStatus = onu.last_down_reason || onu.offline_reason || onu.status || '';
+          const bulkClassification = classifySmartOltAlert(rawStatus, onu);
+          const oltReason = bulkClassification.label;
           
           const isOltOnline = (onu.status || '').toLowerCase() === 'online' || (onu.status || '').toLowerCase() === 'active';
           const statusDot = isOltOnline ? '🟢' : '🔴';
-          const oltDownTime = onu.last_down_time || (liveStatus && liveStatus.last_down_time) || 'N/A';
-          const failureCategory = classifySmartOltAlert(oltReason, onu).category;
+          const oltDownTime = onu.last_status_change || onu.last_down_time || 'N/A';
+          const failureCategory = bulkClassification.category;
           const clientName = getClientName(onu);
 
           if (isOltOnline || !['power_fail', 'loss'].includes(failureCategory) || !clientName) {
@@ -1385,14 +1310,12 @@ export async function sendCorrelatedPortReport(incident) {
   const { payload, onu, sns, oltStatusReason } = incident;
   const targetChatId = payload.chat_id || DEFAULT_CHAT_ID;
   const hostName = onu.olt_name || payload.host_name || payload.host || 'OLT Desconocida';
-  const onusOnPort = await findOnusByPort(onu.olt_id || null, onu.board, onu.port, hostName);
+  const onusOnPort = await fetchMonitoringOnusOnPort(onu.board, onu.port, hostName);
   const snapshotOfflineOnus = onusOnPort.filter((candidate) => !isOnline(candidate));
   const localScope = selectNearbyNapOnusForAnalysis(snapshotOfflineOnus, getNapNameFromOnu(onu));
-  const locallyEnrichedOnus = await enrichOnusWithLiveState(localScope.onus);
-  const liveOnusOnPort = mergeLiveOnuStates(onusOnPort, locallyEnrichedOnus);
-  const offlineOnus = liveOnusOnPort.filter(candidate => !isOnline(candidate));
-  const locallyOfflineOnus = locallyEnrichedOnus.filter((candidate) => !isOnline(candidate));
-  console.log(`[Port correlation] Live cause scope: ${formatNapLabel(localScope.focusNapName)} + ${localScope.nearbyNapCount} NAP(s) within ${localScope.radiusKm} km.`);
+  const offlineOnus = snapshotOfflineOnus;
+  const locallyOfflineOnus = localScope.onus.filter((candidate) => !isOnline(candidate));
+  console.log(`[Port correlation] Bulk status scope: ${formatNapLabel(localScope.focusNapName)} + ${localScope.nearbyNapCount} NAP(s) within ${localScope.radiusKm} km.`);
   const totalClients = onusOnPort.length;
   const offlineCount = offlineOnus.length;
   const percentage = totalClients ? ((offlineCount / totalClients) * 100).toFixed(1) : 'N/A';
@@ -1527,7 +1450,10 @@ async function generateNapReport(onu, eventStatus, severity, hostName, eventName
       if (cachedNap && cachedNap.clients && cachedNap.clients.length > 0) {
         onusOnNap = cachedNap.clients;
       } else {
-        onusOnNap = await findOnusByAddressQuery(napBox);
+        const monitoringOnus = await fetchMonitoringOnus();
+        onusOnNap = monitoringOnus.filter((candidate) =>
+          normalizeNapName(getNapNameFromOnu(candidate)) === normalizeNapName(napBox)
+        );
       }
     } catch (err) {
       console.error(`[Smart OLT error querying NAP ONUs]:`, err.message);
@@ -1673,7 +1599,7 @@ ${comparisonText || ''}
   let lastActiveNapInfo = '';
   if (eventStatus !== 'OK' && isNapTotalLoss) {
     try {
-      const onusOnPort = await findOnusByPort(onu.olt_id, onu.board, onu.port, onu.olt_name || hostName);
+      const onusOnPort = await fetchMonitoringOnusOnPort(onu.board, onu.port, onu.olt_name || hostName);
       if (onusOnPort && onusOnPort.length > 0) {
         const napGroups = {};
         onusOnPort.forEach(o => {
@@ -1764,25 +1690,23 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
   if (sn) {
     try {
       if (!onu) {
-        console.log(`Extracted SN: ${sn}. Querying Smart OLT...`);
-        onu = await findOnuBySn(sn);
+        console.log(`Extracted SN: ${sn}. Reading the cached Smart OLT status feed...`);
+        const monitoringOnus = await fetchMonitoringOnus({ forceRefresh: eventStatus === 'PROBLEM' });
+        onu = monitoringOnus.find((candidate) =>
+          String(candidate?.sn || '').trim().toUpperCase() === String(sn).trim().toUpperCase()
+        ) || null;
       }
       
       if (onu) {
-        // Query live status if reason is not yet resolved
+        // The bulk feed reports the Smart OLT classification directly (LOS or
+        // Power fail). Do not use get_onu_status here: Smart OLT reserves it
+        // for a technician's interactive diagnosis, not automated alerts.
         if (!oltStatusReason) {
-          console.log(`Querying live status for ONU ${onu.external_id} (${sn}) on Smart OLT...`);
-          const liveStatus = await getOnuStatus(onu.external_id);
-          if (liveStatus && liveStatus.status) {
-            // Override stale API cache status with real-time hardware status
-            onu.status = liveStatus.onu_status || liveStatus.status_desc || (liveStatus.status === true ? 'online' : 'offline');
-            
-            const rawReason = liveStatus.last_down_reason || liveStatus.offline_reason ||
-              liveStatus.status_reason || liveStatus.reason || '';
-            smartOltAlert = classifySmartOltAlert(rawReason, liveStatus);
-            oltStatusReason = smartOltAlert.rawReason;
-            console.log(`Smart OLT live type for ${sn}: "${smartOltAlert.label}"${rawReason ? ` (raw: ${rawReason})` : ''}`);
-          }
+          const rawReason = onu.last_down_reason || onu.offline_reason ||
+            onu.status_reason || onu.reason || onu.status || '';
+          smartOltAlert = classifySmartOltAlert(rawReason, onu);
+          oltStatusReason = smartOltAlert.rawReason || String(onu.status || '');
+          console.log(`Smart OLT bulk type for ${sn}: "${smartOltAlert.label}"${oltStatusReason ? ` (${oltStatusReason})` : ''}`);
         }
         smartOltEnriched = true;
       }
@@ -1795,25 +1719,9 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
   // Fallback: Resolve ONU and NAP from local disk cache if Smart OLT API didn't return an ONU
   if (!onu && sn) {
     const cleanSn = sn.toUpperCase();
-    const cachedNaps = getCachedNaps();
-    for (const nap of cachedNaps) {
-      if (nap.clients) {
-        const client = nap.clients.find(c => (c.sn || '').toUpperCase() === cleanSn);
-        if (client) {
-          onu = {
-            sn: cleanSn,
-            name: client.name || cleanSn,
-            status: client.status || 'Offline',
-            odb_name: nap.name,
-            olt_name: nap.olt_name,
-            board: nap.board,
-            port: nap.port,
-            onu_id: client.onu_id || 'N/A'
-          };
-          console.log(`[Cache Metadata Fallback] Resolved SN ${cleanSn} to NAP ${nap.name}; this is not treated as live Smart OLT corroboration.`);
-          break;
-        }
-      }
+    onu = findCachedOnuBySn(cleanSn);
+    if (onu) {
+      console.log(`[Cache Metadata Fallback] Resolved SN ${cleanSn} to NAP ${onu.odb_name}; this is not treated as live Smart OLT corroboration.`);
     }
   }
 
@@ -2246,26 +2154,22 @@ export async function processZabbixAlert(payload) {
 
   const timeoutId = setTimeout(async () => {
     pendingAlerts.delete(cleanSn);
-    console.log(`[Settle] SN ${cleanSn}: settle window elapsed. Re-querying Smart OLT with live data...`);
+    console.log(`[Settle] SN ${cleanSn}: settle window elapsed. Refreshing Smart OLT bulk status...`);
 
     // ── Re-query Smart OLT with FRESH data after the settle window ───────────
     let freshOnu            = null;
     let freshOltStatusReason = '';
 
     try {
-      freshOnu = await findOnuBySn(cleanSn);
-
+      const monitoringOnus = await fetchMonitoringOnus({ forceRefresh: true });
+      freshOnu = monitoringOnus.find((candidate) =>
+        String(candidate?.sn || '').trim().toUpperCase() === cleanSn
+      ) || null;
       if (freshOnu) {
-        const liveStatus = await getOnuStatus(freshOnu.external_id);
-        if (liveStatus && liveStatus.status) {
-          // Override stale API cache status with real-time hardware status
-          freshOnu.status = liveStatus.onu_status || liveStatus.status_desc || (liveStatus.status === true ? 'online' : 'offline');
-
-          freshOltStatusReason = liveStatus.last_down_reason || liveStatus.offline_reason ||
-            liveStatus.status_reason || liveStatus.reason || '';
-          const liveAlert = classifySmartOltAlert(freshOltStatusReason, liveStatus);
-          console.log(`[Settle] SN ${cleanSn}: Smart OLT live type = "${liveAlert.label}"${freshOltStatusReason ? ` (raw: ${freshOltStatusReason})` : ''}`);
-        }
+        freshOltStatusReason = freshOnu.last_down_reason || freshOnu.offline_reason ||
+          freshOnu.status_reason || freshOnu.reason || freshOnu.status || '';
+        const bulkAlert = classifySmartOltAlert(freshOltStatusReason, freshOnu);
+        console.log(`[Settle] SN ${cleanSn}: Smart OLT bulk type = "${bulkAlert.label}"${freshOltStatusReason ? ` (${freshOltStatusReason})` : ''}`);
       }
     } catch (err) {
       console.error(`[Settle] SN ${cleanSn}: Smart OLT query failed after settle — ${err.message}`);
@@ -2858,27 +2762,22 @@ export async function processPortAlert(payload, board, port) {
 
   console.log(`[Port Alert] Detected GPON Port failure: Board ${board}, Port ${port} on OLT ${hostName}`);
   
-  // 1. Fetch ONUs for this port
-  const onusOnPort = await findOnusByPort(null, board, port, hostName);
+  // 1. Read the monitoring-safe bulk status feed and join it with the local
+  // NAP cache. This avoids using Smart OLT's full-details export per event.
+  const onusOnPort = await fetchMonitoringOnusOnPort(board, port, hostName);
   
   if (!onusOnPort || onusOnPort.length === 0) {
     console.log(`[Port Alert] Suppressed Board ${board} Port ${port}: Smart OLT returned no registered ONUs, so a detailed alert cannot be built.`);
     return { sent: false, reason: 'No ONUs found in Smart OLT' };
   }
   
-  // 2. Smart OLT's port snapshot measures the total impact. Live status
-  // checks are deliberately limited to the failed NAP and nearby NAPs, so a
-  // large PON incident does not create one API request per ONU.
+  // 2. The bulk status snapshot measures the total impact. The local NAP
+  // scope determines the cause without per-ONU real-time API calls.
   const snapshotOfflineOnus = onusOnPort.filter((onu) => !isOnline(onu));
   const localScope = selectNearbyNapOnusForAnalysis(snapshotOfflineOnus);
-  const locallyEnrichedOnus = await enrichOnusWithLiveState(localScope.onus);
-  const liveOnusOnPort = mergeLiveOnuStates(onusOnPort, locallyEnrichedOnus);
-  const offlineOnus = liveOnusOnPort.filter(o => {
-    const s = (o.status || '').toLowerCase();
-    return s !== 'online' && s !== 'active';
-  });
-  const locallyOfflineOnus = locallyEnrichedOnus.filter((onu) => !isOnline(onu));
-  console.log(`[Port Alert] Live cause scope: ${formatNapLabel(localScope.focusNapName)} + ${localScope.nearbyNapCount} NAP(s) within ${localScope.radiusKm} km.`);
+  const offlineOnus = snapshotOfflineOnus;
+  const locallyOfflineOnus = localScope.onus.filter((onu) => !isOnline(onu));
+  console.log(`[Port Alert] Bulk status scope: ${formatNapLabel(localScope.focusNapName)} + ${localScope.nearbyNapCount} NAP(s) within ${localScope.radiusKm} km.`);
   
   // Group by NAP for better readability
   const naps = {};
