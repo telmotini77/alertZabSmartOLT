@@ -299,7 +299,7 @@ export function applyOnuStatusSnapshot(onus) {
         client.status = snapshot.status;
         changed = true;
       }
-      if (snapshot?.latitude !== null && snapshot?.longitude !== null) {
+      if (snapshot && snapshot.latitude !== null && snapshot.longitude !== null) {
         client.latitude = snapshot.latitude;
         client.longitude = snapshot.longitude;
       }

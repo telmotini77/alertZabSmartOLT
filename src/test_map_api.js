@@ -176,6 +176,13 @@ async function runTests() {
     assert.ok(changedNaps.some(n => n.name === 'NAP-04-A'), 'Snapshot should mark NAP-04-A as changed');
     assert.strictEqual(snapNapA.status, 'offline', 'Full snapshot should mark NAP-04-A as fully offline');
     assert.strictEqual(snapNapA.offlineClients, 3, 'Full snapshot should count every affected ONU');
+
+    // Smart OLT may omit previously cached/decommissioned ONUs from a scan.
+    // Missing snapshot entries must not abort the complete radar cycle.
+    assert.doesNotThrow(
+      () => applyOnuStatusSnapshot(snapshot.slice(0, 1)),
+      'A partial Smart OLT snapshot must safely ignore unmatched cached clients'
+    );
     console.log('Full scan snapshot and total NAP outage calculation: PASS');
 
     // Clean up cache file generated during test
