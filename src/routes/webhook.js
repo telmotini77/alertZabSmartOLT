@@ -3,7 +3,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { fetchAllOnus, findOnuBySn, findOnusByAddressQuery, findOnusByPort, getOnuStatus } from '../services/smartOlt.js';
-import { sendMessage, replyToMessage } from '../services/telegram.js';
+import { sendMessage, sendNotification, replyToMessage } from '../services/telegram.js';
 import { extractSerialNumber, extractNapBox, parseStatusInfo, extractEventTime, formatDateTime, extractBoardAndPort } from '../utils/parser.js';
 import { broadcast } from '../services/websocket.js';
 import { applyOnuStatusSnapshot, updateOnuStatusInCache, getCachedNaps, updateNapCoordinates, updateNapCoordinatesBulk, getStatusHistory, deleteHistoryItem, clearHistory, resolveHistoryItem, updateHistoryEventDetails } from '../services/cache.js';
@@ -1046,7 +1046,7 @@ ${napListLines}
   }
 
   console.log(`[Area Outage] Sending ${areaType} area report for ${entries.length} NAPs.`);
-  await sendMessage(chatId, message);
+  await sendNotification(chatId, message);
 }
 
 const isOnline = (onu) => ['online', 'active'].includes(String(onu?.status || '').toLowerCase());
@@ -1142,7 +1142,7 @@ export async function sendCorrelatedPortReport(incident) {
     (offlineCount > 20 ? `\n<i>…y ${offlineCount - 20} ONUs más.</i>` : '') +
     `\n\n<i>Correlación Zabbix + Smart OLT completada en ${getPortCorrelationMs() / 1000}s.</i>`;
 
-  await sendMessage(targetChatId, report);
+  await sendNotification(targetChatId, report);
   console.log(`[Port correlation] Sent report for ${hostName}, board ${onu.board}, port ${onu.port}. Offline: ${offlineCount}/${totalClients}.`);
   return { sent: true, offlineCount, totalClients };
 }
@@ -1757,7 +1757,7 @@ ${triggerDesc ? `\n<i>Descripción: ${triggerDesc}</i>` : ''}
         };
       }
     }
-    await sendMessage(targetChatId, enrichedText.trim(), sendOptions);
+    await sendNotification(targetChatId, enrichedText.trim(), sendOptions);
   }
   return { sn, enriched: smartOltEnriched, sent: !options.suppressSend };
 }
@@ -2590,7 +2590,7 @@ export async function processPortAlert(payload, board, port) {
       });
     }
     
-    await sendMessage(targetChatId, reportText.trim());
+    await sendNotification(targetChatId, reportText.trim());
   }
   
   console.log(`[Port Alert] Successfully sent port summary for Board ${board} Port ${port} in ${totalChunks} messages. Affected: ${offlineCount}`);

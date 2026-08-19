@@ -297,6 +297,7 @@ process.env.PORT_CORRELATION_ENABLED = 'false';
 process.env.NAP_CACHE_FILE = 'data/.nap_cache.routes.test.json';
 process.env.TELEGRAM_BOT_TOKEN = '123456:test_token';
 process.env.TELEGRAM_CHAT_ID = '-100987654321';
+process.env.TELEGRAM_ADDITIONAL_CHAT_IDS = '';
 process.env.TELEGRAM_MODE = 'webhook'; // Webhook mode is easier to test as it disables the long poll loop
 process.env.PUBLIC_URL = 'https://test-api.onrender.com';
 process.env.PORT = '3001';

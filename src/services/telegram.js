@@ -3,6 +3,13 @@ import crypto from 'crypto';
 dotenv.config();
 
 const TELEGRAM_BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
+const DEFAULT_ADDITIONAL_CHAT_IDS = process.env.NODE_ENV === 'test' ? '' : '-5141632299';
+const ADDITIONAL_CHAT_IDS = String(
+  process.env.TELEGRAM_ADDITIONAL_CHAT_IDS ?? DEFAULT_ADDITIONAL_CHAT_IDS
+)
+  .split(/[;,\s]+/)
+  .map((chatId) => chatId.trim())
+  .filter(Boolean);
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const FETCH_TIMEOUT_MS = 20_000; // 20s per Telegram request (Docker may be slow on first connect)
@@ -111,6 +118,42 @@ export async function sendMessage(chatId, text, options = {}) {
     console.error('❌ Error sending message to Telegram:', error.message);
     throw error;
   }
+}
+
+/**
+ * Send an operational notification to its primary destination and every
+ * configured additional chat. Destinations are deduplicated, and one failing
+ * group does not prevent delivery to the others.
+ */
+export async function sendNotification(primaryChatId, text, options = {}) {
+  const destinations = [...new Set(
+    [primaryChatId, ...ADDITIONAL_CHAT_IDS]
+      .filter((chatId) => chatId !== undefined && chatId !== null && String(chatId).trim())
+      .map((chatId) => String(chatId).trim())
+  )];
+
+  if (destinations.length === 0) {
+    throw new Error('No Telegram notification destinations are configured.');
+  }
+
+  const settled = await Promise.allSettled(
+    destinations.map((chatId) => sendMessage(chatId, text, options))
+  );
+  const delivered = settled.filter((result) => result.status === 'fulfilled').length;
+  const failures = settled
+    .map((result, index) => ({ result, chatId: destinations[index] }))
+    .filter(({ result }) => result.status === 'rejected');
+
+  failures.forEach(({ result, chatId }) => {
+    console.error(`❌ Telegram notification failed for chat ${chatId}: ${result.reason?.message || result.reason}`);
+  });
+
+  if (delivered === 0) {
+    throw failures[0]?.result.reason || new Error('Telegram notification failed for every destination.');
+  }
+
+  console.log(`📨 Telegram notification delivered to ${delivered}/${destinations.length} destination(s).`);
+  return { delivered, total: destinations.length, destinations };
 }
 
 /**

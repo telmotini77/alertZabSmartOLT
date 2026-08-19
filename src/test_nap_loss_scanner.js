@@ -7,6 +7,7 @@ process.env.SMARTOLT_SUBDOMAIN = 'testcompany';
 process.env.SMARTOLT_API_KEY = 'test_key';
 process.env.TELEGRAM_BOT_TOKEN = '123456:test_token';
 process.env.TELEGRAM_CHAT_ID = '-100987654321';
+process.env.TELEGRAM_ADDITIONAL_CHAT_IDS = '';
 process.env.NAP_CACHE_FILE = cacheFile;
 process.env.NAP_LOSS_MIN_ONUS = '2';
 
