@@ -59,6 +59,15 @@ assert.ok(telegramMessages[0].text.includes('CAÍDA MASIVA DE PUERTO GPON'));
 assert.ok(telegramMessages[0].text.includes('Resumen de Afectación'));
 assert.ok(telegramMessages[0].text.includes('Afectación Desglosada por Caja NAP'));
 assert.ok(telegramMessages[0].text.includes('NAP CAJA NOC'));
+assert.ok(telegramMessages[0].text.includes('Tipo de caída:'));
+assert.ok(telegramMessages[0].text.includes('Pérdida de señal'));
+assert.ok(telegramMessages[0].text.includes('Clientes afectados:'));
+assert.ok(telegramMessages[0].text.includes('Cliente 1'));
+assert.ok(telegramMessages[0].text.includes('Cliente 2'));
+assert.ok(telegramMessages[0].text.includes('Fecha y hora:'));
+assert.ok(telegramMessages[0].text.includes('2026-08-18 13:32:25'));
+assert.ok(!telegramMessages[0].text.includes('HWTC11111111'));
+assert.ok(!telegramMessages[0].text.includes('HWTC22222222'));
 assert.ok(!telegramMessages[0].text.includes('No se encontraron clientes registrados'));
 
 const recoveryResult = await processPortAlert({ ...payload, event_status: 'OK' }, '12', '15');

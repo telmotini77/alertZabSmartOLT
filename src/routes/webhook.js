@@ -229,6 +229,47 @@ export function formatNapLabel(napName) {
   return /^NAP(?:[-_.\s]|$)/i.test(code) ? code : `NAP ${code}`;
 }
 
+const isDeviceSerialLike = (value) => {
+  const text = String(value || '').trim();
+  return /^(?=[A-Z0-9]{12,20}$)(?=[A-Z0-9]*\d)[A-Z]{4}[A-Z0-9]{8,16}$/i.test(text) ||
+    /^(?=[A-F0-9]{16}$)(?=[A-F0-9]*\d)[A-F0-9]{16}$/i.test(text);
+};
+
+const getClientName = (client) => {
+  const name = String(client?.name || client?.customer_name || client?.client_name || '').trim();
+  return name && !isDeviceSerialLike(name) ? name : '';
+};
+
+const getAffectedClientNames = (clients = []) => [...new Set(
+  clients.map(getClientName).filter(Boolean)
+)];
+
+function determineRequiredFailureType(onus = [], fallbackText = '') {
+  const categories = onus.map((candidate) => getFailureCategoryFromOltReason(
+    candidate?.offline_reason || candidate?.last_down_reason || candidate?.status_reason || candidate?.reason || ''
+  ));
+  const powerCount = categories.filter((category) => category === 'power_fail').length;
+  const lossCount = categories.filter((category) => category === 'loss').length;
+  if (powerCount > lossCount) return 'Corte de energía';
+  if (lossCount > 0) return 'Pérdida de señal';
+
+  const fallbackCategory = classifySmartOltAlert(fallbackText, {}).category;
+  if (fallbackCategory === 'power_fail') return 'Corte de energía';
+  if (fallbackCategory === 'loss') return 'Pérdida de señal';
+  return null;
+}
+
+function formatMandatoryAlertData(failureType, clientNames, eventTime) {
+  const names = [...new Set(clientNames.filter(Boolean))];
+  const safeNames = names.length > 0
+    ? names.map(escapeTelegramHtml).join(', ')
+    : 'Clientes no identificados por Smart OLT';
+  return `📋 <b>Datos obligatorios:</b>\n` +
+    `• <b>Tipo de caída:</b> ${failureType}\n` +
+    `• <b>Clientes afectados:</b> ${safeNames}\n` +
+    `• <b>Fecha y hora:</b> <code>${eventTime || formatDateTime(new Date())}</code>`;
+}
+
 function registerNapLossEvidence(nap, sn) {
   const key = normalizeNapName(nap?.name);
   const normalizedSn = String(sn || '').trim().toUpperCase();
@@ -654,7 +695,7 @@ export async function syncActiveProblems(targetChatId = DEFAULT_CHAT_ID) {
       const zabbixTime = formatDateTime(new Date(Number(trigger.lastchange) * 1000));
 
       if (!sn) {
-        reports.push(`⚠️ <b>Alerta Zabbix Genérica (Sin SN):</b>\n• <b>Evento:</b> ${trigger.description}\n• <b>Hora Zabbix:</b> <code>${zabbixTime}</code>\n• <b>Host:</b> ${trigger.hosts ? trigger.hosts.map(h => h.name).join(', ') : 'N/A'}`);
+        console.log(`[Sync] Generic Zabbix event suppressed because Smart OLT cannot identify affected clients: "${trigger.description}".`);
         continue;
       }
       
@@ -685,12 +726,27 @@ export async function syncActiveProblems(targetChatId = DEFAULT_CHAT_ID) {
           const isOltOnline = (onu.status || '').toLowerCase() === 'online' || (onu.status || '').toLowerCase() === 'active';
           const statusDot = isOltOnline ? '🟢' : '🔴';
           const oltDownTime = onu.last_down_time || (liveStatus && liveStatus.last_down_time) || 'N/A';
+          const failureCategory = classifySmartOltAlert(oltReason, onu).category;
+          const clientName = getClientName(onu);
+
+          if (isOltOnline || !['power_fail', 'loss'].includes(failureCategory) || !clientName) {
+            console.log('[Sync] Event suppressed: Smart OLT did not confirm an energy/signal outage with an affected client name.');
+            continue;
+          }
+          const failureType = failureCategory === 'power_fail' ? 'Corte de energía' : 'Pérdida de señal';
           
           const publicUrl = PUBLIC_URL;
           const sNapBox = extractNapBox(onu.address) || extractNapBox(onu.description) || 'N/A';
           const sNapLink = (sNapBox !== 'N/A' && publicUrl) ? `<a href="${publicUrl}/?nap=${encodeURIComponent(sNapBox)}">${sNapBox}</a>` : sNapBox;
           
-          reports.push(`🔌 <b>ONU ${onu.name} (${sn})</b>\n• <b>Dirección/NAP:</b> ${onu.address || 'N/A'}\n• <b>Caja NAP:</b> <b>${sNapLink}</b>\n• <b>Estado Smart OLT:</b> ${statusDot} <b>${onu.status || 'Offline'}</b>\n• <b>Causa OLT:</b> <code>${oltReason}</code>\n• <b>Hora Zabbix:</b> <code>${zabbixTime}</code>\n• <b>Hora Corte Smart OLT:</b> <code>${oltDownTime}</code>`);
+          reports.push(
+            `${formatMandatoryAlertData(failureType, [clientName], zabbixTime)}\n\n` +
+            `• <b>Dirección/NAP:</b> ${onu.address || 'N/A'}\n` +
+            `• <b>Caja NAP:</b> <b>${sNapLink}</b>\n` +
+            `• <b>Estado Smart OLT:</b> ${statusDot} <b>${onu.status || 'Offline'}</b>\n` +
+            `• <b>Causa OLT:</b> <code>${oltReason}</code>\n` +
+            `• <b>Hora del corte Smart OLT:</b> <code>${oltDownTime}</code>`
+          );
           
           const cacheStatus = isOltOnline ? 'Online' : 'Offline';
           const updatedNap = updateOnuStatusInCache(sn, cacheStatus);
@@ -700,17 +756,22 @@ export async function syncActiveProblems(targetChatId = DEFAULT_CHAT_ID) {
           
           synchronizedCount++;
         } else {
-          reports.push(`⚠️ <b>ONU No Encontrada en OLT (${sn}):</b>\n• <b>Evento Zabbix:</b> ${trigger.description}\n• <b>Hora Zabbix:</b> <code>${zabbixTime}</code>`);
+          console.log('[Sync] Zabbix event suppressed because its ONU was not found in Smart OLT.');
         }
       } catch (err) {
         console.error(`Failed to synchronize SN ${sn}:`, err.message);
-        reports.push(`⚠️ <b>Error de Sincronización (${sn}):</b>\n• <b>Evento Zabbix:</b> ${trigger.description}\n• <b>Error:</b> ${err.message}`);
       }
+    }
+
+    if (reports.length === 0) {
+      const emptyDetailedMsg = `✅ <b>Sincronización completada</b>\n\nNo existen caídas de energía o señal con clientes identificados y corroboradas por Smart OLT.`;
+      await sendMessage(targetChatId, emptyDetailedMsg);
+      return { total: activeTriggers.length, synchronized: 0, sent: true };
     }
     
     const summaryText = `🔄 <b>REPORTE DE INCIDENTES SINCRONIZADO</b> 🔄\n\n${reports.join('\n\n')}\n\n📊 <b>Resumen:</b>\n• Total alertas activas Zabbix: <b>${activeTriggers.length}</b>\n• Corroboradas con Smart OLT: <b>${synchronizedCount}</b>`;
     
-    await sendMessage(targetChatId, summaryText.trim());
+    await sendNotification(targetChatId, summaryText.trim());
     return { total: activeTriggers.length, synchronized: synchronizedCount, sent: true };
   } catch (error) {
     console.error('Error during synchronization:', error.message);
@@ -988,6 +1049,14 @@ async function analyzeAndSendAreaReport(entries) {
   }
 
   const totalAffected = entries.reduce((sum, e) => sum + (e.nap.totalClients || 0), 0);
+  const areaClientNames = getAffectedClientNames(
+    entries.flatMap((entry) => entry.nap.clients || [])
+  );
+  if (areaClientNames.length === 0) {
+    console.log('[Area Outage] Report suppressed because Smart OLT did not provide affected client names.');
+    return;
+  }
+  const mandatoryAreaData = formatMandatoryAlertData('Pérdida de señal', areaClientNames, now);
   const napListLines = entries
     .sort((a, b) => (a.nap.name || '').localeCompare(b.nap.name || '', undefined, { numeric: true }))
     .map(e => {
@@ -1007,6 +1076,8 @@ async function analyzeAndSendAreaReport(entries) {
     message = `
 🌐🚨 <b>CAÍDA EN ÁREA DETECTADA (MISMO PUERTO OLT)</b>
 
+${mandatoryAreaData}
+
 📡 <b>OLT:</b> ${sampleNap.olt_name || 'Desconocida'} | <b>Puerto PON:</b> Slot ${sampleNap.board} / Puerto ${sampleNap.port}
 ⚠️ <b>Diagnóstico:</b> Múltiples cajas NAP del mismo puerto caídas → probable corte de fibra troncal
 
@@ -1021,6 +1092,8 @@ ${napListLines}
     message = `
 🌐⚠️ <b>CAÍDA EN ÁREA DETECTADA (PROXIMIDAD GEOGRÁFICA)</b>
 
+${mandatoryAreaData}
+
 📡 <b>OLT:</b> ${sampleNap.olt_name || 'Varias'}
 ⚠️ <b>Diagnóstico:</b> Caídas en un radio ≤ ${radiusKm} km → posible falla en fibra de distribución o sector eléctrico
 
@@ -1034,6 +1107,8 @@ ${napListLines}
     // Not related — send a brief summary noting they're independent
     message = `
 ⚡ <b>MÚLTIPLES FALLAS INDEPENDIENTES DETECTADAS</b>
+
+${mandatoryAreaData}
 
 Se detectaron ${entries.length} caídas de NAP sin relación geográfica ni de red en los últimos ${Math.round(getAreaOutageWindowMs() / 60000)} min:
 
@@ -1111,7 +1186,10 @@ export async function sendCorrelatedPortReport(incident) {
   const minOffline = getPositiveNumber(process.env.PORT_OUTAGE_MIN_OFFLINE, 3);
   const minPercentage = getPositiveNumber(process.env.PORT_OUTAGE_MIN_PERCENT, 30);
   const isPortOutage = offlineCount >= minOffline && Number(percentage) >= minPercentage;
-  const zabbixSns = [...sns].filter(Boolean);
+  const zabbixEventCount = [...sns].filter(Boolean).length;
+  const failureType = determineRequiredFailureType(offlineOnus, oltStatusReason) || 'Pérdida de señal';
+  const affectedClientNames = getAffectedClientNames(offlineOnus);
+  const eventTime = extractEventTime(payload);
   const portSourceComparison = compareSmartOltWithZabbix(
     classifySmartOltAlert(oltStatusReason, onu),
     parseStatusInfo(`${payload.event_name || payload.trigger_name || ''} ${payload.trigger_description || ''}`),
@@ -1122,22 +1200,27 @@ export async function sendCorrelatedPortReport(incident) {
     console.log(`[Port correlation] Suppressed ${hostName} board ${onu.board}/port ${onu.port}: Smart OLT reports no offline ONUs.`);
     return { sent: false, reason: portSourceComparison.verdict };
   }
+  if (affectedClientNames.length === 0) {
+    console.log(`[Port correlation] Suppressed ${hostName} board ${onu.board}/port ${onu.port}: Smart OLT did not provide affected client names.`);
+    return { sent: false, reason: 'Affected client names unavailable' };
+  }
   const offlineDetail = offlineOnus.slice(0, 20)
-    .map(candidate => `• 🔴 ${candidate.name || 'Sin nombre'} (<code>${candidate.sn || 'N/A'}</code>)`)
+    .map(candidate => `• 🔴 ${getClientName(candidate) || 'Cliente no identificado'}`)
     .join('\n') || '• Smart OLT aún no reporta ONUs Offline.';
   const title = isPortOutage
     ? '🚨🔴 <b>POSIBLE CAÍDA DE PUERTO OLT CORROBORADA</b>'
     : '⚠️ <b>INCIDENTE PARCIAL EN PUERTO OLT CORROBORADO</b>';
 
   const report = `${title}\n\n` +
+    `${formatMandatoryAlertData(failureType, affectedClientNames, eventTime)}\n\n` +
     `<b>OLT:</b> ${hostName}\n` +
     `<b>Puerto afectado:</b> Tarjeta ${onu.board} | PON ${onu.port}\n` +
     `\n🔎 <b>Comparación Smart OLT ↔ Zabbix:</b>\n` +
     `<b>1. Smart OLT (principal):</b> ${offlineCount}/${totalClients} ONUs Offline (${percentage}%)\n` +
     (oltStatusReason ? `<b>Última causa OLT:</b> ${oltStatusReason}\n` : '') +
-    `<b>2. Zabbix (confirmación):</b> ${zabbixSns.length} evento(s) — ${zabbixSns.map(sn => `<code>${sn}</code>`).join(', ') || 'N/A'}\n` +
+    `<b>2. Zabbix (confirmación):</b> ${zabbixEventCount} evento(s)\n` +
     `<b>Resultado:</b> ${portSourceComparison.verdict}\n` +
-    `📅 <b>Hora del evento:</b> <code>${extractEventTime(payload)}</code>\n\n` +
+    `📅 <b>Hora del evento:</b> <code>${eventTime}</code>\n\n` +
     `<b>Detalle Smart OLT:</b>\n${offlineDetail}` +
     (offlineCount > 20 ? `\n<i>…y ${offlineCount - 20} ONUs más.</i>` : '') +
     `\n\n<i>Correlación Zabbix + Smart OLT completada en ${getPortCorrelationMs() / 1000}s.</i>`;
@@ -1192,9 +1275,8 @@ async function generateNapReport(onu, eventStatus, severity, hostName, eventName
   const napLabel = formatNapLabel(napBox);
   const napDisplay = napBox ? `<code>${napLabel}</code>` : '<i>NAP no identificada en Smart OLT</i>';
   const napLink = (napBox && publicUrl) ? `<a href="${publicUrl}/?nap=${encodeURIComponent(napBox)}"><b>${napLabel}</b></a>` : napDisplay;
-  const onuName = String(onu.name || onu.customer_name || '').trim() || 'Sin nombre';
-  const onuSn = String(onu.sn || '').trim().toUpperCase();
-  const onuIdentityLine = `👤 <b>ONU/cliente reportado:</b> ${onuName}${onuSn ? ` — <code>${onuSn}</code>` : ''}`;
+  const onuName = getClientName(onu) || 'Cliente no identificado';
+  const onuIdentityLine = `👤 <b>ONU/cliente reportado:</b> ${escapeTelegramHtml(onuName)}`;
   const comparisonText = formatSourceComparison(sourceComparison, eventStatus, onu, oltStatusReason);
 
   // Build technical diagnostic explanation based on failure type
@@ -1202,6 +1284,7 @@ async function generateNapReport(onu, eventStatus, severity, hostName, eventName
   const reasonLower = (oltStatusReason || '').toLowerCase();
   const isLoss = reasonLower.includes('los') || reasonLower.includes('signal') || reasonLower.includes('fibra') || parseStatusInfo(eventName).category === 'loss';
   const isPower = reasonLower.includes('power') || reasonLower.includes('dying') || reasonLower.includes('gasp') || parseStatusInfo(eventName).category === 'power_fail';
+  const failureType = isPower ? 'Corte de energía' : 'Pérdida de señal';
 
   if (eventStatus === 'OK') {
     techExplanation = `\n💡 <b>Diagnóstico:</b> El enlace óptico y la alimentación eléctrica se encuentran estables. La ONU volvió a registrarse exitosamente en la OLT.`;
@@ -1267,6 +1350,8 @@ async function generateNapReport(onu, eventStatus, severity, hostName, eventName
     return `
 ${singleTitle}
 
+${formatMandatoryAlertData(failureType, [onuName], eventTime)}
+
 📦 <b>Caja afectada:</b> ${boxLabel}
 ${onuIdentityLine}${singlePowerNapLine}
 🏢 <b>OLT:</b> ${onu.olt_name || hostName} | <b>Puerto PON:</b> Slot ${onu.board || 'N/A'} / Puerto ${onu.port || 'N/A'}
@@ -1275,7 +1360,7 @@ ${onuIdentityLine}${singlePowerNapLine}
 • <b>Estado:</b> ${singleEmoji} <b>${singleLabel}</b> (${severity})
 ${eventTime ? `• 📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : ''}${singleReason ? `• 🔌 <b>Causa Reportada OLT:</b> <code>${singleReason}</code>\n` : ''}${singleTechExplanation}
 
-${comparisonText ? `${comparisonText}\n\n` : ''}ℹ️ <i>Evento Zabbix: ${eventName}</i>
+${comparisonText || ''}
 `.trim();
   }
 
@@ -1289,6 +1374,10 @@ ${comparisonText ? `${comparisonText}\n\n` : ''}ℹ️ <i>Evento Zabbix: ${event
   const totalOffline = offlineOnus.length;
   const totalOnline = totalClients - totalOffline;
   const percentageDown = ((totalOffline / totalClients) * 100).toFixed(1);
+  const affectedClientNames = getAffectedClientNames(offlineOnus);
+  if (affectedClientNames.length === 0 && onuName !== 'Cliente no identificado') {
+    affectedClientNames.push(onuName);
+  }
 
   // A Power Fail is always reported as an ONU/router power incident.  Even if
   // several clients are down, it must never be relabelled as a fibre/NAP loss.
@@ -1399,6 +1488,8 @@ ${comparisonText ? `${comparisonText}\n\n` : ''}ℹ️ <i>Evento Zabbix: ${event
   return `
 ${effectiveTitle}
 
+${formatMandatoryAlertData(failureType, affectedClientNames, eventTime)}
+
 📦 <b>Caja afectada:</b> ${napLink}${coordsText}
 ${onuIdentityLine}${powerNapDetail}
 🏢 <b>OLT:</b> ${onu.olt_name || hostName} | <b>Puerto PON:</b> Slot ${onu.board || 'N/A'} / Puerto ${onu.port || 'N/A'}
@@ -1413,7 +1504,7 @@ ${eventTime ? `• 📅 <b>Hora del Evento:</b> <code>${eventTime}</code>\n` : '
 • 🔴 Afectadas (Offline): <b>${totalOffline}</b> (<b>${percentageDown}%</b>)
 • <b>Diagnóstico:</b> ${napWarning}${lastActiveNapInfo}
 
-${comparisonText ? `${comparisonText}\n\n` : ''}ℹ️ <i>Evento Zabbix: ${eventName}</i>
+${comparisonText || ''}
 `.trim();
 }
 
@@ -1524,7 +1615,7 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
   const statusInfo = parseStatusInfo(zabbixEventName + ' ' + zabbixTriggerDesc);
 
   // The live OLT reason is authoritative whenever it is available. Zabbix
-  // contributes the event timing and serial number, but never overwrites the
+  // contributes the event timing and internal correlation key, but never overwrites the
   // diagnosed cause reported by Smart OLT.
   if (!smartOltAlert && oltStatusReason) {
     smartOltAlert = classifySmartOltAlert(oltStatusReason, onu);
@@ -1541,6 +1632,19 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
   const sourceComparison = smartOltEnriched && onu
     ? compareSmartOltWithZabbix(smartOltAlert, statusInfo, eventStatus, onu)
     : null;
+
+  if (eventStatus === 'PROBLEM' && !['power_fail', 'loss'].includes(category)) {
+    console.log(`[Notification Filter] Suppressing category "${category}": alerts must be classified as power failure or signal loss.`);
+    return { sn, enriched: smartOltEnriched, sent: false, reason: 'Unsupported failure type' };
+  }
+
+  if (eventStatus === 'PROBLEM' && onu && !getClientName(onu)) {
+    const napWithNamedClient = findCachedNap(getNapNameFromOnu(onu));
+    if (!getAffectedClientNames(napWithNamedClient?.clients || []).length) {
+      console.log('[Notification Filter] Suppressing alert because Smart OLT did not provide affected client names.');
+      return { sn, enriched: smartOltEnriched, sent: false, reason: 'Affected client names unavailable' };
+    }
+  }
 
   // Smart OLT is the only source allowed to change the operational map state.
   // Zabbix data is retained as event evidence but does not mark an ONU up/down.
@@ -1696,15 +1800,20 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
 
   if (!smartOltEnriched) {
     // Standalone Zabbix Alert (Fallback / Decoupled mode)
-    const snPart = sn ? `\n• <b>Nro. Serie Detectado:</b> <code>${sn}</code>` : '';
     const reasonPart = oltStatusReason ? `\n• <b>Causa OLT:</b> <code>${oltStatusReason}</code>` : '';
+    const fallbackNames = getAffectedClientNames(onu ? [onu] : []);
+    if (fallbackNames.length === 0) {
+      console.log('[Notification Filter] Standalone alert suppressed because no affected client names are available.');
+      return { sn, enriched: false, sent: false, reason: 'Affected client names unavailable' };
+    }
     enrichedText = `
 ${priorityTitle}
 
+${formatMandatoryAlertData(category === 'power_fail' ? 'Corte de energía' : 'Pérdida de señal', fallbackNames, eventTime)}
+
 <b>Estado:</b> ${statusLabel}
 <b>Severidad:</b> ${severity}
-📅 <b>Hora del Evento:</b> <code>${eventTime}</code>
-<b>Host/Equipo:</b> ${hostName}${snPart}${reasonPart}
+<b>Host/Equipo:</b> ${hostName}${reasonPart}
 
 📝 <b>Detalle del Evento (Zabbix):</b>
 ${eventName}
@@ -1739,16 +1848,6 @@ ${triggerDesc ? `\n<i>Descripción: ${triggerDesc}</i>` : ''}
       
       if (firstRow.length > 0) {
         inlineButtons.push(firstRow);
-      }
-      
-      const botUsername = (process.env.BOT_USERNAME || '').trim().replace(/^@/, '');
-      if (sn && botUsername) {
-        inlineButtons.push([
-          {
-            text: '⚡ Diagnóstico Óptico en Vivo',
-            url: `https://t.me/${botUsername}?start=diag_${sn.toUpperCase()}`
-          }
-        ]);
       }
       
       if (inlineButtons.length > 0) {
@@ -2110,7 +2209,7 @@ async function sendPublicAlertHistory(chatId, messageId, requestedPage = 1, only
           : '⚠️';
     return `${position}. ${icon} <b>${escapeTelegramHtml(item.failureLabel || 'Alerta de red')}</b>\n` +
       `   📦 ${escapeTelegramHtml(item.napName || 'NAP desconocida')} | 👤 ${escapeTelegramHtml(item.onuName || 'Cliente')}\n` +
-      `   🔢 <code>${escapeTelegramHtml(item.sn || 'N/A')}</code> | 🕒 ${escapeTelegramHtml(item.eventTime || item.formattedTime || item.timestamp)}\n` +
+      `   🕒 ${escapeTelegramHtml(item.eventTime || item.formattedTime || item.timestamp)}\n` +
       `   ${state}`;
   });
 
@@ -2432,16 +2531,6 @@ Comandos disponibles:
               inlineButtons.push(firstRow);
             }
             
-            const botUsername = (process.env.BOT_USERNAME || '').trim().replace(/^@/, '');
-            if (sn && botUsername) {
-              inlineButtons.push([
-                {
-                  text: '⚡ Diagnóstico Óptico en Vivo',
-                  url: `https://t.me/${botUsername}?start=diag_${sn.toUpperCase()}`
-                }
-              ]);
-            }
-            
             if (inlineButtons.length > 0) {
               sendOptions.reply_markup = {
                 inline_keyboard: inlineButtons
@@ -2475,14 +2564,11 @@ Comandos disponibles:
                             text.toUpperCase().includes('RESOLVED');
                             
       if (isZabbixAlert) {
-        const fallbackText = `
-${priorityTitle}
-• <b>Nro. Serie Detectado:</b> <code>${sn}</code>
-
-⚠️ <i>Nota: No se pudieron cargar los datos de Smart OLT (Modo Independiente).</i>
-📝 <i>Alerta original: ${text}</i>
-`.trim();
-        await replyToMessage(chatId, messageId, fallbackText);
+        await replyToMessage(
+          chatId,
+          messageId,
+          '⚠️ <b>No se generó una alerta operativa.</b>\n\nSmart OLT no aportó el tipo de caída y el nombre del cliente requeridos.'
+        );
       }
     }
   } else {
@@ -2543,10 +2629,20 @@ export async function processPortAlert(payload, board, port) {
   const offlineCount = offlineOnus.length;
   const percentage = ((offlineCount / totalClients) * 100).toFixed(1);
   const eventTime = extractEventTime(payload);
+  const failureType = determineRequiredFailureType(
+    offlineOnus,
+    `${payload.event_name || payload.trigger_name || ''} ${payload.trigger_description || ''}`
+  ) || 'Pérdida de señal';
   
   if (offlineCount === 0) {
     console.log(`[Port Alert] Suppressed Board ${board} Port ${port}: Smart OLT reports ${totalClients}/${totalClients} ONUs Online.`);
     return { sent: false, reason: 'Smart OLT reports no offline ONUs', totalClients, offlineCount };
+  }
+
+  const affectedClientNames = getAffectedClientNames(offlineOnus);
+  if (affectedClientNames.length === 0) {
+    console.log(`[Port Alert] Suppressed Board ${board} Port ${port}: Smart OLT did not provide affected client names.`);
+    return { sent: false, reason: 'Affected client names unavailable', totalClients, offlineCount };
   }
 
   const BATCH_SIZE = 32;
@@ -2554,8 +2650,10 @@ export async function processPortAlert(payload, board, port) {
 
   for (let i = 0; i < totalChunks; i++) {
     const chunkOnus = offlineOnus.slice(i * BATCH_SIZE, (i + 1) * BATCH_SIZE);
+    const chunkClientNames = getAffectedClientNames(chunkOnus);
     
     let reportText = `🚨🔴 <b>CAÍDA MASIVA DE PUERTO GPON (Parte ${i + 1}/${totalChunks})</b>\n\n`;
+    reportText += `${formatMandatoryAlertData(failureType, chunkClientNames, eventTime)}\n\n`;
     
     if (i === 0) {
       reportText += `🏢 <b>OLT:</b> ${hostName}\n`;
@@ -2586,7 +2684,7 @@ export async function processPortAlert(payload, board, port) {
         : '';
       reportText += `\n📦 <b>Caja afectada: ${formatNapLabel(nap)}</b>${mapLink} - <b>${clients.length} cliente(s) caído(s):</b>\n`;
       clients.forEach(c => {
-        reportText += `  🔴 ${c.name} (<code>${c.sn}</code>)\n`;
+        reportText += `  🔴 ${escapeTelegramHtml(getClientName(c))}\n`;
       });
     }
     

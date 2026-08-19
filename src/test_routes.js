@@ -582,7 +582,10 @@ try {
   const smartOltReply = fetchLog.find(log => log.url.includes('/sendMessage') && log.body?.reply_to_message_id === 777);
   const hasTelegramReply = Boolean(smartOltReply);
 
-  if (hasSmartOltCallTg && hasTelegramReply && smartOltReply.body.text.includes('CORTE DE ENERGÍA')) {
+  if (hasSmartOltCallTg &&
+      hasTelegramReply &&
+      smartOltReply.body.text.includes('CORTE DE ENERGÍA') &&
+      !JSON.stringify(smartOltReply.body).includes('FHTT8C3A91BF')) {
     console.log('✅ Bot listener prioritizes the Smart OLT cause over the Zabbix label: PASS');
   } else {
     console.error('❌ Bot listener did not use the Smart OLT cause: FAIL');
@@ -644,7 +647,11 @@ try {
   }
   
   const syncTgMessage = fetchLog.find(log => log.url.includes('/sendMessage') && log.body?.text?.includes('REPORTE DE INCIDENTES SINCRONIZADO'))?.body?.text || '';
-  if (syncTgMessage.includes('ONU Juan Pérez (FHTT8C3A91BF)') && syncTgMessage.includes('Alerta Zabbix Genérica (Sin SN)')) {
+  if (syncTgMessage.includes('Clientes afectados:</b> Juan Pérez') &&
+      syncTgMessage.includes('Tipo de caída:</b> Corte de energía') &&
+      syncTgMessage.includes('Fecha y hora:') &&
+      !syncTgMessage.includes('FHTT8C3A91BF') &&
+      !syncTgMessage.includes('Alerta Zabbix Genérica')) {
     console.log('✅ Synchronized Telegram Summary Report Content: PASS');
   } else {
     console.error('❌ Synchronized Telegram Summary Report Content: FAIL');
@@ -735,7 +742,8 @@ try {
   const publicHistoryReply = fetchLog.find(log =>
     log.url.includes('/sendMessage') && log.body?.reply_to_message_id === 1001
   );
-  if (publicHistoryReply?.body?.text?.includes('HISTORIAL PÚBLICO DE ALERTAS')) {
+  if (publicHistoryReply?.body?.text?.includes('HISTORIAL PÚBLICO DE ALERTAS') &&
+      !/FHTT8C3A91BF|HWTC12345678|ZTEG00998877/.test(publicHistoryReply.body.text)) {
     console.log('✅ Public users can view existing alert history: PASS');
   } else {
     console.error('❌ Public alert history command did not return the existing alerts');

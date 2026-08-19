@@ -39,6 +39,28 @@ function isDuplicate(chatId, text) {
   return false;
 }
 
+/**
+ * Last-resort privacy guard for operational alerts. Message builders should
+ * omit device serials, but this also redacts a serial inherited from a Zabbix
+ * event name, description, or URL before it reaches Telegram.
+ */
+export function redactDeviceSerials(text) {
+  return String(text || '')
+    .replace(/(?<![A-Z0-9])(?=[A-Z0-9]{12,20}(?![A-Z0-9]))(?=[A-Z0-9]*\d)[A-Z]{4}[A-Z0-9]{8,16}(?![A-Z0-9])/gi, '[identificador protegido]')
+    .replace(/(?<![A-F0-9])[A-F0-9]{16}(?![A-F0-9])/gi, '[identificador protegido]');
+}
+
+function removeSensitiveNotificationButtons(replyMarkup) {
+  if (!replyMarkup?.inline_keyboard) return replyMarkup;
+  const inlineKeyboard = replyMarkup.inline_keyboard
+    .map((row) => row.filter((button) => {
+      const serialized = JSON.stringify(button);
+      return redactDeviceSerials(serialized) === serialized;
+    }))
+    .filter((row) => row.length > 0);
+  return inlineKeyboard.length > 0 ? { ...replyMarkup, inline_keyboard: inlineKeyboard } : undefined;
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 const getBaseUrl = () => {
   if (!TELEGRAM_BOT_TOKEN) {
@@ -136,8 +158,15 @@ export async function sendNotification(primaryChatId, text, options = {}) {
     throw new Error('No Telegram notification destinations are configured.');
   }
 
+  const protectedText = redactDeviceSerials(text);
+  const protectedOptions = { ...options };
+  if (options.reply_markup) {
+    protectedOptions.reply_markup = removeSensitiveNotificationButtons(options.reply_markup);
+  }
+  if (!protectedOptions.reply_markup) delete protectedOptions.reply_markup;
+
   const settled = await Promise.allSettled(
-    destinations.map((chatId) => sendMessage(chatId, text, options))
+    destinations.map((chatId) => sendMessage(chatId, protectedText, protectedOptions))
   );
   const delivered = settled.filter((result) => result.status === 'fulfilled').length;
   const failures = settled

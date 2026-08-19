@@ -76,6 +76,11 @@ try {
   const message = telegramMessages[0].text;
   assert.ok(message.includes('NAP-ZABBIX-1'), 'The cache-backed alert must identify the NAP');
   assert.ok(message.includes('maps.google.com'), 'The cache-backed alert must include its approximate location');
+  assert.ok(message.includes('Tipo de caída:'), 'The alert must include its required failure type');
+  assert.ok(message.includes('Clientes afectados:'), 'The alert must include affected customer names');
+  assert.ok(message.includes('Cliente 1') && message.includes('Cliente 2'));
+  assert.ok(message.includes('Fecha y hora:'), 'The alert must include its required date and time');
+  assert.ok(!message.includes('FHTTZAB00001') && !message.includes('FHTTZAB00002'));
   assert.strictEqual(getCachedNaps()[0].status, 'offline', 'The NAP must be fully offline in cache');
 
   // Reset the incident, then simulate misleading Zabbix LOS events while
@@ -124,6 +129,10 @@ try {
   assert.ok(totalPowerMessage.includes('Smart OLT (principal)'), 'The alert must show Smart OLT as the primary source');
   assert.ok(totalPowerMessage.includes('Zabbix (confirmación)'), 'The alert must show Zabbix as the confirmation source');
   assert.ok(totalPowerMessage.includes('Confirmada y clasificada por Smart OLT como Corte de energía'), 'The mismatch must be explicitly reclassified using Smart OLT');
+  assert.ok(totalPowerMessage.includes('Tipo de caída:'), 'Power alert must include its required failure type');
+  assert.ok(totalPowerMessage.includes('Clientes afectados:'), 'Power alert must include affected customer names');
+  assert.ok(totalPowerMessage.includes('Fecha y hora:'), 'Power alert must include its required date and time');
+  assert.ok(!totalPowerMessage.includes('FHTTZAB00001') && !totalPowerMessage.includes('FHTTZAB00002'));
 
   // A Power Fail stays an ONU/router energy incident even if the cached NAP
   // happens to be fully offline; it must never be relabelled as a NAP LOS.
@@ -139,6 +148,7 @@ try {
   assert.ok(powerMessage.includes('ONU/cliente reportado:'), 'Power Fail must identify the ONU/customer that originated the alert');
   assert.ok(powerMessage.includes('NAP-ZABBIX-1'), 'Power Fail must show its associated NAP code');
   assert.ok(!powerMessage.includes('CAÍDA TOTAL EN CAJA NAP'), 'Power Fail must not be relabelled as a NAP outage');
+  assert.ok(!powerMessage.includes('FHTTZAB00001'), 'Power Fail must not expose the customer device serial');
 
   const oltPriorityResult = await processAndSendAlert({
     event_name: 'ONU FHTTZAB00001: Loss of Signal',
@@ -149,6 +159,7 @@ try {
   assert.strictEqual(oltPriorityResult.sent, true, 'A Smart OLT-confirmed cause must be notified even when Zabbix labels it differently');
   const oltPriorityMessage = telegramMessages.at(-1).text;
   assert.ok(oltPriorityMessage.includes('CORTE DE ENERGÍA'), 'The notification must use Smart OLT power classification over the Zabbix LOS label');
+  assert.ok(!oltPriorityMessage.includes('FHTTZAB00001'), 'Smart OLT-priority alert must not expose the device serial');
 
   console.log('Zabbix NAP/Power Fail corroboration rules: PASS');
 } catch (error) {

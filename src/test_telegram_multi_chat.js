@@ -29,13 +29,32 @@ globalThis.fetch = async (url, options = {}) => {
 
 const { sendNotification } = await import('./services/telegram.js');
 
-const firstResult = await sendNotification('8953554158', 'Alerta detallada de prueba');
+const protectedSerial = 'HWTC13824C9E';
+const firstResult = await sendNotification(
+  '8953554158',
+  `Alerta detallada de telecomunicaciones para Cliente Prueba ${protectedSerial}`,
+  {
+    reply_markup: {
+      inline_keyboard: [[
+        { text: 'Diagnóstico', url: `https://t.me/test_bot?start=diag_${protectedSerial}` },
+        { text: 'Mapa', url: 'https://maps.google.com/?q=-2.9,-78.9' }
+      ]]
+    }
+  }
+);
 assert.equal(firstResult.delivered, 2);
 assert.equal(firstResult.total, 2);
 assert.deepEqual(
   requests.map((request) => String(request.chat_id)).sort(),
   ['-5141632299', '8953554158'].sort()
 );
+requests.slice(0, 2).forEach((request) => {
+  assert.ok(!request.text.includes(protectedSerial), 'Operational notifications must redact device serials');
+  assert.ok(request.text.includes('[identificador protegido]'));
+  assert.ok(request.text.includes('telecomunicaciones'), 'Ordinary long words must not be mistaken for serials');
+  assert.equal(request.reply_markup.inline_keyboard[0].length, 1, 'Buttons containing a serial must be removed');
+  assert.equal(request.reply_markup.inline_keyboard[0][0].text, 'Mapa');
+});
 
 const beforeDeduplicatedDestinations = requests.length;
 const deduplicatedResult = await sendNotification('-5141632299', 'Destino sin duplicar');
