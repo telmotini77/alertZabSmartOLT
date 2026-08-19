@@ -345,7 +345,7 @@ try {
   // Verify that Telegram exposes the Smart OLT-first comparison and the final
   // reclassification instead of silently copying the Zabbix trigger type.
   let tgMessage = fetchLog.find(log => log.url.includes('/sendMessage'))?.body?.text || '';
-  if ((tgMessage.includes('ALERTA') || tgMessage.includes('RIESGO')) &&
+  if ((tgMessage.includes('ALERTA') || tgMessage.includes('RIESGO') || tgMessage.includes('CORTE DE ENERGÍA')) &&
       tgMessage.includes('Hora del Evento:') &&
       tgMessage.includes('Smart OLT (principal)') &&
       tgMessage.includes('Zabbix (confirmación)') &&
@@ -396,7 +396,7 @@ try {
 
   // Verify that the alert was sent after settle window with correct header
   tgMessage = fetchLog.find(log => log.url.includes('/sendMessage'))?.body?.text || '';
-  if (tgMessage.includes('ALERTA') || tgMessage.includes('RIESGO')) {
+  if (tgMessage.includes('ALERTA') || tgMessage.includes('RIESGO') || tgMessage.includes('CORTE DE ENERGÍA')) {
     console.log('✅ Alert sent after settle window with Smart OLT corroboration: PASS');
   } else {
     console.error('❌ Alert sent after settle window with Smart OLT corroboration: FAIL');
@@ -536,6 +536,38 @@ try {
     console.log('✅ No Telegram message sent for mismatch (Blocked as expected): PASS');
   } else {
     console.error('❌ Telegram message was sent during mismatch: FAIL');
+    process.exit(1);
+  }
+
+  console.log('\n[3c] Testing Native Smart OLT Power Fail Webhook without an API re-query...');
+  fetchLog = [];
+
+  const smartOltWebhookResponse = await originalFetch('http://localhost:3001/webhook/smartolt', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sn: 'FHTT8C3A91BF',
+      event: 'ONU Offline - Dying Gasp',
+      reason: 'Dying Gasp',
+      olt_name: 'OLT-CENTRAL'
+    })
+  });
+  const smartOltWebhookData = await smartOltWebhookResponse.json();
+  const smartOltPowerMessage = fetchLog.find(log => log.url.includes('/sendMessage'))?.body?.text || '';
+  const redundantSmartOltQuery = fetchLog.some(log => log.url.includes('/onu/'));
+
+  if (smartOltWebhookResponse.status === 200 &&
+      smartOltWebhookData.status === 'success' &&
+      smartOltPowerMessage.includes('Corte de energía') &&
+      smartOltPowerMessage.includes('Juan Pérez') &&
+      !redundantSmartOltQuery) {
+    console.log('✅ Native Smart OLT Dying Gasp sends Power Fail without consuming API quota: PASS');
+  } else {
+    console.error('❌ Native Smart OLT Power Fail webhook fallback: FAIL', {
+      response: smartOltWebhookData,
+      redundantSmartOltQuery,
+      message: smartOltPowerMessage
+    });
     process.exit(1);
   }
 

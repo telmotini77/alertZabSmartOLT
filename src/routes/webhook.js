@@ -705,7 +705,8 @@ router.post('/smartolt', async (req, res) => {
     event_severity: 'High',
     event_status: eventStatus,
     chat_id: req.query.chat_id || DEFAULT_CHAT_ID,
-    onu_sn: sn.toUpperCase()
+    onu_sn: sn.toUpperCase(),
+    source_system: 'smartolt_webhook'
   };
 
   try {
@@ -718,11 +719,35 @@ router.post('/smartolt', async (req, res) => {
       }
     }
     
-    const result = await processAndSendAlert(zabbixLikePayload, null, overrideReason);
+    // This request already comes from Smart OLT, so it is authoritative and
+    // must not depend on another API call that may be rate-limited. Enrich the
+    // webhook event with local customer/NAP metadata and pass it as confirmed
+    // Smart OLT data to the normal notification formatter.
+    const normalizedSn = sn.toUpperCase();
+    const cachedNap = findCachedNapBySn(normalizedSn);
+    const cachedClient = cachedNap?.clients?.find((client) =>
+      String(client.sn || '').trim().toUpperCase() === normalizedSn
+    );
+    if (!cachedClient) {
+      console.log(`[Smart OLT Webhook] Event for ${normalizedSn} suppressed because the ONU/customer is not registered in the local Smart OLT cache.`);
+      return res.status(202).json({ status: 'ignored', reason: 'Unknown ONU/customer' });
+    }
+    const webhookOnu = {
+      ...(payload.onu || {}),
+      sn: normalizedSn,
+      name: payload.onu?.name || payload.customer_name || cachedClient?.name,
+      status: eventStatus === 'PROBLEM' ? 'Offline' : 'Online',
+      odb_name: payload.onu?.odb_name || payload.odb_name || cachedNap?.name,
+      olt_name: payload.onu?.olt_name || payload.olt_name || cachedNap?.olt_name,
+      board: payload.onu?.board ?? payload.board ?? cachedNap?.board,
+      port: payload.onu?.port ?? payload.port ?? cachedNap?.port
+    };
+
+    const result = await processAndSendAlert(zabbixLikePayload, webhookOnu, overrideReason);
     
     // Update local map
     const optimisticStatus = eventStatus === 'PROBLEM' ? 'Offline' : 'Online';
-    const updatedNap = updateOnuStatusInCache(sn.toUpperCase(), optimisticStatus);
+    const updatedNap = updateOnuStatusInCache(normalizedSn, optimisticStatus);
     if (updatedNap) broadcast('nap_status_update', updatedNap);
 
     return res.json({ status: 'success', processed: sn, result });

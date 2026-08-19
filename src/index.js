@@ -100,10 +100,13 @@ server.listen(PORT, async () => {
   // Initialize WebSockets
   initWebSocketServer(server);
 
-  // Initialize Cache (non-blocking)
-  initCache().catch(err => {
+  // Load the persisted Smart OLT state before starting the radar. This lets
+  // the scanner retain its baseline across deployments and API rate limits.
+  try {
+    await initCache();
+  } catch (err) {
     console.error('❌ Failed to initialize cache:', err.message);
-  });
+  }
 
   // Start Smart OLT Radar Scanner
   startScanner();

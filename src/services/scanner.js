@@ -76,6 +76,30 @@ function groupOnusByNap(onus) {
   return naps;
 }
 
+function seedPreviousStateFromCache() {
+  const cachedNaps = getCachedNaps();
+  let seededClients = 0;
+
+  cachedNaps.forEach((nap) => {
+    const clients = nap.clients || [];
+    clients.forEach((client) => {
+      const sn = String(client.sn || '').trim().toUpperCase();
+      if (!sn) return;
+      previousStateMap.set(sn, isOnline(client) ? 'Online' : 'Offline');
+      seededClients++;
+    });
+    previousNapStateMap.set(
+      napKey(nap.name),
+      clients.length >= getMinimumNapClients() && clients.every((client) => !isOnline(client))
+    );
+  });
+
+  if (seededClients > 0) {
+    isFirstScan = false;
+    console.log(`Radar restored its baseline from SQLite: tracking ${seededClients} ONUs.`);
+  }
+}
+
 /**
  * Start the Smart OLT background radar scanner.
  */
@@ -94,6 +118,11 @@ export function startScanner() {
   scannerRuntimeStatus.intervalMinutes = scanIntervalMinutes;
   scannerRuntimeStatus.lastError = null;
   console.log(`Starting Smart OLT Radar Scanner. Interval: ${scanIntervalMinutes} minute(s).`);
+
+  // Preserve the last confirmed Smart OLT state across deployments. If the
+  // API is temporarily rate-limited, the first successful scan can still
+  // detect outages that occurred during the blocked interval.
+  seedPreviousStateFromCache();
 
   // Run immediately (to build the baseline), then loop.
   runScanCycle();
