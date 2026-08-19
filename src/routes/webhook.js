@@ -287,10 +287,49 @@ function determineRequiredFailureType(onus = [], fallbackText = '') {
   if (powerCount > lossCount) return 'Corte de energía';
   if (lossCount > 0) return 'Pérdida de señal';
 
-  const fallbackCategory = classifySmartOltAlert(fallbackText, {}).category;
+  // A generic Zabbix "port/link down" event describes the state, not the
+  // physical cause. Only explicit power/LOS words may be used as fallback.
+  const fallbackCategory = getFailureCategoryFromOltReason(fallbackText);
   if (fallbackCategory === 'power_fail') return 'Corte de energía';
   if (fallbackCategory === 'loss') return 'Pérdida de señal';
   return null;
+}
+
+async function enrichOfflineOnusWithLiveCauses(onus = []) {
+  const enriched = onus.map((onu) => ({ ...onu }));
+  const configuredLimit = Number.parseInt(process.env.PORT_CAUSE_LOOKUP_LIMIT, 10);
+  const lookupLimit = Number.isInteger(configuredLimit) && configuredLimit > 0 ? configuredLimit : 32;
+  const candidates = enriched
+    .map((onu, index) => ({ onu, index }))
+    .filter(({ onu }) => onu.external_id)
+    .slice(0, lookupLimit);
+
+  // Keep a small concurrency window so a large port outage does not flood the
+  // Smart OLT API, while still resolving small incidents quickly.
+  for (let offset = 0; offset < candidates.length; offset += 5) {
+    const batch = candidates.slice(offset, offset + 5);
+    await Promise.all(batch.map(async ({ onu, index }) => {
+      try {
+        const liveStatus = await getOnuStatus(onu.external_id);
+        if (!liveStatus) return;
+        const rawReason = String(
+          liveStatus.last_down_reason || liveStatus.offline_reason ||
+          liveStatus.status_reason || liveStatus.reason ||
+          onu.offline_reason || onu.last_down_reason || ''
+        ).trim();
+        enriched[index] = {
+          ...onu,
+          status: liveStatus.onu_status || liveStatus.status_desc || onu.status,
+          offline_reason: rawReason,
+          last_down_reason: rawReason
+        };
+      } catch (error) {
+        console.error(`[Port Alert] Live cause lookup failed for ${onu.external_id}:`, error.message);
+      }
+    }));
+  }
+
+  return enriched;
 }
 
 function formatMandatoryAlertData(failureType, clientNames, eventTime) {
@@ -1213,7 +1252,9 @@ export async function sendCorrelatedPortReport(incident) {
   const targetChatId = payload.chat_id || DEFAULT_CHAT_ID;
   const hostName = onu.olt_name || payload.host_name || payload.host || 'OLT Desconocida';
   const onusOnPort = await findOnusByPort(onu.olt_id || null, onu.board, onu.port, hostName);
-  const offlineOnus = onusOnPort.filter(candidate => !isOnline(candidate));
+  let offlineOnus = onusOnPort.filter(candidate => !isOnline(candidate));
+  offlineOnus = await enrichOfflineOnusWithLiveCauses(offlineOnus);
+  offlineOnus = offlineOnus.filter(candidate => !isOnline(candidate));
   const totalClients = onusOnPort.length;
   const offlineCount = offlineOnus.length;
   const percentage = totalClients ? ((offlineCount / totalClients) * 100).toFixed(1) : 'N/A';
@@ -1221,11 +1262,19 @@ export async function sendCorrelatedPortReport(incident) {
   const minPercentage = getPositiveNumber(process.env.PORT_OUTAGE_MIN_PERCENT, 30);
   const isPortOutage = offlineCount >= minOffline && Number(percentage) >= minPercentage;
   const zabbixEventCount = [...sns].filter(Boolean).length;
-  const failureType = determineRequiredFailureType(offlineOnus, oltStatusReason) || 'Pérdida de señal';
+  const failureType = determineRequiredFailureType(offlineOnus, oltStatusReason);
   const affectedClientNames = getAffectedClientNames(offlineOnus);
   const eventTime = extractEventTime(payload);
+  if (!failureType) {
+    console.log(`[Port correlation] Suppressed ${hostName} board ${onu.board}/port ${onu.port}: Smart OLT did not report Power Fail or LOS.`);
+    return { sent: false, reason: 'Smart OLT failure cause unavailable' };
+  }
+  const expectedCategory = failureType === 'Corte de energía' ? 'power_fail' : 'loss';
+  const representativeCause = offlineOnus
+    .map((candidate) => candidate.offline_reason || candidate.last_down_reason || '')
+    .find((reason) => getFailureCategoryFromOltReason(reason) === expectedCategory) || oltStatusReason;
   const portSourceComparison = compareSmartOltWithZabbix(
-    classifySmartOltAlert(oltStatusReason, onu),
+    classifySmartOltAlert(representativeCause, onu),
     parseStatusInfo(`${payload.event_name || payload.trigger_name || ''} ${payload.trigger_description || ''}`),
     payload.event_status || payload.status || 'PROBLEM',
     { ...onu, status: offlineCount > 0 ? 'Offline' : 'Online' }
@@ -1241,9 +1290,11 @@ export async function sendCorrelatedPortReport(incident) {
   const offlineDetail = offlineOnus.slice(0, 20)
     .map(candidate => `• 🔴 ${getClientName(candidate) || 'Cliente no identificado'}`)
     .join('\n') || '• Smart OLT aún no reporta ONUs Offline.';
-  const title = isPortOutage
-    ? '🚨🔴 <b>POSIBLE CAÍDA DE PUERTO OLT CORROBORADA</b>'
-    : '⚠️ <b>INCIDENTE PARCIAL EN PUERTO OLT CORROBORADO</b>';
+  const title = failureType === 'Corte de energía'
+    ? '🔌⚡ <b>CORTE DE ENERGÍA EN CLIENTES DEL PUERTO OLT</b>'
+    : isPortOutage
+      ? '🚨🔴 <b>CAÍDA DE SEÑAL EN PUERTO OLT CORROBORADA</b>'
+      : '⚠️ <b>PÉRDIDA PARCIAL DE SEÑAL EN PUERTO OLT</b>';
 
   const report = `${title}\n\n` +
     `${formatMandatoryAlertData(failureType, affectedClientNames, eventTime)}\n\n` +
@@ -1251,7 +1302,7 @@ export async function sendCorrelatedPortReport(incident) {
     `<b>Puerto afectado:</b> Tarjeta ${onu.board} | PON ${onu.port}\n` +
     `\n🔎 <b>Comparación Smart OLT ↔ Zabbix:</b>\n` +
     `<b>1. Smart OLT (principal):</b> ${offlineCount}/${totalClients} ONUs Offline (${percentage}%)\n` +
-    (oltStatusReason ? `<b>Última causa OLT:</b> ${oltStatusReason}\n` : '') +
+    (representativeCause ? `<b>Causa confirmada OLT:</b> ${representativeCause}\n` : '') +
     `<b>2. Zabbix (confirmación):</b> ${zabbixEventCount} evento(s)\n` +
     `<b>Resultado:</b> ${portSourceComparison.verdict}\n` +
     `📅 <b>Hora del evento:</b> <code>${eventTime}</code>\n\n` +
@@ -2666,10 +2717,13 @@ export async function processPortAlert(payload, board, port) {
   }
   
   // 2. Filter ONUs that are offline
-  const offlineOnus = onusOnPort.filter(o => {
+  let offlineOnus = onusOnPort.filter(o => {
     const s = (o.status || '').toLowerCase();
     return s !== 'online' && s !== 'active';
   });
+
+  offlineOnus = await enrichOfflineOnusWithLiveCauses(offlineOnus);
+  offlineOnus = offlineOnus.filter(candidate => !isOnline(candidate));
   
   // Group by NAP for better readability
   const naps = {};
@@ -2686,11 +2740,16 @@ export async function processPortAlert(payload, board, port) {
   const failureType = determineRequiredFailureType(
     offlineOnus,
     `${payload.event_name || payload.trigger_name || ''} ${payload.trigger_description || ''}`
-  ) || 'Pérdida de señal';
+  );
   
   if (offlineCount === 0) {
     console.log(`[Port Alert] Suppressed Board ${board} Port ${port}: Smart OLT reports ${totalClients}/${totalClients} ONUs Online.`);
     return { sent: false, reason: 'Smart OLT reports no offline ONUs', totalClients, offlineCount };
+  }
+
+  if (!failureType) {
+    console.log(`[Port Alert] Suppressed Board ${board} Port ${port}: Smart OLT did not report Power Fail or LOS.`);
+    return { sent: false, reason: 'Smart OLT failure cause unavailable', totalClients, offlineCount };
   }
 
   const affectedClientNames = getAffectedClientNames(offlineOnus);
@@ -2706,7 +2765,10 @@ export async function processPortAlert(payload, board, port) {
     const chunkOnus = offlineOnus.slice(i * BATCH_SIZE, (i + 1) * BATCH_SIZE);
     const chunkClientNames = getAffectedClientNames(chunkOnus);
     
-    let reportText = `🚨🔴 <b>CAÍDA MASIVA DE PUERTO GPON (Parte ${i + 1}/${totalChunks})</b>\n\n`;
+    const reportTitle = failureType === 'Corte de energía'
+      ? `🔌⚡ <b>CORTE DE ENERGÍA EN CLIENTES DEL PUERTO GPON (Parte ${i + 1}/${totalChunks})</b>`
+      : `🚨🔴 <b>CAÍDA DE SEÑAL EN PUERTO GPON (Parte ${i + 1}/${totalChunks})</b>`;
+    let reportText = `${reportTitle}\n\n`;
     reportText += `${formatMandatoryAlertData(failureType, chunkClientNames, eventTime)}\n\n`;
     
     if (i === 0) {

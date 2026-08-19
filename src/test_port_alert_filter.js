@@ -8,6 +8,7 @@ process.env.TELEGRAM_CHAT_ID = '-100987654321';
 process.env.TELEGRAM_ADDITIONAL_CHAT_IDS = '';
 
 let smartOltOnus = [];
+let liveFailureReason = 'Dying Gasp';
 const telegramMessages = [];
 
 globalThis.fetch = async (url, options = {}) => {
@@ -17,6 +18,17 @@ globalThis.fetch = async (url, options = {}) => {
       ok: true,
       status: 200,
       json: async () => ({ status: true, onus: smartOltOnus })
+    };
+  }
+  if (requestUrl.includes('/onu/get_onu_status/')) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        status: true,
+        onu_status: 'Offline',
+        last_down_reason: liveFailureReason
+      })
     };
   }
   if (requestUrl.includes('/sendMessage')) {
@@ -44,8 +56,8 @@ assert.equal(noClientsResult.sent, false);
 assert.equal(telegramMessages.length, 0, 'A port with no Smart OLT clients must not send the short fallback alert');
 
 smartOltOnus = [
-  { sn: 'HWTC11111111', name: 'Cliente 1', status: 'Online', olt_name: 'OLT_GS', board: '12', port: '15', odb_name: 'CAJA NOC' },
-  { sn: 'HWTC22222222', name: 'Cliente 2', status: 'Active', olt_name: 'OLT_GS', board: '12', port: '15', odb_name: 'CAJA NOC' }
+  { external_id: 'onu-1', sn: 'HWTC11111111', name: 'Cliente 1', status: 'Online', olt_name: 'OLT_GS', board: '12', port: '15', odb_name: 'CAJA NOC' },
+  { external_id: 'onu-2', sn: 'HWTC22222222', name: 'Cliente 2', status: 'Active', olt_name: 'OLT_GS', board: '12', port: '15', odb_name: 'CAJA NOC' }
 ];
 const onlineResult = await processPortAlert(payload, '12', '15');
 assert.equal(onlineResult.sent, false);
@@ -55,12 +67,13 @@ smartOltOnus = smartOltOnus.map((onu) => ({ ...onu, status: 'Offline' }));
 const detailedResult = await processPortAlert(payload, '12', '15');
 assert.equal(detailedResult.sent, true);
 assert.equal(telegramMessages.length, 1, 'A Smart OLT-confirmed outage must send one detailed report');
-assert.ok(telegramMessages[0].text.includes('CAÍDA MASIVA DE PUERTO GPON'));
+assert.ok(telegramMessages[0].text.includes('CORTE DE ENERGÍA EN CLIENTES DEL PUERTO GPON'));
 assert.ok(telegramMessages[0].text.includes('Resumen de Afectación'));
 assert.ok(telegramMessages[0].text.includes('Afectación Desglosada por Caja NAP'));
 assert.ok(telegramMessages[0].text.includes('NAP CAJA NOC'));
 assert.ok(telegramMessages[0].text.includes('Tipo de caída:'));
-assert.ok(telegramMessages[0].text.includes('Pérdida de señal'));
+assert.ok(telegramMessages[0].text.includes('Corte de energía'));
+assert.ok(!telegramMessages[0].text.includes('Pérdida de señal'));
 assert.ok(telegramMessages[0].text.includes('Clientes afectados:'));
 assert.ok(telegramMessages[0].text.includes('Cliente 1'));
 assert.ok(telegramMessages[0].text.includes('Cliente 2'));
@@ -70,8 +83,21 @@ assert.ok(!telegramMessages[0].text.includes('HWTC11111111'));
 assert.ok(!telegramMessages[0].text.includes('HWTC22222222'));
 assert.ok(!telegramMessages[0].text.includes('No se encontraron clientes registrados'));
 
+liveFailureReason = 'Loss of Signal';
+const signalLossResult = await processPortAlert(payload, '12', '15');
+assert.equal(signalLossResult.sent, true);
+assert.equal(telegramMessages.length, 2, 'A live Smart OLT LOS cause must send a signal-loss report');
+assert.ok(telegramMessages[1].text.includes('CAÍDA DE SEÑAL EN PUERTO GPON'));
+assert.ok(telegramMessages[1].text.includes('Pérdida de señal'));
+assert.ok(!telegramMessages[1].text.includes('Corte de energía'));
+
+liveFailureReason = 'Unknown';
+const unknownCauseResult = await processPortAlert(payload, '12', '15');
+assert.equal(unknownCauseResult.sent, false);
+assert.equal(telegramMessages.length, 2, 'An unknown Smart OLT cause must not be guessed from a generic Zabbix link-down event');
+
 const recoveryResult = await processPortAlert({ ...payload, event_status: 'OK' }, '12', '15');
 assert.equal(recoveryResult.sent, false);
-assert.equal(telegramMessages.length, 1, 'A simple port recovery must not send another Telegram message');
+assert.equal(telegramMessages.length, 2, 'A simple port recovery must not send another Telegram message');
 
-console.log('Detailed-only GPON port notification filter: PASS');
+console.log('Smart OLT live-cause GPON port classification: PASS');
