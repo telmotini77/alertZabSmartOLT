@@ -3,13 +3,17 @@ import crypto from 'crypto';
 dotenv.config();
 
 const TELEGRAM_BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || '').trim();
-const DEFAULT_ADDITIONAL_CHAT_IDS = process.env.NODE_ENV === 'test' ? '' : '-5141632299';
-const ADDITIONAL_CHAT_IDS = String(
-  process.env.TELEGRAM_ADDITIONAL_CHAT_IDS ?? DEFAULT_ADDITIONAL_CHAT_IDS
-)
+const REQUIRED_ADDITIONAL_CHAT_IDS = process.env.NODE_ENV === 'test'
+  ? []
+  : ['-5141632299', '-1004402629602'];
+const CONFIGURED_ADDITIONAL_CHAT_IDS = String(process.env.TELEGRAM_ADDITIONAL_CHAT_IDS || '')
   .split(/[;,\s]+/)
   .map((chatId) => chatId.trim())
   .filter(Boolean);
+const ADDITIONAL_CHAT_IDS = [...new Set([
+  ...REQUIRED_ADDITIONAL_CHAT_IDS,
+  ...CONFIGURED_ADDITIONAL_CHAT_IDS
+])];
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 const FETCH_TIMEOUT_MS = 20_000; // 20s per Telegram request (Docker may be slow on first connect)
