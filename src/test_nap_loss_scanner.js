@@ -44,7 +44,7 @@ globalThis.fetch = async (url, options = {}) => {
 };
 
 const { syncCacheWithSmartOlt, getCachedNaps } = await import('./services/cache.js');
-const { runScanCycle } = await import('./services/scanner.js');
+const { getScannerStatus, runScanCycle } = await import('./services/scanner.js');
 
 try {
   await syncCacheWithSmartOlt();
@@ -97,6 +97,11 @@ try {
   assert.ok(totalPowerMessage.includes('Corte de energía'));
   assert.ok(!totalPowerMessage.includes('Pérdida de señal (LOS)'));
   assert.ok(totalPowerMessage.includes('Cliente 1') && totalPowerMessage.includes('Cliente 2'));
+  const scannerStatus = getScannerStatus();
+  assert.ok(scannerStatus.lastSuccessAt, 'Scanner health must expose its latest successful Smart OLT query');
+  assert.strictEqual(scannerStatus.totalOnus, 2);
+  assert.strictEqual(scannerStatus.offlineOnus, 2);
+  assert.strictEqual(scannerStatus.lastError, null);
 
   console.log('Smart OLT fallback delivery for NAP LOS and individual Power Fail: PASS');
 } catch (error) {

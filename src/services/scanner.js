@@ -15,6 +15,22 @@ let previousStateMap = new Map();
 // preceding scan. This lets the scanner emit exactly one LOS alert per NAP.
 let previousNapStateMap = new Map();
 let isFirstScan = true;
+const scannerRuntimeStatus = {
+  enabled: false,
+  intervalMinutes: null,
+  running: false,
+  lastStartedAt: null,
+  lastCompletedAt: null,
+  lastSuccessAt: null,
+  lastError: null,
+  totalOnus: 0,
+  offlineOnus: 0,
+  lastFallbackAlerts: 0
+};
+
+export function getScannerStatus() {
+  return { ...scannerRuntimeStatus };
+}
 
 const isOnline = (onu) => ['online', 'active'].includes(String(onu?.status || '').toLowerCase());
 const isSupportedFailure = (category) => ['power_fail', 'loss'].includes(category);
@@ -65,11 +81,16 @@ export function startScanner() {
   const scanIntervalMinutes = parseInt(process.env.SMARTOLT_SCAN_INTERVAL_MINUTES, 10);
 
   if (isNaN(scanIntervalMinutes) || scanIntervalMinutes <= 0) {
+    scannerRuntimeStatus.enabled = false;
+    scannerRuntimeStatus.lastError = 'SMARTOLT_SCAN_INTERVAL_MINUTES is not configured';
     console.log('Smart OLT Radar Scanner is disabled (SMARTOLT_SCAN_INTERVAL_MINUTES is not set or invalid).');
     return;
   }
 
   const scanIntervalMs = scanIntervalMinutes * 60 * 1000;
+  scannerRuntimeStatus.enabled = true;
+  scannerRuntimeStatus.intervalMinutes = scanIntervalMinutes;
+  scannerRuntimeStatus.lastError = null;
   console.log(`Starting Smart OLT Radar Scanner. Interval: ${scanIntervalMinutes} minute(s).`);
 
   // Run immediately (to build the baseline), then loop.
@@ -82,9 +103,21 @@ export function startScanner() {
  * testable without starting an HTTP server or a recurring interval.
  */
 export async function runScanCycle() {
+  if (scannerRuntimeStatus.running) {
+    console.log('Radar scan skipped because the preceding Smart OLT scan is still running.');
+    return;
+  }
+
+  scannerRuntimeStatus.running = true;
+  scannerRuntimeStatus.lastStartedAt = new Date().toISOString();
   try {
     const onus = await fetchAllOnus();
-    if (!onus || onus.length === 0) return;
+    scannerRuntimeStatus.totalOnus = onus?.length || 0;
+    scannerRuntimeStatus.offlineOnus = (onus || []).filter((onu) => !isOnline(onu)).length;
+    scannerRuntimeStatus.lastFallbackAlerts = 0;
+    if (!onus || onus.length === 0) {
+      throw new Error('Smart OLT returned no ONUs');
+    }
 
     // Make the cache reflect one coherent OLT snapshot before deciding whether
     // a NAP is down. Updating ONUs one at a time caused full LOS outages to be
@@ -145,10 +178,17 @@ export async function runScanCycle() {
         results.push(await handleIndividualDrop(onu));
       }
       const delivered = results.filter((result) => result?.sent).length;
+      scannerRuntimeStatus.lastFallbackAlerts = delivered;
       console.log(`Radar scan complete. Smart OLT observed ${newlyOfflineNaps.length} total NAP outage(s) and ${individualDrops.length} individual drop(s); ${delivered} fallback alert(s) delivered.`);
     }
+    scannerRuntimeStatus.lastSuccessAt = new Date().toISOString();
+    scannerRuntimeStatus.lastError = null;
   } catch (error) {
+    scannerRuntimeStatus.lastError = error.message;
     console.error('Radar scanner encountered an error:', error.message);
+  } finally {
+    scannerRuntimeStatus.running = false;
+    scannerRuntimeStatus.lastCompletedAt = new Date().toISOString();
   }
 }
 

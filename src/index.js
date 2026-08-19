@@ -7,7 +7,7 @@ import webhookRoutes, { handleTelegramMessage } from './routes/webhook.js';
 import { getUpdates, setWebhook, getWebhookInfo, deleteWebhook, setBotCommands } from './services/telegram.js';
 import { initWebSocketServer } from './services/websocket.js';
 import { initCache } from './services/cache.js';
-import { startScanner } from './services/scanner.js';
+import { getScannerStatus, startScanner } from './services/scanner.js';
 import { PUBLIC_URL } from './config/publicUrl.js';
 
 dotenv.config();
@@ -72,6 +72,7 @@ app.get('/health', async (req, res) => {
     port:         PORT,
     publicUrl:    PUBLIC_URL || null,
     webhook:      _webhookInfoCache || null,
+    smartOltScanner: getScannerStatus(),
     memory: {
       rss_mb:       (mem.rss          / 1024 / 1024).toFixed(1),
       heap_used_mb: (mem.heapUsed     / 1024 / 1024).toFixed(1),
