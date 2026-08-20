@@ -184,82 +184,11 @@ async function runMigration() {
   const historyFile = path.join(dbDir, 'status_history.json');
 
   try {
-    // 1. Migrate NAPs cache
-    const napsCountRow = await get('SELECT COUNT(*) as count FROM naps');
-    if (napsCountRow.count === 0 && fs.existsSync(cacheFile)) {
-      console.log('📦 Migrating NAPs cache from JSON to SQLite...');
-      const cacheData = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
-      if (Array.isArray(cacheData)) {
-        await new Promise((resolve, reject) => {
-          getDb().serialize(() => {
-            getDb().run('BEGIN TRANSACTION');
-            const stmt = getDb().prepare(`
-              INSERT INTO naps (name, olt_name, board, port, latitude, longitude, totalClients, onlineClients, offlineClients, status, clients)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `);
-            cacheData.forEach((nap) => {
-              stmt.run(
-                nap.name,
-                nap.olt_name,
-                nap.board,
-                nap.port,
-                nap.latitude,
-                nap.longitude,
-                nap.totalClients,
-                nap.onlineClients,
-                nap.offlineClients,
-                nap.status,
-                JSON.stringify(nap.clients || [])
-              );
-            });
-            stmt.finalize();
-            getDb().run('COMMIT', (err) => {
-              if (err) reject(err);
-              else resolve();
-            });
-          });
-        });
-        console.log(`✅ Migrated ${cacheData.length} NAPs to SQLite.`);
-      }
-    } else if (napsCountRow.count > 0 && fs.existsSync(cacheFile)) {
-      // Heal missing NAPs and zeroed coordinates using the original JSON cache file if it exists
-      console.log('🔄 Restoring/healing NAPs and coordinates from nap_cache.json...');
-      const cacheData = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
-      if (Array.isArray(cacheData)) {
-        await new Promise((resolve, reject) => {
-          getDb().serialize(() => {
-            getDb().run('BEGIN TRANSACTION');
-            const stmt = getDb().prepare(`
-              INSERT INTO naps (name, olt_name, board, port, latitude, longitude, totalClients, onlineClients, offlineClients, status, clients)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-              ON CONFLICT(name) DO UPDATE SET
-                latitude = CASE WHEN latitude IS NULL OR latitude = 0 THEN excluded.latitude ELSE latitude END,
-                longitude = CASE WHEN longitude IS NULL OR longitude = 0 THEN excluded.longitude ELSE longitude END
-            `);
-            cacheData.forEach((nap) => {
-              stmt.run(
-                nap.name,
-                nap.olt_name,
-                nap.board,
-                nap.port,
-                nap.latitude,
-                nap.longitude,
-                nap.totalClients,
-                nap.onlineClients,
-                nap.offlineClients,
-                nap.status,
-                JSON.stringify(nap.clients || [])
-              );
-            });
-            stmt.finalize();
-            getDb().run('COMMIT', (err) => {
-              if (err) reject(err);
-              else resolve();
-            });
-          });
-        });
-        console.log(`✅ Checked and fully restored NAPs coordinates in SQLite.`);
-      }
+    // 1. Legacy JSON cache is intentionally ignored. It may contain manually
+    // entered/CSV GPS data; NAP inventory and locations now come only from
+    // Smart OLT during cache initialization.
+    if (fs.existsSync(cacheFile)) {
+      console.log('📍 Ignoring legacy nap_cache.json coordinates; source is Smart OLT.');
     }
 
     // 2. Migrate Status History

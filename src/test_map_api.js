@@ -83,14 +83,14 @@ globalThis.fetch = async (url) => {
 console.log('--- STARTING MAP AND CACHE UNIT TESTS ---');
 
 // Load cache service after configuring the isolated test cache path.
-const { getCachedNaps, getStatusHistory, updateOnuStatusInCache, syncCacheWithSmartOlt, updateNapCoordinates, applyOnuStatusSnapshot } =
+const { getCachedNaps, getStatusHistory, updateOnuStatusInCache, syncCacheWithSmartOlt, applyOnuStatusSnapshot } =
   await import('./services/cache.js');
 
 async function runTests() {
   try {
     // 1. Test full sync and grouping
     console.log('[1] Running syncCacheWithSmartOlt...');
-    await syncCacheWithSmartOlt();
+    await syncCacheWithSmartOlt({ forceRefresh: true });
     
     const naps = getCachedNaps();
     console.log(`    NAPs in cache: ${naps.length}`);
@@ -153,15 +153,25 @@ async function runTests() {
     
     console.log('✅ Cache status updates (Total Fall): PASS');
 
-    // 4. Test manual coordinates assignment
-    console.log('\n[4] Testing manual coordinates assignment (updateNapCoordinates)...');
-    
-    const updatedCoordsNap = updateNapCoordinates('NAP-04-B', -12.1000, -77.0600);
-    assert.ok(updatedCoordsNap, 'Should return the updated NAP object');
-    assert.strictEqual(updatedCoordsNap.latitude, -12.1000, 'NAP-04-B latitude should be updated');
-    assert.strictEqual(updatedCoordsNap.longitude, -77.0600, 'NAP-04-B longitude should be updated');
-    
-    console.log('✅ Manual coordinates update: PASS');
+    // 4. GPS is exclusively sourced from Smart OLT. A later response without
+    // GPS must not reuse an old manual/SQLite coordinate.
+    console.log('\n[4] Testing Smart OLT-only coordinates...');
+    const savedNapBCoordinates = { gps_lat: mockOnus[3].gps_lat, gps_lng: mockOnus[3].gps_lng };
+    mockOnus[3].gps_lat = '0.0';
+    mockOnus[3].gps_lng = '0.0';
+    await syncCacheWithSmartOlt({ forceRefresh: true });
+    const napBWithoutSmartOltGps = getCachedNaps().find(n => n.name === 'NAP-04-B');
+    assert.strictEqual(napBWithoutSmartOltGps.latitude, null,
+      'A NAP without Smart OLT GPS must not reuse an old stored coordinate');
+    assert.strictEqual(napBWithoutSmartOltGps.longitude, null,
+      'A NAP without Smart OLT GPS must not reuse an old stored coordinate');
+    mockOnus[3].gps_lat = savedNapBCoordinates.gps_lat;
+    mockOnus[3].gps_lng = savedNapBCoordinates.gps_lng;
+    await syncCacheWithSmartOlt({ forceRefresh: true });
+    const refreshedNapB = getCachedNaps().find(n => n.name === 'NAP-04-B');
+    assert.strictEqual(refreshedNapB.latitude, -12.0800, 'NAP GPS must be restored from Smart OLT');
+    assert.strictEqual(refreshedNapB.longitude, -77.0500, 'NAP GPS must be restored from Smart OLT');
+    console.log('✅ Smart OLT-only coordinates: PASS');
 
     // 5. A full OLT snapshot must be applied before deciding whether a NAP
     // has lost signal completely.

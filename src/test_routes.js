@@ -260,7 +260,22 @@ globalThis.fetch = async (url, options) => {
         text: async () => '',
         json: async () => ({
           status: true,
-          onus: []
+          // The cache now refreshes its Smart OLT metadata at server start.
+          // Supply the normal full inventory for that initial sync as well.
+          onus: [
+            {
+              onu_id: '1/1/3:12', external_id: 'ext_fhtt_123', sn: 'FHTT8C3A91BF', name: 'Juan Pérez', status: 'Power fail',
+              olt_name: 'OLT-CENTRAL', olt_id: '1', board: '1', port: '3', address: 'Calle Falsa 123, NAP-04-A, Sector Centro', gps_lat: '-2.90', gps_lng: '-79.00'
+            },
+            {
+              onu_id: '1/1/3:13', external_id: 'ext_hwtc_123', sn: 'HWTC12345678', name: 'María López', status: 'Online',
+              olt_name: 'OLT-CENTRAL', olt_id: '1', board: '1', port: '3', address: 'Av. Siempre Viva 742, NAP-04-A', gps_lat: '-2.90', gps_lng: '-79.00'
+            },
+            {
+              onu_id: '1/1/3:14', external_id: 'ext_zteg_123', sn: 'ZTEG00998877', name: 'Carlos Rodríguez', status: 'Online',
+              olt_name: 'OLT-CENTRAL', olt_id: '1', board: '1', port: '3', address: 'Pasaje del Pino 4, NAP-04-A', gps_lat: '-2.90', gps_lng: '-79.00'
+            }
+          ]
         })
       };
     }
@@ -375,6 +390,18 @@ await import('./index.js');
 await new Promise(resolve => setTimeout(resolve, 1000));
 
 try {
+  console.log('\n[0] Testing Smart OLT-only NAP GPS policy...');
+  const manualGpsResponse = await originalFetch('http://localhost:3001/webhook/naps/coordinates', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'NAP-04-A', latitude: -1, longitude: -1 })
+  });
+  if (manualGpsResponse.status !== 409) {
+    console.error('❌ Manual GPS update was not blocked');
+    process.exit(1);
+  }
+  console.log('✅ Manual/CSV GPS updates are blocked; Smart OLT is the sole source: PASS');
+
   console.log('\n[1] Testing Direct Zabbix Webhook (Push workflow - Loss Event)...');
   fetchLog = [];
   

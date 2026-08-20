@@ -65,9 +65,6 @@
       <section class="naps-panel">
         <div class="naps-panel-header">
           <h2>Listado de Cajas NAP</h2>
-          <button id="btn-import-trigger" class="btn-import-icon" title="Importar coordenadas masivamente (KML / CSV)">
-            <i class="fa-solid fa-file-import"></i> Importar GPS
-          </button>
         </div>
         <div class="naps-scroll-container">
           <ul id="naps-list" class="naps-list">
@@ -121,15 +118,6 @@
         <i class="fa-solid fa-crosshairs"></i>
       </button>
       
-      <!-- Manual Placement Help Bar -->
-      <div id="placement-overlay" class="placement-overlay hidden">
-        <div class="placement-message">
-          <i class="fa-solid fa-location-crosshairs fa-spin"></i>
-          <span>Modo Edición: Haz clic en el mapa para posicionar <b><span id="placement-nap-name">NAP-XXX</span></b></span>
-        </div>
-        <button id="cancel-placement" class="btn-cancel">Cancelar</button>
-      </div>
-
       <!-- Distance Measurement Ruler Help Bar -->
       <div id="ruler-overlay" class="ruler-overlay hidden">
         <div class="ruler-message">
@@ -220,49 +208,6 @@
         <ul id="nearby-places-list" class="nearby-places-list"></ul>
       </aside>
     </main>
-  </div>
-
-  <!-- Import KML/CSV Modal -->
-  <div id="import-modal" class="modal hidden">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h2><i class="fa-solid fa-file-import logo-icon"></i> Importar Coordenadas</h2>
-        <button id="btn-close-modal" class="btn-close">&times;</button>
-      </div>
-      <div class="modal-body">
-        <p class="modal-desc">
-          Sube un archivo de Google Earth (<strong>.kml</strong>) o una lista (<strong>.csv</strong>) para ubicar tus cajas NAP de forma masiva según su nombre.
-        </p>
-        
-        <div class="dropzone" id="dropzone">
-          <i class="fa-solid fa-cloud-arrow-up dropzone-icon"></i>
-          <p>Arrastra tu archivo KML o CSV aquí o haz clic para buscar</p>
-          <input type="file" id="file-input" accept=".kml,.csv" class="hidden-file-input">
-        </div>
-        
-        <!-- Import Preview / Summary -->
-        <div id="import-preview" class="import-preview hidden">
-          <h3>Resumen del Archivo</h3>
-          <div class="preview-stats">
-            <div class="preview-stat-card">
-              <span class="preview-stat-num" id="preview-total-read">0</span>
-              <span class="preview-stat-label">Leídos</span>
-            </div>
-            <div class="preview-stat-card matched">
-              <span class="preview-stat-num" id="preview-matched">0</span>
-              <span class="preview-stat-label">Coincidentes</span>
-            </div>
-          </div>
-          <div class="preview-log-container">
-            <ul id="preview-log" class="preview-log"></ul>
-          </div>
-        </div>
-      </div>
-      <div class="modal-footer">
-        <button id="btn-cancel-import" class="btn-cancel">Cancelar</button>
-        <button id="btn-apply-import" class="btn-primary" disabled>Aplicar Coordenadas</button>
-      </div>
-    </div>
   </div>
 
   <!-- ONU Diagnostics Modal -->

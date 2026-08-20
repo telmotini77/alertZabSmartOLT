@@ -55,30 +55,6 @@ document.addEventListener('DOMContentLoaded', () => {
   setupHistoryDrawer();
   loadHistoryData();
   setupMapControls();
-  
-  // Attach cancel manual placement handler
-  document.getElementById('cancel-placement').addEventListener('click', stopManualPlacement);
-
-  // Import coordinates modal listeners
-  const importModal = document.getElementById('import-modal');
-  document.getElementById('btn-import-trigger').addEventListener('click', () => {
-    // Reset modal inputs and preview
-    document.getElementById('file-input').value = '';
-    document.getElementById('import-preview').classList.add('hidden');
-    document.getElementById('btn-apply-import').disabled = true;
-    pendingImportUpdates = [];
-    importModal.classList.remove('hidden');
-  });
-
-  const closeModal = () => importModal.classList.add('hidden');
-  document.getElementById('btn-close-modal').addEventListener('click', closeModal);
-  document.getElementById('btn-cancel-import').addEventListener('click', closeModal);
-
-  // Apply bulk import handler
-  document.getElementById('btn-apply-import').addEventListener('click', applyBulkImport);
-
-  // Setup file drag and drop
-  setupFileImport();
 });
 
 /**
@@ -273,37 +249,10 @@ function renderNapsAndMarkers(filterQuery = '') {
       const marker = L.marker([nap.latitude, nap.longitude], {
         icon: markerIcon,
         className: `nap-marker marker-${nap.status}`,
-        draggable: draggablePinsEnabled
+        draggable: false
       });
 
       marker.napName = nap.name;
-
-      marker.on('dragend', async (e) => {
-        const { lat, lng } = e.target.getLatLng();
-        console.log(`📌 Marker ${marker.napName} dragged to [${lat}, ${lng}]. Saving...`);
-        try {
-          const response = await fetch('/webhook/naps/coordinates', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-              name: marker.napName,
-              latitude: lat,
-              longitude: lng
-            })
-          });
-          if (!response.ok) {
-            throw new Error('Failed to update drag coordinates on backend');
-          }
-          const resData = await response.json();
-          console.log(`✅ Position updated for ${marker.napName}:`, resData);
-        } catch (err) {
-          console.error(`❌ Drag coordinates error for ${marker.napName}:`, err);
-          alert(`Error al actualizar la ubicación de ${marker.napName}: ${err.message}`);
-          loadNapsData();
-        }
-      });
 
       // Bind detail popup
       marker.bindPopup(() => getPopupContent(nap));
@@ -337,10 +286,7 @@ function renderNapsAndMarkers(filterQuery = '') {
         <span><b>OLT:</b> ${nap.olt_name} (Port ${nap.board}/${nap.port})</span>
         <span><b>Clientes:</b> 🟢 ${nap.onlineClients} | 🔴 ${nap.offlineClients} (Total: ${nap.totalClients})</span>
         ${nap.latitude === null ? `
-          <span>⚠️ <i>Sin coordenadas de GPS</i></span>
-          <button class="btn-locate" data-nap="${nap.name}">
-            <i class="fa-solid fa-map-pin"></i> Ubicar en mapa
-          </button>
+          <span>⚠️ <i>Smart OLT no reporta coordenadas GPS para esta NAP</i></span>
         ` : ''}
       </div>
       <div class="nap-clients-bar">
@@ -356,19 +302,9 @@ function renderNapsAndMarkers(filterQuery = '') {
         map.flyTo([nap.latitude, nap.longitude], 17, { animate: true, duration: 1.5 });
         markers[nap.name].openPopup();
       } else {
-        // If no coordinates, automatically prompt manual positioning mode!
-        startManualPlacement(nap.name, li);
+        alert(`Smart OLT aún no reporta coordenadas para la caja ${nap.name}.`);
       }
     });
-
-    // Attach listener for the manual placement button
-    const locateBtn = li.querySelector('.btn-locate');
-    if (locateBtn) {
-      locateBtn.addEventListener('click', (e) => {
-        e.stopPropagation(); // Avoid triggering list item's default click handler
-        startManualPlacement(nap.name, li);
-      });
-    }
 
     listContainer.appendChild(li);
   });
@@ -1465,6 +1401,14 @@ function renderHistoryList() {
     const timeAgo = formatTimeAgo(new Date(item.timestamp));
     const isResolved = Boolean(item.resolved);
     const isNapEvent = String(item.sn || '').startsWith('NAP:');
+    // History may contain legacy SQLite coordinates. Resolve the location
+    // against the current Smart OLT-backed NAP instead of using the location
+    // stored inside the old event.
+    const smartOltNap = napsData.find((nap) =>
+      nap.name === item.napName &&
+      Number.isFinite(Number(nap.latitude)) &&
+      Number.isFinite(Number(nap.longitude))
+    );
 
     li.innerHTML = `
       <div class="history-item-top">
@@ -1497,8 +1441,8 @@ function renderHistoryList() {
       </div>
       <div class="history-card-actions">
         <div class="history-card-btns">
-          ${(item.latitude !== null && item.longitude !== null) ? `
-            <button class="btn-locate-history" data-nap="${item.napName}" data-lat="${item.latitude}" data-lng="${item.longitude}" title="Centrar en el mapa">
+          ${smartOltNap ? `
+            <button class="btn-locate-history" data-nap="${item.napName}" data-lat="${smartOltNap.latitude}" data-lng="${smartOltNap.longitude}" title="Centrar en el mapa">
               <i class="fa-solid fa-location-dot"></i> Ver en mapa
             </button>
           ` : ''}
@@ -1518,7 +1462,7 @@ function renderHistoryList() {
     if (locateBtn) {
       locateBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        focusNapOnMap(item.napName, item.latitude, item.longitude);
+        focusNapOnMap(item.napName, smartOltNap.latitude, smartOltNap.longitude);
       });
     }
 
@@ -1539,8 +1483,8 @@ function renderHistoryList() {
     }
 
     li.addEventListener('click', () => {
-      if (item.latitude !== null && item.longitude !== null) {
-        focusNapOnMap(item.napName, item.latitude, item.longitude);
+      if (smartOltNap) {
+        focusNapOnMap(item.napName, smartOltNap.latitude, smartOltNap.longitude);
       }
     });
 

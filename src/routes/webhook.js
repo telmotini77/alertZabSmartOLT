@@ -6,7 +6,7 @@ import { findOnuBySn, getOnuStatus } from '../services/smartOlt.js';
 import { sendMessage, sendNotification, replyToMessage } from '../services/telegram.js';
 import { extractSerialNumber, extractNapBox, parseStatusInfo, extractEventTime, formatDateTime, extractBoardAndPort } from '../utils/parser.js';
 import { broadcast } from '../services/websocket.js';
-import { applyOnuStatusSnapshot, fetchMonitoringOnus, findCachedOnuBySn, updateOnuStatusInCache, getCachedNaps, updateNapCoordinates, updateNapCoordinatesBulk, getStatusHistory, deleteHistoryItem, clearHistory, resolveHistoryItem, updateHistoryEventDetails } from '../services/cache.js';
+import { applyOnuStatusSnapshot, fetchMonitoringOnus, findCachedOnuBySn, updateOnuStatusInCache, getCachedNaps, getStatusHistory, deleteHistoryItem, clearHistory, resolveHistoryItem, updateHistoryEventDetails } from '../services/cache.js';
 import { getActiveTriggers } from '../services/zabbix.js';
 import {
   dbDeleteOperationalAlertState,
@@ -810,51 +810,18 @@ router.patch('/history/:id/resolve', (req, res) => {
   }
 });
 
-// POST /webhook/naps/coordinates/bulk - Updates coordinates of multiple NAP boxes in bulk
+// Locations are read-only in this service: Smart OLT is the sole GPS source.
 router.post('/naps/coordinates/bulk', (req, res) => {
-  const { updates } = req.body;
-
-  if (!Array.isArray(updates)) {
-    return res.status(400).json({ error: 'Updates must be an array of objects' });
-  }
-
-  try {
-    const updatedNaps = updateNapCoordinatesBulk(updates);
-    
-    // Broadcast all updated NAPs to WebSocket clients
-    updatedNaps.forEach((nap) => {
-      broadcast('nap_status_update', nap);
-    });
-
-    return res.json({ status: 'success', updated_count: updatedNaps.length });
-  } catch (err) {
-    console.error('Error updating bulk coordinates:', err.message);
-    return res.status(500).json({ error: 'Internal server error', details: err.message });
-  }
+  return res.status(409).json({
+    error: 'Manual/imported coordinates are disabled. NAP locations are synchronized from Smart OLT.'
+  });
 });
 
-// POST /webhook/naps/coordinates - Updates coordinates of a specific NAP box manually
+// Kept solely for old browser versions; it must not overwrite Smart OLT GPS.
 router.post('/naps/coordinates', (req, res) => {
-  const { name, latitude, longitude } = req.body;
-  
-  if (!name || latitude === undefined || longitude === undefined) {
-    return res.status(400).json({ error: 'Missing name, latitude, or longitude' });
-  }
-
-  try {
-    const updatedNap = updateNapCoordinates(name, latitude, longitude);
-    
-    if (updatedNap) {
-      // Broadcast update to all WebSocket clients
-      broadcast('nap_status_update', updatedNap);
-      return res.json({ status: 'success', nap: updatedNap });
-    } else {
-      return res.status(404).json({ error: `NAP box "${name}" not found in cache` });
-    }
-  } catch (err) {
-    console.error('Error updating coordinates:', err.message);
-    return res.status(500).json({ error: 'Internal server error', details: err.message });
-  }
+  return res.status(409).json({
+    error: 'Manual coordinates are disabled. NAP locations are synchronized from Smart OLT.'
+  });
 });
 
 // POST /webhook/smartolt - Native Smart OLT webhook reception

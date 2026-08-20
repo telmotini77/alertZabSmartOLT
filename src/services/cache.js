@@ -64,6 +64,22 @@ const getNapSourceKey = (value = {}, napName = '') => {
   return `${account}:${olt}:${name}`;
 };
 
+/**
+ * SQLite used to contain manually entered and CSV-imported locations. Keep
+ * its inventory only as a temporary metadata cache; a NAP position must be
+ * obtained again from Smart OLT before it can be displayed or alerted.
+ */
+const withoutStoredCoordinates = (nap = {}) => ({
+  ...nap,
+  latitude: null,
+  longitude: null,
+  clients: (nap.clients || []).map((client) => ({
+    ...client,
+    latitude: null,
+    longitude: null
+  }))
+});
+
 function getSmartOltFailureDetails(changes = []) {
   const offlineChanges = changes.filter((change) => !isOnlineStatus(change.newStatus));
   const source = offlineChanges.length > 0 ? offlineChanges : changes;
@@ -227,29 +243,29 @@ export async function initCache() {
     await initDb();
 
     // 2. Load NAPs from database
-    cachedNaps = await dbGetAllNaps();
-    console.log(`📦 Loaded ${cachedNaps.length} NAPs from SQLite database.`);
+    const storedNaps = await dbGetAllNaps();
+    cachedNaps = storedNaps.map(withoutStoredCoordinates);
+    console.log(`📦 Loaded ${cachedNaps.length} NAPs from SQLite database (stored GPS ignored; source: Smart OLT).`);
 
     const configuredAccountIds = getSmartOltAccounts().map((account) => account.id);
     const cachedAccountIds = new Set(cachedNaps.map((nap) => String(nap.smartolt_account_id || '').trim()));
     const needsAccountMetadata = configuredAccountIds.some((id) => !cachedAccountIds.has(id));
-    if (cachedNaps.length === 0 || needsAccountMetadata) {
-      console.log(cachedNaps.length === 0
-        ? '📦 No NAPs found in SQLite. Running initial sync with Smart OLT...'
-        : '📦 New Smart OLT domain detected. Loading its ONU/NAP metadata...');
-      try {
-        await syncCacheWithSmartOlt();
-      } catch (syncErr) {
-        console.error('❌ Initial sync with Smart OLT failed:', syncErr.message);
-      }
+    console.log(cachedNaps.length === 0
+      ? '📦 No NAPs found in SQLite. Loading NAP metadata and GPS from Smart OLT...'
+      : needsAccountMetadata
+        ? '📦 New Smart OLT domain detected. Refreshing NAP metadata and GPS from Smart OLT...'
+        : '📍 Refreshing NAP GPS exclusively from Smart OLT...');
+    try {
+      // This is intentionally done at every process start. Persisted GPS
+      // values therefore never appear after a restart, even momentarily.
+      await syncCacheWithSmartOlt();
+    } catch (syncErr) {
+      console.error('❌ Initial Smart OLT metadata/GPS sync failed:', syncErr.message);
     }
 
     // 3. Load Status History from database
     statusHistory = await dbGetStatusHistory(MAX_HISTORY_ITEMS);
     console.log(`📋 Loaded ${statusHistory.length} status history events from SQLite database.`);
-
-    // Auto-seed coordinates from local CSV file
-    applyCsvCoordinatesToCache();
 
     // Full ONU details are static metadata and Smart OLT restricts this
     // endpoint. Keep this slow; operational status is refreshed separately by
@@ -272,9 +288,9 @@ export async function initCache() {
 /**
  * Run a full sync of all ONUs from Smart OLT and rebuild the NAP cache.
  */
-export async function syncCacheWithSmartOlt() {
+export async function syncCacheWithSmartOlt({ forceRefresh = false } = {}) {
   try {
-    const onus = await fetchAllOnus();
+    const onus = await fetchAllOnus({ forceRefresh });
     console.log(`Smart OLT returned ${onus.length} ONUs. Processing NAPs...`);
 
     const napMap = {};
@@ -354,10 +370,11 @@ export async function syncCacheWithSmartOlt() {
         longitude = group.lngs.reduce((sum, val) => sum + val, 0) / group.lngs.length;
       }
 
-      // Preserve previously set coordinates if the new sync has no coordinates
-      const oldNap = cachedNaps.find((nap) => getNapSourceKey(nap, nap.name) === sourceKey);
-      const finalLat = (latitude !== null) ? latitude : (oldNap ? oldNap.latitude : null);
-      const finalLng = (longitude !== null) ? longitude : (oldNap ? oldNap.longitude : null);
+      // Never fall back to SQLite, CSV, or manually placed GPS. A NAP with no
+      // valid Smart OLT coordinates remains unlocated until Smart OLT reports
+      // its position.
+      const finalLat = latitude;
+      const finalLng = longitude;
 
       const totalClients = group.clients.length;
       const offlineClients = group.clients.filter(c => {
@@ -764,44 +781,21 @@ export function getCachedNaps() {
 }
 
 /**
- * Update coordinates for a specific NAP box in cache.
+ * Manual map placement is deliberately disabled. Smart OLT owns NAP GPS.
+ * Retained as a no-op for compatibility with older local integrations.
  */
 export function updateNapCoordinates(napName, latitude, longitude) {
-  if (!napName) return null;
-  const nap = cachedNaps.find(n => n.name.toUpperCase() === napName.toUpperCase());
-  if (nap) {
-    nap.latitude = parseFloat(latitude);
-    nap.longitude = parseFloat(longitude);
-    dbSaveNap(nap).catch(() => {});
-    console.log(`📍 SQLite updated coordinates for NAP ${napName}: [${latitude}, ${longitude}]`);
-    return nap;
-  }
+  console.warn(`📍 Ignored manual GPS update for NAP ${napName || '(unknown)'}; source is Smart OLT.`);
   return null;
 }
 
 /**
- * Update coordinates for multiple NAPs in bulk.
+ * CSV/KML coordinate imports are deliberately disabled. Smart OLT owns NAP
+ * GPS. Retained as a no-op for older local integrations.
  */
 export function updateNapCoordinatesBulk(updates) {
-  if (!Array.isArray(updates)) return [];
-  const updatedNaps = [];
-
-  updates.forEach(({ name, latitude, longitude }) => {
-    if (!name) return;
-    const nap = cachedNaps.find(n => n.name.toUpperCase() === name.toUpperCase());
-    if (nap) {
-      nap.latitude = parseFloat(latitude);
-      nap.longitude = parseFloat(longitude);
-      updatedNaps.push(nap);
-    }
-  });
-
-  if (updatedNaps.length > 0) {
-    Promise.all(updatedNaps.map(nap => dbSaveNap(nap))).catch(() => {});
-    console.log(`📍 Bulk saved ${updatedNaps.length} NAPs coordinates to SQLite database.`);
-  }
-
-  return updatedNaps;
+  console.warn(`📍 Ignored ${Array.isArray(updates) ? updates.length : 0} imported GPS update(s); source is Smart OLT.`);
+  return [];
 }
 
 // Custom parser to split CSV lines respecting double quotes
@@ -828,6 +822,11 @@ function parseCsvLine(line) {
  * Reads coordinates from coordinates_mymaps.csv and seeds the cache NAPs that don't have coordinates.
  */
 export function applyCsvCoordinatesToCache() {
+  console.warn('📍 Ignored local coordenadas_mymaps.csv; source is Smart OLT.');
+  return 0;
+
+  /* Legacy parser retained below solely for backward source compatibility.
+     The early return above ensures CSV coordinates can never enter the cache. */
   const csvPath = path.resolve(__dirname, '../public/coordenadas_mymaps.csv');
   if (!fs.existsSync(csvPath)) {
     console.log('⚠️ coordenadas_mymaps.csv not found, skipping coordinates auto-seed.');
