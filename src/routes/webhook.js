@@ -145,8 +145,10 @@ export function selectNearbyNapOnusForAnalysis(onus = [], preferredNapName = '')
 }
 
 const getMinimumNapClients = () => {
-  const configured = Number.parseInt(process.env.NAP_LOSS_MIN_ONUS, 10);
-  return Number.isInteger(configured) && configured > 0 ? configured : 2;
+  const configured = Number.parseInt(process.env.NAP_TOTAL_OUTAGE_MIN_ONUS, 10);
+  // A NAP with one registered active ONU is still a complete NAP outage when
+  // that ONU is confirmed Power fail or LOS.
+  return Number.isInteger(configured) && configured > 0 ? configured : 1;
 };
 
 // Avoid repeat notifications while the same NAP remains fully offline. The
@@ -165,12 +167,12 @@ export function hasActiveOperationalNotification(sn, category) {
   return activeOperationalNotifications.has(operationalNotificationKey(sn, category));
 }
 
-export function clearActiveOperationalNotification(sn, napName = '') {
+export function clearActiveOperationalNotification(sn, napName = '', olt = {}) {
   const prefix = `${String(sn || '').trim().toUpperCase()}:`;
   for (const key of activeOperationalNotifications) {
     if (key.startsWith(prefix)) activeOperationalNotifications.delete(key);
   }
-  if (napName) activeNapIncidentNotifications.delete(normalizeNapName(napName));
+  if (napName) activeNapIncidentNotifications.delete(getNapIncidentKey(napName, olt));
 }
 
 function markActiveOperationalNotification(sn, category) {
@@ -195,7 +197,7 @@ const getFailureCategoryFromOltReason = (reason) => {
   if (text.includes('dying') || text.includes('power') || text.includes('gasp') || text.includes('energ')) {
     return 'power_fail';
   }
-  if (text.includes('los') || text.includes('signal') || text.includes('señal') || text.includes('fibra')) {
+  if (text.includes('los') || text.includes('signal') || text.includes('señal') || text.includes('fibra') || text.includes('fiber')) {
     return 'loss';
   }
   return 'unknown';
@@ -223,7 +225,7 @@ export function classifySmartOltAlert(reason, liveStatus = {}) {
   if (/(dying|gasp|power|energia|electric|pwrfail)/.test(text) || /(?:power\s*fail|pwrfail)/.test(status)) {
     return { category: 'power_fail', label: 'Corte de energía', emoji: '🔌', rawReason };
   }
-  if (/(loss of signal|\blos\b|signal|fibra|optic.*loss|link.*down)/.test(text) || /(?:loss\s*of\s*signal|\blos\b)/.test(status)) {
+  if (/(loss of signal|\blos\b|signal|fibra|fiber|optic.*loss|link.*down)/.test(text) || /(?:loss\s*of\s*signal|\blos\b)/.test(status)) {
     return { category: 'loss', label: 'Pérdida de señal (LOS)', emoji: '🔴', rawReason };
   }
   if (/(reboot|reset|restart)/.test(text)) {
@@ -380,6 +382,81 @@ function getExplicitSmartOltFailureCategory(onu = {}) {
 const isReportableSmartOltFailure = (onu) =>
   ['power_fail', 'loss'].includes(getExplicitSmartOltFailureCategory(onu));
 
+const getOltIdentity = (onu = {}) => {
+  const oltId = String(onu?.olt_id ?? onu?.oltId ?? '').trim();
+  if (oltId) return `id:${oltId}`;
+  return `name:${String(onu?.olt_name || onu?.oltName || '').trim().toUpperCase()}`;
+};
+
+const getNapIncidentKey = (napName, olt = {}) =>
+  `${getOltIdentity(olt)}:${normalizeNapName(napName)}`;
+
+const sameOlt = (left = {}, right = {}) => {
+  const leftId = String(left?.olt_id ?? left?.oltId ?? '').trim();
+  const rightId = String(right?.olt_id ?? right?.oltId ?? '').trim();
+  // If either source has a real OLT id, only an identical real id is a
+  // match. Falling back to the (often shared) display name would mix ONUs
+  // from different OLTs into the same NAP incident.
+  if (leftId || rightId) return Boolean(leftId && rightId && leftId === rightId);
+  const leftName = String(left?.olt_name || left?.oltName || '').trim().toUpperCase();
+  const rightName = String(right?.olt_name || right?.oltName || '').trim().toUpperCase();
+  return Boolean(leftName && rightName && leftName === rightName);
+};
+
+function isExplicitSmartOltFiberCut(reason = '', onu = {}) {
+  const text = `${reason} ${onu?.offline_reason || ''} ${onu?.last_down_reason || ''} ${onu?.status || ''}`
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+  return /(corte\s*(de\s*)?fibra|fibra\s*cort|fiber\s*(cut|break)|break\s*fiber|rotura\s*(de\s*)?fibra)/.test(text);
+}
+
+function getNapOnusFromSnapshot(referenceOnu, onus = []) {
+  const napKey = normalizeNapName(getNapNameFromOnu(referenceOnu));
+  if (!napKey) return [];
+  const referenceSn = String(referenceOnu?.sn || '').trim().toUpperCase();
+  return onus
+    .filter((candidate) => normalizeNapName(getNapNameFromOnu(candidate)) === napKey)
+    .filter((candidate) => sameOlt(referenceOnu, candidate))
+    .map((candidate) => String(candidate?.sn || '').trim().toUpperCase() === referenceSn
+      ? { ...candidate, ...referenceOnu }
+      : candidate
+    );
+}
+
+function getCompleteNapIncident(snapshotOnus, referenceOnu, expectedCategory) {
+  const napOnus = getNapOnusFromSnapshot(referenceOnu, snapshotOnus);
+  const actionableOnus = napOnus.filter((candidate) =>
+    isOnuOnline(candidate) || isReportableSmartOltFailure(candidate)
+  );
+  const categories = actionableOnus.map(getExplicitSmartOltFailureCategory);
+  const complete = actionableOnus.length >= getMinimumNapClients() &&
+    categories.length === actionableOnus.length &&
+    categories.every((category) => category === expectedCategory);
+  return { complete, napOnus, actionableOnus };
+}
+
+async function isTelegramEligibleOperationalAlert(onu, category, oltStatusReason = '') {
+  if (!onu || !['power_fail', 'loss'].includes(category)) {
+    return { eligible: false, reason: 'No corroborated Smart OLT incident' };
+  }
+  if (category === 'loss' && isExplicitSmartOltFiberCut(oltStatusReason, onu)) {
+    return { eligible: true, reason: 'Explicit Smart OLT fibre cut' };
+  }
+
+  try {
+    // This is the cached/coalesced bulk endpoint, never an individual ONU
+    // query. It covers every OLT registered in Smart OLT in one snapshot.
+    const snapshotOnus = await fetchMonitoringOnus({ forceRefresh: true });
+    const incident = getCompleteNapIncident(snapshotOnus, onu, category);
+    return incident.complete
+      ? { eligible: true, reason: `Complete ${category} NAP incident`, ...incident }
+      : { eligible: false, reason: 'NAP is not totally affected by one confirmed cause', ...incident };
+  } catch (error) {
+    return { eligible: false, reason: `Unable to verify total NAP scope: ${error.message}` };
+  }
+}
+
 function hasExplicitZabbixFailureType(eventName = '', triggerDescription = '', category = '') {
   const text = `${eventName} ${triggerDescription}`
     .normalize('NFD')
@@ -468,29 +545,29 @@ function hasCompleteFreshNapLossEvidence(nap) {
   });
 }
 
-async function corroborateTotalNapIncidentWithSmartOlt(nap) {
+async function corroborateTotalNapIncidentWithSmartOlt(nap, referenceOnu) {
   const napName = String(nap?.name || '').trim();
-  if (!napName) return { confirmed: false, reason: 'NAP not identified' };
+  if (!napName || !referenceOnu) return { confirmed: false, reason: 'NAP or OLT not identified' };
 
   try {
     const returnedOnus = await fetchMonitoringOnus({ forceRefresh: true });
-    const targetKey = normalizeNapName(napName);
+    const onus = getNapOnusFromSnapshot(referenceOnu, returnedOnus);
+    const actionableOnus = onus.filter((onu) =>
+      isOnuOnline(onu) || isReportableSmartOltFailure(onu)
+    );
     const minimumClients = getMinimumNapClients();
-    const onus = returnedOnus.filter((onu) => normalizeNapName(getNapNameFromOnu(onu)) === targetKey);
 
-    if (onus.length < minimumClients) {
-      return { confirmed: false, reason: `Smart OLT returned only ${onus.length} ONU(s) for ${napName}` };
+    if (actionableOnus.length < minimumClients) {
+      return { confirmed: false, reason: `Smart OLT returned only ${actionableOnus.length} actionable ONU(s) for ${napName}` };
     }
-    if (onus.some(isOnuOnline)) {
+    if (actionableOnus.some(isOnuOnline)) {
       return { confirmed: false, reason: 'Smart OLT still reports online ONUs in the NAP' };
     }
 
     // Being 100% offline describes the impact, not the cause. If Smart OLT
     // reports Dying Gasp/Power Fail, this is an electrical incident affecting
     // the ONUs/routers and must never be announced as a fibre or NAP LOS.
-    const causeCategories = onus.map((onu) => getFailureCategoryFromOltReason(
-      onu.offline_reason || onu.last_down_reason || onu.status_reason || onu.reason || onu.status || ''
-    ));
+    const causeCategories = actionableOnus.map(getExplicitSmartOltFailureCategory);
     let powerFailureCount = causeCategories.filter((category) => category === 'power_fail').length;
     let lossCount = causeCategories.filter((category) => category === 'loss').length;
 
@@ -501,10 +578,10 @@ async function corroborateTotalNapIncidentWithSmartOlt(nap) {
         reason: `Smart OLT reports mixed causes (${powerFailureCount} power, ${lossCount} LOS)`
       };
     }
-    if (powerFailureCount > 0) {
+    if (powerFailureCount === actionableOnus.length) {
       return { confirmed: true, category: 'power_fail', onus, powerFailureCount };
     }
-    if (lossCount > 0) {
+    if (lossCount === actionableOnus.length) {
       return { confirmed: true, category: 'loss', onus };
     }
     return { confirmed: false, reason: 'Smart OLT did not provide an electrical or optical failure cause' };
@@ -891,6 +968,11 @@ export async function syncActiveProblems(targetChatId = DEFAULT_CHAT_ID) {
             console.log('[Sync] Event suppressed: Smart OLT did not confirm an energy/signal outage with an affected client name.');
             continue;
           }
+          const eligibility = await isTelegramEligibleOperationalAlert(onu, failureCategory, rawStatus);
+          if (!eligibility.eligible) {
+            console.log(`[Sync] Event suppressed: ${eligibility.reason}.`);
+            continue;
+          }
           const failureType = failureCategory === 'power_fail' ? 'Corte de energía' : 'Pérdida de señal';
           
           const publicUrl = PUBLIC_URL;
@@ -990,6 +1072,7 @@ async function sendCachedNapLossAlert(payload, nap, eventTime = '') {
     name: referenceClient.name || nap.name,
     status: 'LOS',
     odb_name: nap.name,
+    olt_id: nap.olt_id,
     olt_name: nap.olt_name,
     board: nap.board,
     port: nap.port
@@ -1039,6 +1122,7 @@ async function sendCachedNapPowerFailAlert(payload, nap, confirmation, eventTime
     name: referenceClient.name || nap.name,
     status: 'Power fail',
     odb_name: nap.name,
+    olt_id: nap.olt_id,
     olt_name: nap.olt_name,
     board: nap.board,
     port: nap.port
@@ -1074,12 +1158,12 @@ async function sendCachedNapPowerFailAlert(payload, nap, confirmation, eventTime
  * evidence is required for every ONU, but it never changes the live Smart OLT
  * snapshot or decides whether the cause is optical or electrical.
  */
-async function trySendSmartOltFirstNapIncident(payload, nap, zabbixStatusInfo, eventTime = '') {
-  if (!nap || zabbixStatusInfo.category !== 'loss' || !hasCompleteFreshNapLossEvidence(nap)) {
+async function trySendSmartOltFirstNapIncident(payload, nap, referenceOnu, eventTime = '') {
+  if (!nap || !referenceOnu) {
     return false;
   }
 
-  const confirmation = await corroborateTotalNapIncidentWithSmartOlt(nap);
+  const confirmation = await corroborateTotalNapIncidentWithSmartOlt(nap, referenceOnu);
   if (!confirmation.confirmed) {
     console.log(`[NAP Correlation] ${nap.name}: Smart OLT did not confirm a total incident (${confirmation.reason}).`);
     return false;
@@ -1090,7 +1174,7 @@ async function trySendSmartOltFirstNapIncident(payload, nap, zabbixStatusInfo, e
   const changedNaps = applyOnuStatusSnapshot(confirmation.onus || []);
   changedNaps.forEach((changedNap) => broadcast('nap_status_update', changedNap));
   const confirmedNap = findCachedNap(nap.name) || nap;
-  const notificationKey = normalizeNapName(confirmedNap.name);
+  const notificationKey = getNapIncidentKey(confirmedNap.name, referenceOnu);
 
   if (activeNapIncidentNotifications.has(notificationKey)) {
     return true;
@@ -1854,7 +1938,7 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
     : null;
 
   if (eventStatus === 'OK' && sn) {
-    clearActiveOperationalNotification(sn, getNapNameFromOnu(onu));
+    clearActiveOperationalNotification(sn, getNapNameFromOnu(onu), onu);
   }
 
   if (eventStatus === 'PROBLEM' && !['power_fail', 'loss'].includes(category)) {
@@ -1896,7 +1980,7 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
     });
     if (smartUpdatedNap) broadcast('nap_status_update', smartUpdatedNap);
     if (smartStatus === 'Online') {
-      activeNapIncidentNotifications.delete(normalizeNapName(smartUpdatedNap?.name));
+      activeNapIncidentNotifications.delete(getNapIncidentKey(smartUpdatedNap?.name, onu));
     }
   }
 
@@ -1944,6 +2028,20 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
         }
         console.warn(`[Corroboration Mismatch Ignored] Zabbix reports OK but Smart OLT reports ONU as Offline/Down for SN "${sn}". Proceeding because corroboration is not required.`);
       }
+    }
+
+    // Telegram is intentionally reserved for a complete NAP outage of one
+    // type, or a physical fibre cut explicitly diagnosed by Smart OLT. A
+    // partial Power fail/LOS and any generic Offline state remain visible in
+    // monitoring but are never sent as an operational alert.
+    if (!smartOltEnriched || !onu) {
+      console.log(`[Notification Filter] Suppressing ${category}: Smart OLT did not provide a verifiable NAP scope.`);
+      return { sn, enriched: false, sent: false, reason: 'Smart OLT scope unavailable' };
+    }
+    const eligibility = await isTelegramEligibleOperationalAlert(onu, category, oltStatusReason);
+    if (!eligibility.eligible) {
+      console.log(`[Notification Filter] Suppressing ${category} for ${sn}: ${eligibility.reason}.`);
+      return { sn, enriched: true, sent: false, reason: eligibility.reason };
     }
   }
 
@@ -2292,7 +2390,7 @@ export async function processZabbixAlert(payload) {
         const napIncidentSent = await trySendSmartOltFirstNapIncident(
           payload,
           smartNap,
-          zabbixStatusInfo,
+          freshOnu,
           extractEventTime(payload)
         );
         if (napIncidentSent) {
@@ -2301,20 +2399,13 @@ export async function processZabbixAlert(payload) {
         }
       }
 
-      const canCorrelatePort = PORT_CORRELATION_ENABLED && freshOnu && !isOnline(freshOnu) &&
-        freshOnu.board !== undefined && freshOnu.port !== undefined;
       const result = await processAndSendAlert(
         payload,
         freshOnu,
-        freshOltStatusReason,
-        { suppressSend: canCorrelatePort }
+        freshOltStatusReason
       );
       if (result.sent === false) {
-        if (canCorrelatePort && result.enriched) {
-          queuePortIncident(payload, freshOnu, freshOltStatusReason);
-        } else {
-          console.log(`[Settle] Alert suppressed for SN ${cleanSn}: ${result.reason || 'No corroborated output'}`);
-        }
+        console.log(`[Settle] Alert suppressed for SN ${cleanSn}: ${result.reason || 'No complete corroborated output'}`);
       } else {
         console.log(`[Settle] Alert sent for SN ${cleanSn} after Smart OLT corroboration.`);
       }
@@ -2854,6 +2945,13 @@ export async function processPortAlert(payload, board, port) {
     console.log(`[Port Alert] Recovery suppressed for Board ${board} Port ${port}; only detailed outage reports are sent.`);
     return { sent: false, reason: 'Recovery notification filtered' };
   }
+
+  // A port-down trigger alone cannot prove that an individual NAP is totally
+  // without power or signal, nor identify the OLT safely when board/port
+  // numbers repeat. The all-OLT Smart OLT radar and SN workflow evaluate the
+  // complete NAP scope instead.
+  console.log(`[Port Alert] Suppressed Board ${board} Port ${port}: port-only events are not Telegram alerts under the complete-NAP policy.`);
+  return { sent: false, reason: 'Port-only event requires complete NAP confirmation' };
 
   console.log(`[Port Alert] Detected GPON Port failure: Board ${board}, Port ${port} on OLT ${hostName}`);
   

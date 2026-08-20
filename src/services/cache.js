@@ -43,6 +43,7 @@ export function mergeStatusSnapshotWithCache(statusOnus = []) {
         ...client,
         sn,
         odb_name: nap.name,
+        olt_id: nap.olt_id,
         olt_name: nap.olt_name,
         board: nap.board,
         port: nap.port,
@@ -63,6 +64,7 @@ export function mergeStatusSnapshotWithCache(statusOnus = []) {
       name: statusOnu?.name || cached.name || '',
       status: statusOnu?.status || cached.status || 'Offline',
       odb_name: statusOnu?.odb_name || statusOnu?.odb || cached.odb_name || '',
+      olt_id: statusOnu?.olt_id ?? statusOnu?.oltId ?? cached.olt_id ?? '',
       olt_name: statusOnu?.olt_name || cached.olt_name || '',
       board: statusOnu?.board ?? cached.board,
       port: statusOnu?.port ?? cached.port,
@@ -90,6 +92,7 @@ export function findCachedOnuBySn(sn) {
       ...client,
       sn: normalizedSn,
       odb_name: nap.name,
+      olt_id: nap.olt_id,
       olt_name: nap.olt_name,
       board: nap.board,
       port: nap.port,
@@ -165,6 +168,7 @@ export async function syncCacheWithSmartOlt() {
       if (!napMap[napName]) {
         napMap[napName] = {
           name: napName,
+          olt_id: onu.olt_id || onu.oltId || '',
           olt_name: onu.olt_name || 'OLT Desconocida',
           board: onu.board || '0',
           port: onu.port || '0',
@@ -180,6 +184,7 @@ export async function syncCacheWithSmartOlt() {
       const client = {
         name: onu.name,
         sn: onu.sn.toUpperCase(),
+        olt_id: onu.olt_id || onu.oltId || '',
         status: onu.status || 'Offline',
         onu_id: onu.onu_id || 'N/A'
       };
@@ -241,6 +246,7 @@ export async function syncCacheWithSmartOlt() {
 
       return {
         name,
+        olt_id: group.olt_id,
         olt_name: group.olt_name,
         board: group.board,
         port: group.port,
@@ -360,6 +366,7 @@ export function applyOnuStatusSnapshot(onus) {
       const longitude = Number(onu.gps_lng ?? onu.longitude);
       snapshotBySn.set(sn, {
         status: String(onu.status),
+        olt_id: String(onu.olt_id ?? onu.oltId ?? '').trim(),
         latitude: Number.isFinite(latitude) && latitude !== 0 ? latitude : null,
         longitude: Number.isFinite(longitude) && longitude !== 0 ? longitude : null
       });
@@ -378,11 +385,21 @@ export function applyOnuStatusSnapshot(onus) {
         client.status = snapshot.status;
         changed = true;
       }
+      if (snapshot?.olt_id && String(client.olt_id || '') !== snapshot.olt_id) {
+        client.olt_id = snapshot.olt_id;
+        changed = true;
+      }
       if (snapshot && snapshot.latitude !== null && snapshot.longitude !== null) {
         client.latitude = snapshot.latitude;
         client.longitude = snapshot.longitude;
       }
     });
+
+    const firstOltId = nap.clients.map((client) => String(client.olt_id || '').trim()).find(Boolean);
+    if (firstOltId && String(nap.olt_id || '') !== firstOltId) {
+      nap.olt_id = firstOltId;
+      changed = true;
+    }
 
     const coordinates = nap.clients
       .filter((client) => Number.isFinite(client.latitude) && Number.isFinite(client.longitude))

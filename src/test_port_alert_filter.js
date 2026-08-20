@@ -92,39 +92,21 @@ assert.equal(telegramMessages.length, 0, 'A port that Smart OLT reports online m
 
 smartOltOnus = smartOltOnus.map((onu) => ({ ...onu, status: 'Power fail' }));
 const detailedResult = await processPortAlert(payload, '12', '15');
-assert.equal(detailedResult.sent, true);
-assert.equal(telegramMessages.length, 1, 'A Smart OLT-confirmed outage must send one detailed report');
-assert.ok(telegramMessages[0].text.includes('CORTE DE ENERGÍA EN CLIENTES DEL PUERTO GPON'));
-assert.ok(telegramMessages[0].text.includes('Resumen de Afectación'));
-assert.ok(telegramMessages[0].text.includes('Afectación Desglosada por Caja NAP'));
-assert.ok(telegramMessages[0].text.includes('NAP CAJA NOC'));
-assert.ok(telegramMessages[0].text.includes('Tipo de caída:'));
-assert.ok(telegramMessages[0].text.includes('Corte de energía'));
-assert.ok(!telegramMessages[0].text.includes('Pérdida de señal'));
-assert.ok(telegramMessages[0].text.includes('Clientes afectados:'));
-assert.ok(telegramMessages[0].text.includes('Cliente 1'));
-assert.ok(telegramMessages[0].text.includes('Cliente 2'));
-assert.ok(telegramMessages[0].text.includes('Fecha y hora:'));
-assert.ok(telegramMessages[0].text.includes('2026-08-18 13:32:25'));
-assert.ok(!telegramMessages[0].text.includes('HWTC11111111'));
-assert.ok(!telegramMessages[0].text.includes('HWTC22222222'));
-assert.ok(!telegramMessages[0].text.includes('No se encontraron clientes registrados'));
+assert.equal(detailedResult.sent, false);
+assert.equal(telegramMessages.length, 0, 'A port-only event must not bypass complete-NAP validation');
 
 smartOltOnus = smartOltOnus.map((onu) => ({ ...onu, status: 'LOS' }));
 const signalLossResult = await processPortAlert(payload, '12', '15');
-assert.equal(signalLossResult.sent, true);
-assert.equal(telegramMessages.length, 2, 'A live Smart OLT LOS cause must send a signal-loss report');
-assert.ok(telegramMessages[1].text.includes('CAÍDA DE SEÑAL EN PUERTO GPON'));
-assert.ok(telegramMessages[1].text.includes('Pérdida de señal'));
-assert.ok(!telegramMessages[1].text.includes('Corte de energía'));
+assert.equal(signalLossResult.sent, false);
+assert.equal(telegramMessages.length, 0, 'A port-only LOS event must not bypass complete-NAP validation');
 
 smartOltOnus = smartOltOnus.map((onu) => ({ ...onu, status: 'Offline' }));
 const unknownCauseResult = await processPortAlert(payload, '12', '15');
 assert.equal(unknownCauseResult.sent, false);
-assert.equal(telegramMessages.length, 2, 'An unknown Smart OLT cause must not be guessed from a generic Zabbix link-down event');
+assert.equal(telegramMessages.length, 0, 'An unknown Smart OLT cause must not be guessed from a generic Zabbix link-down event');
 
 const recoveryResult = await processPortAlert({ ...payload, event_status: 'OK' }, '12', '15');
 assert.equal(recoveryResult.sent, false);
-assert.equal(telegramMessages.length, 2, 'A simple port recovery must not send another Telegram message');
+assert.equal(telegramMessages.length, 0, 'A simple port recovery must not send another Telegram message');
 
-console.log('Smart OLT live-cause GPON port classification: PASS');
+console.log('Port-only events are suppressed in favour of complete-NAP alerts: PASS');

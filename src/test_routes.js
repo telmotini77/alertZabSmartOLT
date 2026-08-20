@@ -404,17 +404,13 @@ try {
   // Wait for the settle window to expire (100ms in test mode) then Smart OLT re-query + Telegram
   await new Promise(resolve => setTimeout(resolve, 200));
 
-  // Verify that Telegram exposes the Smart OLT-first comparison and the final
-  // reclassification instead of silently copying the Zabbix trigger type.
+  // A single Power Fail inside a NAP with other online ONUs is intentionally
+  // silent under the complete-NAP notification policy.
   let tgMessage = fetchLog.find(log => log.url.includes('/sendMessage'))?.body?.text || '';
-  if ((tgMessage.includes('ALERTA') || tgMessage.includes('RIESGO') || tgMessage.includes('CORTE DE ENERGÍA')) &&
-      tgMessage.includes('Hora del Evento:') &&
-      tgMessage.includes('Smart OLT (principal)') &&
-      tgMessage.includes('Zabbix (confirmación)') &&
-      tgMessage.includes('Confirmada y clasificada por Smart OLT como Corte de energía')) {
-    console.log('✅ Smart OLT-first comparison, classification, and event time: PASS');
+  if (!tgMessage) {
+    console.log('✅ Partial Smart OLT incident suppressed by complete-NAP policy: PASS');
   } else {
-    console.error('❌ Smart OLT-first comparison is missing from the Telegram alert:', tgMessage);
+    console.error('❌ Partial Smart OLT incident was sent to Telegram:', tgMessage);
     process.exit(1);
   }
 
@@ -456,12 +452,12 @@ try {
   // Wait for settle window to expire (100ms in test mode) + Smart OLT re-query
   await new Promise(resolve => setTimeout(resolve, 250));
 
-  // Verify that the alert was sent after settle window with correct header
+  // A partial Power Fail remains suppressed after the settle window.
   tgMessage = fetchLog.find(log => log.url.includes('/sendMessage'))?.body?.text || '';
-  if (tgMessage.includes('ALERTA') || tgMessage.includes('RIESGO') || tgMessage.includes('CORTE DE ENERGÍA')) {
-    console.log('✅ Alert sent after settle window with Smart OLT corroboration: PASS');
+  if (!tgMessage) {
+    console.log('✅ Partial Power Fail suppressed after Smart OLT corroboration: PASS');
   } else {
-    console.error('❌ Alert sent after settle window with Smart OLT corroboration: FAIL');
+    console.error('❌ Partial Power Fail was sent after settle window: FAIL');
     process.exit(1);
   }
 
@@ -601,7 +597,7 @@ try {
     process.exit(1);
   }
 
-  console.log('\n[3c] Testing explicit Zabbix Power Fail fallback during Smart OLT rate limit...');
+  console.log('\n[3c] Testing strict suppression during Smart OLT rate limit...');
   fetchLog = [];
   simulateSmartOltRateLimit = true;
   zabbixResponse = await originalFetch('http://localhost:3001/webhook/zabbix', {
@@ -617,14 +613,10 @@ try {
   await new Promise(resolve => setTimeout(resolve, 300));
   simulateSmartOltRateLimit = false;
   const rateLimitMessage = fetchLog.find(log => log.url.includes('/sendMessage'))?.body?.text || '';
-  if (zabbixResponse.status === 200 &&
-      rateLimitMessage.includes('Corte de energía') &&
-      rateLimitMessage.includes('Juan Pérez') &&
-      rateLimitMessage.includes('límite de consultas') &&
-      !rateLimitMessage.includes('FHTT8C3A91BF')) {
-    console.log('✅ Explicit Power Fail is delivered with cached metadata during API rate limit: PASS');
+  if (zabbixResponse.status === 200 && !rateLimitMessage) {
+    console.log('✅ Alert suppressed during API rate limit without complete Smart OLT scope: PASS');
   } else {
-    console.error('❌ Rate-limit fallback for explicit Power Fail: FAIL', rateLimitMessage);
+    console.error('❌ Rate-limit event bypassed strict complete-NAP policy: FAIL', rateLimitMessage);
     process.exit(1);
   }
 
@@ -647,12 +639,10 @@ try {
 
   if (smartOltWebhookResponse.status === 200 &&
       smartOltWebhookData.status === 'success' &&
-      smartOltPowerMessage.includes('Corte de energía') &&
-      smartOltPowerMessage.includes('Juan Pérez') &&
-      !redundantSmartOltQuery) {
-    console.log('✅ Native Smart OLT Dying Gasp sends Power Fail without consuming API quota: PASS');
+      !smartOltPowerMessage) {
+    console.log('✅ Native partial Smart OLT Power Fail is suppressed: PASS');
   } else {
-    console.error('❌ Native Smart OLT Power Fail webhook fallback: FAIL', {
+    console.error('❌ Native partial Smart OLT Power Fail was sent: FAIL', {
       response: smartOltWebhookData,
       redundantSmartOltQuery,
       message: smartOltPowerMessage
@@ -742,13 +732,13 @@ try {
   // Wait for background Smart OLT + Telegram processing
   await new Promise(resolve => setTimeout(resolve, 500));
 
-  // A single event is notified with Smart OLT's cause, but must not be
-  // escalated to a total NAP outage without fresh evidence from every ONU.
+  // An isolated ONU event must be silent: operational messages are emitted
+  // only for a complete NAP outage or Smart OLT's explicit fibre-cut reason.
   const hexTgMsg = fetchLog.find(log => log.url.includes('/sendMessage'))?.body?.text || '';
-  if (hexTgMsg.includes('CORTE DE ENERGÍA') && !hexTgMsg.includes('CAÍDA TOTAL EN CAJA NAP')) {
-    console.log('✅ Isolated hex event uses the Smart OLT cause without false NAP escalation: PASS');
+  if (!hexTgMsg) {
+    console.log('✅ Isolated hex event suppressed until the NAP is totally affected: PASS');
   } else {
-    console.error('❌ Isolated hex event did not preserve the Smart OLT cause: FAIL');
+    console.error('❌ Isolated hex event was incorrectly sent to Telegram: FAIL');
     process.exit(1);
   }
 
@@ -760,20 +750,18 @@ try {
   console.log('Sync Response Status:', syncResponse.status);
   console.log('Sync Response Body:', syncData);
   
-  if (syncResponse.status === 200 && syncData.status === 'success' && syncData.total === 2 && syncData.synchronized === 1) {
-    console.log('✅ Zabbix active failures sync: PASS');
+  if (syncResponse.status === 200 && syncData.status === 'success' && syncData.total === 2 && syncData.synchronized === 0) {
+    console.log('✅ Partial Zabbix active failures remain suppressed during sync: PASS');
   } else {
     console.error('❌ Zabbix active failures sync: FAIL');
     process.exit(1);
   }
   
-  const syncTgMessage = fetchLog.find(log => log.url.includes('/sendMessage') && log.body?.text?.includes('REPORTE DE INCIDENTES SINCRONIZADO'))?.body?.text || '';
-  if (syncTgMessage.includes('Clientes afectados:</b> Juan Pérez') &&
-      syncTgMessage.includes('Tipo de caída:</b> Corte de energía') &&
-      syncTgMessage.includes('Fecha y hora:') &&
+  const syncTgMessage = fetchLog.find(log => log.url.includes('/sendMessage'))?.body?.text || '';
+  if (syncTgMessage.includes('No existen caídas de energía o señal') &&
       !syncTgMessage.includes('FHTT8C3A91BF') &&
       !syncTgMessage.includes('Alerta Zabbix Genérica')) {
-    console.log('✅ Synchronized Telegram Summary Report Content: PASS');
+    console.log('✅ Sync does not turn a partial ONU failure into an alert: PASS');
   } else {
     console.error('❌ Synchronized Telegram Summary Report Content: FAIL');
     process.exit(1);
@@ -923,8 +911,8 @@ try {
     process.exit(1);
   }
 
-  // 3. Partial power fail drop (should NOT be suppressed, must have RIESGO BAJO or RIESGO MEDIO)
-  // Currently FHTT8C3A91BF is Online, HWTC12345678 is Offline, ZTEG00998877 is Online
+  // 3. Partial Power Fail must also be suppressed. Telegram only receives a
+  // total NAP electrical outage, total NAP LOS, or explicit fibre cut.
   fetchLog = [];
   await originalFetch('http://localhost:3001/webhook/zabbix', {
     method: 'POST',
@@ -940,16 +928,10 @@ try {
   // Wait for settle window
   await new Promise(resolve => setTimeout(resolve, 250));
   let powerMsgs = fetchLog.filter(log => log.url.includes('/sendMessage'));
-  if (powerMsgs.length > 0) {
-    const text = powerMsgs[0].body.text;
-    if (text.includes('RIESGO BAJO') || text.includes('RIESGO MEDIO')) {
-      console.log('✅ Partial power failure alert sent with correct risk title: PASS');
-    } else {
-      console.error('❌ Partial power failure did not contain RIESGO BAJO/MEDIO: FAIL', text);
-      process.exit(1);
-    }
+  if (powerMsgs.length === 0) {
+    console.log('✅ Partial Power Fail suppressed from Telegram: PASS');
   } else {
-    console.error('❌ Partial power failure was suppressed: FAIL');
+    console.error('❌ Partial Power Fail was sent to Telegram: FAIL');
     process.exit(1);
   }
 
