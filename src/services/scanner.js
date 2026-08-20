@@ -4,7 +4,10 @@ import { extractNapBox } from '../utils/parser.js';
 import {
   classifySmartOltAlert,
   clearActiveOperationalNotification,
+  hasActiveNapIncidentNotification,
   hasActiveOperationalNotification,
+  isNapIncidentRepeatDue,
+  isOperationalAlertRepeatDue,
   processAndSendAlert
 } from '../routes/webhook.js';
 
@@ -284,7 +287,10 @@ export async function runScanCycle() {
         : null;
       if (completeCategory) completeNapIncidentKeys.add(key);
 
-      if (!isFirstScan && completeCategory && getPreviousNapCategory(nap, key) !== completeCategory) {
+      const previousCategory = getPreviousNapCategory(nap, key);
+      const repeatDue = completeCategory && isNapIncidentRepeatDue(nap.name, nap.onus[0] || {});
+      if (completeCategory &&
+          ((!isFirstScan && previousCategory !== completeCategory) || repeatDue)) {
         newlyOfflineNaps.push({ ...nap, category: completeCategory });
       }
       previousNapStateMap.set(key, completeCategory);
@@ -307,7 +313,8 @@ export async function runScanCycle() {
         // The only individual optical exception is a physical fibre cut
         // explicitly diagnosed by Smart OLT.
         if (currentState === 'loss' && isExplicitFiberCut(onu) &&
-            previousState !== currentState && !completeNapIncidentKeys.has(getNapKeyForOnu(onu))) {
+            (previousState !== currentState || isOperationalAlertRepeatDue(sn, currentState, onu)) &&
+            !completeNapIncidentKeys.has(getNapKeyForOnu(onu))) {
           explicitFiberCuts.push(onu);
         }
       }
@@ -400,7 +407,7 @@ async function handleNapOutage(nap, category) {
   const referenceOnu = nap.onus.find((onu) => getReportableFailureCategory(onu) === category);
   const sn = String(referenceOnu?.sn || '').toUpperCase();
   if (!referenceOnu || !sn) return { sent: false, reason: 'NAP has no reference ONU' };
-  if (hasActiveOperationalNotification(sn, category, referenceOnu)) {
+  if (hasActiveNapIncidentNotification(nap.name, referenceOnu)) {
     console.log(`[Radar] NAP ${nap.name} already has a delivered ${category} alert; fallback suppressed.`);
     return { sent: false, reason: 'Incident already notified' };
   }

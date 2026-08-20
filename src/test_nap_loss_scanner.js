@@ -94,6 +94,18 @@ try {
   await runScanCycle();
   assert.strictEqual(telegramMessages.length, 1, 'The same active NAP outage must not be sent twice');
 
+  // The only permitted reminder is after six uninterrupted hours. Mocking the
+  // clock lets the radar prove this policy without waiting in the test.
+  const realDateNow = Date.now;
+  Date.now = () => realDateNow() + (6 * 60 * 60 * 1_000);
+  try {
+    await runScanCycle();
+  } finally {
+    Date.now = realDateNow;
+  }
+  assert.strictEqual(telegramMessages.length, 2,
+    'An active total NAP outage must receive one reminder after six hours');
+
   // Recovery rearms the incident. A partial Power Fail and a normal partial
   // LOS must stay silent: Telegram is reserved for complete NAP outages.
   statuses = ['Online', 'Online', 'Offline', 'Online'];
@@ -101,10 +113,10 @@ try {
   statuses = ['Power fail', 'Online', 'Offline', 'Online'];
   await runScanCycle();
 
-  assert.strictEqual(telegramMessages.length, 1, 'A partial electrical outage must not send Telegram alerts');
+  assert.strictEqual(telegramMessages.length, 2, 'A partial electrical outage must not send Telegram alerts');
   statuses = ['LOS', 'Online', 'Offline', 'Online'];
   await runScanCycle();
-  assert.strictEqual(telegramMessages.length, 1, 'A normal partial LOS must not send Telegram alerts');
+  assert.strictEqual(telegramMessages.length, 2, 'A normal partial LOS must not send Telegram alerts');
 
   // Smart OLT's explicit physical fibre-cut diagnosis remains the one
   // individual optical exception requested by operations.
@@ -112,8 +124,8 @@ try {
   await runScanCycle();
   statuses = ['Fiber cut', 'Online', 'Offline', 'Online'];
   await runScanCycle();
-  assert.strictEqual(telegramMessages.length, 2, 'An explicit Smart OLT fibre cut must send a Telegram alert');
-  const fiberMessage = telegramMessages[1].text;
+  assert.strictEqual(telegramMessages.length, 3, 'An explicit Smart OLT fibre cut must send a Telegram alert');
+  const fiberMessage = telegramMessages[2].text;
   assert.ok(fiberMessage.includes('Pérdida de señal'));
   assert.ok(fiberMessage.includes('Cliente 1'));
   assert.ok(!fiberMessage.includes('Cliente 3'), 'Bare Offline clients must not appear in fibre-cut reports');
@@ -126,8 +138,8 @@ try {
   await runScanCycle();
   statuses = ['Power fail', 'Power fail', 'Offline', 'Online'];
   await runScanCycle();
-  assert.strictEqual(telegramMessages.length, 3, 'A full-NAP electrical outage must send one consolidated alert');
-  const totalPowerMessage = telegramMessages[2].text;
+  assert.strictEqual(telegramMessages.length, 4, 'A full-NAP electrical outage must send one consolidated alert');
+  const totalPowerMessage = telegramMessages[3].text;
   assert.ok(totalPowerMessage.includes('Corte de energía'));
   assert.ok(!totalPowerMessage.includes('Pérdida de señal (LOS)'));
   assert.ok(totalPowerMessage.includes('Cliente 1') && totalPowerMessage.includes('Cliente 2'));

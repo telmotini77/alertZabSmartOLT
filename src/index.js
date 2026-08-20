@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 import http from 'http';
 import dns from 'dns';
 import { Agent, setGlobalDispatcher } from 'undici';
-import webhookRoutes, { handleTelegramMessage } from './routes/webhook.js';
+import webhookRoutes, { handleTelegramMessage, restoreOperationalNotificationState } from './routes/webhook.js';
 import { getUpdates, setWebhook, getWebhookInfo, deleteWebhook, setBotCommands } from './services/telegram.js';
 import { initWebSocketServer } from './services/websocket.js';
 import { initCache } from './services/cache.js';
@@ -106,6 +106,7 @@ server.listen(PORT, async () => {
   // the scanner retain its baseline across deployments and API rate limits.
   try {
     await initCache();
+    await restoreOperationalNotificationState();
   } catch (err) {
     console.error('❌ Failed to initialize cache:', err.message);
   }

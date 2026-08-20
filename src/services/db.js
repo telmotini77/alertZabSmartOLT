@@ -85,6 +85,15 @@ function getDb() {
           timestamp TEXT
         )
       `);
+      // Last delivery time for active operational alerts. Keeping this on the
+      // Render volume prevents a deploy/restart from immediately repeating an
+      // outage that has already been sent to Telegram.
+      db.run(`
+        CREATE TABLE IF NOT EXISTS operational_alert_state (
+          alertKey TEXT PRIMARY KEY,
+          lastSentAt INTEGER NOT NULL
+        )
+      `);
       // Records one-time migrations. Without this marker, clearing the SQL
       // history could re-import obsolete data from a legacy JSON file after a
       // restart.
@@ -496,6 +505,45 @@ export async function dbResolveHistoryItem(id, resolvedAt) {
   } catch (err) {
     console.error(`dbResolveHistoryItem error for ${id}:`, err.message);
     return null;
+  }
+}
+
+/**
+ * Restore the notification throttle after a process restart.
+ */
+export async function dbGetOperationalAlertStates() {
+  try {
+    return await all('SELECT alertKey, lastSentAt FROM operational_alert_state');
+  } catch (err) {
+    console.error('dbGetOperationalAlertStates error:', err.message);
+    return [];
+  }
+}
+
+/**
+ * Record a successfully delivered Telegram operational notification.
+ */
+export async function dbSaveOperationalAlertState(alertKey, lastSentAt = Date.now()) {
+  try {
+    await run(
+      `INSERT INTO operational_alert_state (alertKey, lastSentAt)
+       VALUES (?, ?)
+       ON CONFLICT(alertKey) DO UPDATE SET lastSentAt = excluded.lastSentAt`,
+      [alertKey, lastSentAt]
+    );
+  } catch (err) {
+    console.error(`dbSaveOperationalAlertState error for ${alertKey}:`, err.message);
+  }
+}
+
+/**
+ * A service recovery re-arms the alert immediately.
+ */
+export async function dbDeleteOperationalAlertState(alertKey) {
+  try {
+    await run('DELETE FROM operational_alert_state WHERE alertKey = ?', [alertKey]);
+  } catch (err) {
+    console.error(`dbDeleteOperationalAlertState error for ${alertKey}:`, err.message);
   }
 }
 

@@ -147,21 +147,17 @@ try {
   assert.ok(totalPowerMessage.includes('Fecha y hora:'), 'Power alert must include its required date and time');
   assert.ok(!totalPowerMessage.includes('FHTTZAB00001') && !totalPowerMessage.includes('FHTTZAB00002'));
 
-  // A Power Fail stays an ONU/router energy incident even if the cached NAP
-  // happens to be fully offline; it must never be relabelled as a NAP LOS.
+  // The same active Power Fail must not flood Telegram with additional
+  // Zabbix events. It is re-notified only by the six-hour radar reminder.
+  const messagesBeforeDuplicatePower = telegramMessages.length;
   const powerResult = await processAndSendAlert({
     event_name: 'ONU FHTTZAB00001: Power failure detected',
     host_name: 'OLT-TEST',
     event_status: 'PROBLEM',
     event_severity: 'High'
   }, { ...onus[0], status: 'Offline' }, 'Corte de Energía (Dying Gasp)');
-  assert.strictEqual(powerResult.sent, true, 'A corroborated Power Fail must be sent');
-  const powerMessage = telegramMessages.at(-1).text;
-  assert.ok(powerMessage.includes('CORTE DE ENERGÍA'), 'Power Fail must use the energy alert title');
-  assert.ok(powerMessage.includes('ONU/cliente reportado:'), 'Power Fail must identify the ONU/customer that originated the alert');
-  assert.ok(powerMessage.includes('NAP-ZABBIX-1'), 'Power Fail must show its associated NAP code');
-  assert.ok(!powerMessage.includes('CAÍDA TOTAL EN CAJA NAP'), 'Power Fail must not be relabelled as a NAP outage');
-  assert.ok(!powerMessage.includes('FHTTZAB00001'), 'Power Fail must not expose the customer device serial');
+  assert.strictEqual(powerResult.sent, false, 'A duplicate Power Fail inside six hours must be suppressed');
+  assert.strictEqual(telegramMessages.length, messagesBeforeDuplicatePower);
 
   const oltPriorityResult = await processAndSendAlert({
     event_name: 'ONU FHTTZAB00001: Loss of Signal',
@@ -169,10 +165,8 @@ try {
     event_status: 'PROBLEM',
     event_severity: 'High'
   }, { ...onus[0], status: 'Offline' }, 'Corte de Energía (Dying Gasp)');
-  assert.strictEqual(oltPriorityResult.sent, true, 'A Smart OLT-confirmed cause must be notified even when Zabbix labels it differently');
-  const oltPriorityMessage = telegramMessages.at(-1).text;
-  assert.ok(oltPriorityMessage.includes('CORTE DE ENERGÍA'), 'The notification must use Smart OLT power classification over the Zabbix LOS label');
-  assert.ok(!oltPriorityMessage.includes('FHTTZAB00001'), 'Smart OLT-priority alert must not expose the device serial');
+  assert.strictEqual(oltPriorityResult.sent, false, 'A repeated Zabbix label must not bypass the six-hour suppression');
+  assert.strictEqual(telegramMessages.length, messagesBeforeDuplicatePower);
 
   console.log('Zabbix NAP/Power Fail corroboration rules: PASS');
 } catch (error) {

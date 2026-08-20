@@ -8,7 +8,13 @@ import { extractSerialNumber, extractNapBox, parseStatusInfo, extractEventTime, 
 import { broadcast } from '../services/websocket.js';
 import { applyOnuStatusSnapshot, fetchMonitoringOnus, findCachedOnuBySn, updateOnuStatusInCache, getCachedNaps, updateNapCoordinates, updateNapCoordinatesBulk, getStatusHistory, deleteHistoryItem, clearHistory, resolveHistoryItem, updateHistoryEventDetails } from '../services/cache.js';
 import { getActiveTriggers } from '../services/zabbix.js';
-import { dbGetOpticalHistory, dbSaveOpticalRecord } from '../services/db.js';
+import {
+  dbDeleteOperationalAlertState,
+  dbGetOperationalAlertStates,
+  dbGetOpticalHistory,
+  dbSaveOperationalAlertState,
+  dbSaveOpticalRecord
+} from '../services/db.js';
 import { PUBLIC_URL } from '../config/publicUrl.js';
 
 const router = express.Router();
@@ -159,33 +165,90 @@ const getMinimumNapClients = () => {
   return Number.isInteger(configured) && configured > 0 ? configured : 1;
 };
 
-// Avoid repeat notifications while the same NAP remains fully offline. The
-// state is cleared as soon as any ONU in that NAP recovers.
-const activeNapIncidentNotifications = new Set();
-
-// Tracks alerts already delivered for an ONU while the incident remains
-// active. The Smart OLT radar uses this shared state as a fallback without
-// duplicating an alert that Zabbix already delivered first.
-const activeOperationalNotifications = new Set();
+// One operational Telegram alert is enough while a NAP is down. If it still
+// has not recovered six hours later, operations receive a single reminder.
+// The timestamps are persisted so a deploy cannot reset this six-hour window.
+const OPERATIONAL_ALERT_REPEAT_MS = 6 * 60 * 60 * 1_000;
+const ACTIVE_ONU_ALERT_PREFIX = 'onu:';
+const ACTIVE_NAP_ALERT_PREFIX = 'nap:';
+const activeNapIncidentNotifications = new Map();
+const activeOperationalNotifications = new Map();
+const pendingNapIncidentNotifications = new Set();
 
 const operationalNotificationKey = (sn, category, olt = {}) =>
-  `${getOltIdentity(olt)}:${String(sn || '').trim().toUpperCase()}:${String(category || '').trim().toLowerCase()}`;
+  `${ACTIVE_ONU_ALERT_PREFIX}${getOltIdentity(olt)}:${String(sn || '').trim().toUpperCase()}:${String(category || '').trim().toLowerCase()}`;
+
+const napNotificationKey = (napName, olt = {}) =>
+  `${ACTIVE_NAP_ALERT_PREFIX}${getNapIncidentKey(napName, olt)}`;
+
+const wasSentWithinRepeatWindow = (notifications, key) => {
+  const lastSentAt = Number(notifications.get(key));
+  return Number.isFinite(lastSentAt) && Date.now() - lastSentAt < OPERATIONAL_ALERT_REPEAT_MS;
+};
+
+const isRepeatDue = (notifications, key) => {
+  const lastSentAt = Number(notifications.get(key));
+  return Number.isFinite(lastSentAt) && Date.now() - lastSentAt >= OPERATIONAL_ALERT_REPEAT_MS;
+};
 
 export function hasActiveOperationalNotification(sn, category, olt = {}) {
-  return activeOperationalNotifications.has(operationalNotificationKey(sn, category, olt));
+  return wasSentWithinRepeatWindow(activeOperationalNotifications, operationalNotificationKey(sn, category, olt));
+}
+
+export function isOperationalAlertRepeatDue(sn, category, olt = {}) {
+  return isRepeatDue(activeOperationalNotifications, operationalNotificationKey(sn, category, olt));
+}
+
+export function hasActiveNapIncidentNotification(napName, olt = {}) {
+  return wasSentWithinRepeatWindow(activeNapIncidentNotifications, napNotificationKey(napName, olt));
+}
+
+export function isNapIncidentRepeatDue(napName, olt = {}) {
+  return isRepeatDue(activeNapIncidentNotifications, napNotificationKey(napName, olt));
 }
 
 export function clearActiveOperationalNotification(sn, napName = '', olt = {}) {
-  const prefix = `${getOltIdentity(olt)}:${String(sn || '').trim().toUpperCase()}:`;
-  for (const key of activeOperationalNotifications) {
-    if (key.startsWith(prefix)) activeOperationalNotifications.delete(key);
+  const prefix = `${ACTIVE_ONU_ALERT_PREFIX}${getOltIdentity(olt)}:${String(sn || '').trim().toUpperCase()}:`;
+  for (const key of activeOperationalNotifications.keys()) {
+    if (key.startsWith(prefix)) {
+      activeOperationalNotifications.delete(key);
+      dbDeleteOperationalAlertState(key).catch(() => {});
+    }
   }
-  if (napName) activeNapIncidentNotifications.delete(getNapIncidentKey(napName, olt));
+  if (napName) {
+    const key = napNotificationKey(napName, olt);
+    activeNapIncidentNotifications.delete(key);
+    dbDeleteOperationalAlertState(key).catch(() => {});
+  }
 }
 
 function markActiveOperationalNotification(sn, category, olt = {}) {
   if (sn && category) {
-    activeOperationalNotifications.add(operationalNotificationKey(sn, category, olt));
+    const now = Date.now();
+    const key = operationalNotificationKey(sn, category, olt);
+    activeOperationalNotifications.set(key, now);
+    dbSaveOperationalAlertState(key, now).catch(() => {});
+    const napName = getNapNameFromOnu(olt);
+    if (napName) {
+      const napKey = napNotificationKey(napName, olt);
+      activeNapIncidentNotifications.set(napKey, now);
+      dbSaveOperationalAlertState(napKey, now).catch(() => {});
+    }
+  }
+}
+
+/** Restore six-hour Telegram throttles before the Smart OLT radar starts. */
+export async function restoreOperationalNotificationState() {
+  const states = await dbGetOperationalAlertStates();
+  states.forEach((state) => {
+    const key = String(state?.alertKey || '');
+    const timestamp = Number(state?.lastSentAt);
+    if (!Number.isFinite(timestamp)) return;
+    if (key.startsWith(ACTIVE_ONU_ALERT_PREFIX)) activeOperationalNotifications.set(key, timestamp);
+    if (key.startsWith(ACTIVE_NAP_ALERT_PREFIX)) activeNapIncidentNotifications.set(key, timestamp);
+  });
+  if (states.length > 0) {
+    console.log(`📨 Restored ${states.length} Telegram operational alert throttle(s).`);
   }
 }
 
@@ -1073,6 +1136,7 @@ async function sendCachedNapLossAlert(payload, nap, eventTime = '') {
   // report lists only the actual LOS clients.
   nap.clients.forEach((client) => {
     updateOnuStatusInCache(client.sn, 'LOS', {
+      smartolt_account_id: client.smartolt_account_id || nap.smartolt_account_id || '',
       reason: 'Pérdida de Señal (LOS)',
       category: 'loss',
       eventTime,
@@ -1084,6 +1148,8 @@ async function sendCachedNapLossAlert(payload, nap, eventTime = '') {
     name: referenceClient.name || nap.name,
     status: 'LOS',
     odb_name: nap.name,
+    smartolt_account_id: referenceClient.smartolt_account_id || nap.smartolt_account_id || '',
+    smartolt_subdomain: referenceClient.smartolt_subdomain || nap.smartolt_subdomain || '',
     olt_id: nap.olt_id,
     olt_name: nap.olt_name,
     board: nap.board,
@@ -1122,6 +1188,7 @@ async function sendCachedNapPowerFailAlert(payload, nap, confirmation, eventTime
   // incident for the NAP. Preserve Power fail rather than generic Offline.
   nap.clients.forEach((client) => {
     updateOnuStatusInCache(client.sn, 'Power fail', {
+      smartolt_account_id: client.smartolt_account_id || nap.smartolt_account_id || '',
       reason: 'Corte de Energía (Dying Gasp)',
       category: 'power_fail',
       eventTime,
@@ -1134,6 +1201,8 @@ async function sendCachedNapPowerFailAlert(payload, nap, confirmation, eventTime
     name: referenceClient.name || nap.name,
     status: 'Power fail',
     odb_name: nap.name,
+    smartolt_account_id: referenceClient.smartolt_account_id || nap.smartolt_account_id || '',
+    smartolt_subdomain: referenceClient.smartolt_subdomain || nap.smartolt_subdomain || '',
     olt_id: nap.olt_id,
     olt_name: nap.olt_name,
     board: nap.board,
@@ -1186,26 +1255,23 @@ async function trySendSmartOltFirstNapIncident(payload, nap, referenceOnu, event
   const changedNaps = applyOnuStatusSnapshot(confirmation.onus || []);
   changedNaps.forEach((changedNap) => broadcast('nap_status_update', changedNap));
   const confirmedNap = findCachedNap(nap.name, referenceOnu) || nap;
-  const notificationKey = getNapIncidentKey(confirmedNap.name, referenceOnu);
+  const notificationKey = napNotificationKey(confirmedNap.name, referenceOnu);
 
-  if (activeNapIncidentNotifications.has(notificationKey)) {
+  if (hasActiveNapIncidentNotification(confirmedNap.name, referenceOnu) ||
+      pendingNapIncidentNotifications.has(notificationKey)) {
     return true;
   }
 
-  activeNapIncidentNotifications.add(notificationKey);
+  pendingNapIncidentNotifications.add(notificationKey);
   cancelPendingAlertsForNap(confirmedNap);
   try {
-    if (confirmation.category === 'power_fail') {
-      await sendCachedNapPowerFailAlert(payload, confirmedNap, confirmation, eventTime);
-    } else {
-      await sendCachedNapLossAlert(payload, confirmedNap, eventTime);
-    }
-  } catch (error) {
-    activeNapIncidentNotifications.delete(notificationKey);
-    throw error;
+    const result = confirmation.category === 'power_fail'
+      ? await sendCachedNapPowerFailAlert(payload, confirmedNap, confirmation, eventTime)
+      : await sendCachedNapLossAlert(payload, confirmedNap, eventTime);
+    return result?.sent !== false;
+  } finally {
+    pendingNapIncidentNotifications.delete(notificationKey);
   }
-
-  return true;
 }
 
 const getSettleMs = () => {
@@ -1992,7 +2058,7 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
     });
     if (smartUpdatedNap) broadcast('nap_status_update', smartUpdatedNap);
     if (smartStatus === 'Online') {
-      activeNapIncidentNotifications.delete(getNapIncidentKey(smartUpdatedNap?.name, onu));
+      clearActiveOperationalNotification(sn, smartUpdatedNap?.name || getNapNameFromOnu(onu), onu);
     }
   }
 
@@ -2054,6 +2120,16 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
     if (!eligibility.eligible) {
       console.log(`[Notification Filter] Suppressing ${category} for ${sn}: ${eligibility.reason}.`);
       return { sn, enriched: true, sent: false, reason: eligibility.reason };
+    }
+
+    // The same outage may be reported by Zabbix several times. Telegram gets
+    // the first verified event, then only the six-hour scanner reminder while
+    // the service remains down.
+    const napName = getNapNameFromOnu(onu);
+    if (hasActiveOperationalNotification(sn, category, onu) ||
+        (napName && hasActiveNapIncidentNotification(napName, onu))) {
+      console.log(`[Notification Filter] Suppressing duplicate ${category} alert for ${sn}; it was delivered less than six hours ago.`);
+      return { sn, enriched: true, sent: false, reason: 'Incident already notified within six-hour window' };
     }
   }
 
