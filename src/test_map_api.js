@@ -83,7 +83,7 @@ globalThis.fetch = async (url) => {
 console.log('--- STARTING MAP AND CACHE UNIT TESTS ---');
 
 // Load cache service after configuring the isolated test cache path.
-const { getCachedNaps, updateOnuStatusInCache, syncCacheWithSmartOlt, updateNapCoordinates, applyOnuStatusSnapshot } =
+const { getCachedNaps, getStatusHistory, updateOnuStatusInCache, syncCacheWithSmartOlt, updateNapCoordinates, applyOnuStatusSnapshot } =
   await import('./services/cache.js');
 
 async function runTests() {
@@ -176,6 +176,12 @@ async function runTests() {
     assert.ok(changedNaps.some(n => n.name === 'NAP-04-A'), 'Snapshot should mark NAP-04-A as changed');
     assert.strictEqual(snapNapA.status, 'offline', 'Full snapshot should mark NAP-04-A as fully offline');
     assert.strictEqual(snapNapA.offlineClients, 3, 'Full snapshot should count every affected ONU');
+    const napSnapshotHistory = getStatusHistory(100).find((item) =>
+      item.napName === 'NAP-04-A' && String(item.sn || '').startsWith('NAP:')
+    );
+    assert.ok(napSnapshotHistory, 'A Smart OLT snapshot status transition must appear in the map history');
+    assert.ok(napSnapshotHistory.newStatus.includes('caída total'), 'The history must explain the NAP-level transition');
+    assert.ok(!napSnapshotHistory.onuName.includes('FHTT'), 'NAP history must identify affected clients without device serials');
 
     // Smart OLT may omit previously cached/decommissioned ONUs from a scan.
     // Missing snapshot entries must not abort the complete radar cycle.
@@ -183,6 +189,16 @@ async function runTests() {
       () => applyOnuStatusSnapshot(snapshot.slice(0, 1)),
       'A partial Smart OLT snapshot must safely ignore unmatched cached clients'
     );
+
+    const recoverySnapshot = mockOnus.map((onu) => ({ ...onu, status: 'Online' }));
+    applyOnuStatusSnapshot(recoverySnapshot);
+    const napEventsAfterRecovery = getStatusHistory(100).filter((item) =>
+      item.napName === 'NAP-04-A' && String(item.sn || '').startsWith('NAP:')
+    );
+    assert.ok(napEventsAfterRecovery.some((item) => item.failureType === 'recovery'),
+      'A full NAP recovery must also be documented in map history');
+    assert.ok(napEventsAfterRecovery.every((item) => item.resolved),
+      'A full NAP recovery must resolve the preceding NAP history incident');
     console.log('Full scan snapshot and total NAP outage calculation: PASS');
 
     // Clean up cache file generated during test

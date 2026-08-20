@@ -28,6 +28,95 @@ const METADATA_SYNC_MINUTES = Math.max(
   60
 );
 
+const isOnlineStatus = (status) => ['online', 'active'].includes(String(status || '').trim().toLowerCase());
+
+const getNapStatusFromClients = (clients = []) => {
+  const total = clients.length;
+  const offline = clients.filter((client) => !isOnlineStatus(client.status)).length;
+  if (total > 0 && offline === total) return 'offline';
+  if (offline > 0) return 'partial';
+  return 'online';
+};
+
+const formatNapStatus = (status) => ({
+  online: 'NAP estable',
+  partial: 'NAP parcial',
+  offline: 'NAP caída total'
+}[status] || 'NAP sin estado');
+
+const getNapHistoryKey = (nap) => {
+  const olt = String(nap?.olt_id || nap?.olt_name || 'OLT').trim().toUpperCase();
+  const name = String(nap?.name || 'NAP').trim().toUpperCase();
+  return `NAP:${olt}:${name}`;
+};
+
+function getSmartOltFailureDetails(changes = []) {
+  const offlineChanges = changes.filter((change) => !isOnlineStatus(change.newStatus));
+  const source = offlineChanges.length > 0 ? offlineChanges : changes;
+  const text = source.map((change) => `${change.reason || ''} ${change.newStatus || ''}`)
+    .join(' ')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+
+  if (/(dying|gasp|power|energia|electric|pwrfail)/.test(text)) {
+    return {
+      category: 'power_fail',
+      reason: 'Corte de energía confirmado por Smart OLT (Power Fail).'
+    };
+  }
+  if (/(\blos\b|loss of signal|signal|senal|fibra|fiber|optic)/.test(text)) {
+    return {
+      category: 'loss',
+      reason: 'Pérdida de señal confirmada por Smart OLT (LOS).'
+    };
+  }
+  if (offlineChanges.length > 0) {
+    return {
+      category: 'unknown',
+      reason: 'Smart OLT reportó una ONU Offline sin causa específica; se registra solo en el historial, no se envía a Telegram.'
+    };
+  }
+  return {
+    category: 'recovery',
+    reason: 'Servicio restablecido y confirmado por Smart OLT.'
+  };
+}
+
+function recordNapSnapshotTransition(nap, previousNapStatus, changes = []) {
+  if (previousNapStatus === nap.status || changes.length === 0) return;
+
+  // The map history documents status changes even when they are intentionally
+  // silent in Telegram.  This makes partial drops traceable without creating
+  // a Telegram notification per router.
+  const deteriorated = previousNapStatus === 'online' || nap.status === 'offline';
+  const fullyRecovered = nap.status === 'online';
+  if (!deteriorated && !fullyRecovered) return;
+
+  const details = getSmartOltFailureDetails(changes);
+  const affectedNames = [...new Set(changes.map((change) => change.name).filter(Boolean))];
+  const eventTime = changes.map((change) => change.eventTime).find(Boolean) || null;
+
+  recordStatusChangeEvent({
+    sn: getNapHistoryKey(nap),
+    onuName: affectedNames.length > 0
+      ? `Clientes afectados: ${affectedNames.join(', ')}`
+      : 'Cambio de estado de la caja NAP',
+    napName: nap.name,
+    previousStatus: formatNapStatus(previousNapStatus),
+    newStatus: formatNapStatus(nap.status),
+    napStatus: nap.status,
+    reason: details.reason,
+    category: details.category,
+    oltName: nap.olt_name,
+    board: nap.board,
+    port: nap.port,
+    latitude: nap.latitude,
+    longitude: nap.longitude,
+    eventTime
+  });
+}
+
 /**
  * Merge the compact Smart OLT monitoring feed with locally persisted NAP,
  * customer and GPS metadata. This prevents alert processing from repeatedly
@@ -346,9 +435,9 @@ export function updateOnuStatusInCache(sn, newStatus, eventMetadata = {}) {
 
 /**
  * Apply the status returned by a complete Smart OLT scan to the existing NAP
- * cache. Unlike updateOnuStatusInCache(), this does not record one history
- * event per ONU: callers use it to make a single, coherent NAP decision from
- * one scan cycle.
+ * cache. Unlike updateOnuStatusInCache(), this writes at most one aggregate
+ * history event per affected NAP, so partial changes remain explainable on
+ * the map without creating one alert card per ONU.
  *
  * @param {Array<Object>} onus - ONUs returned by Smart OLT.
  * @returns {Array<Object>} NAPs whose calculated status changed.
@@ -367,6 +456,8 @@ export function applyOnuStatusSnapshot(onus) {
       snapshotBySn.set(sn, {
         status: String(onu.status),
         olt_id: String(onu.olt_id ?? onu.oltId ?? '').trim(),
+        reason: String(onu.offline_reason || onu.last_down_reason || onu.status_reason || onu.reason || onu.status || '').trim(),
+        eventTime: onu.last_status_change || onu.last_down_time || onu.status_changed_at || null,
         latitude: Number.isFinite(latitude) && latitude !== 0 ? latitude : null,
         longitude: Number.isFinite(longitude) && longitude !== 0 ? longitude : null
       });
@@ -378,10 +469,19 @@ export function applyOnuStatusSnapshot(onus) {
   const changedNaps = [];
   cachedNaps.forEach((nap) => {
     let changed = false;
+    const previousNapStatus = getNapStatusFromClients(nap.clients);
+    const statusChanges = [];
 
     nap.clients.forEach((client) => {
       const snapshot = snapshotBySn.get(String(client.sn || '').toUpperCase());
       if (snapshot?.status && String(client.status || '') !== snapshot.status) {
+        statusChanges.push({
+          name: client.name || '',
+          previousStatus: String(client.status || ''),
+          newStatus: snapshot.status,
+          reason: snapshot.reason,
+          eventTime: snapshot.eventTime
+        });
         client.status = snapshot.status;
         changed = true;
       }
@@ -417,20 +517,14 @@ export function applyOnuStatusSnapshot(onus) {
     if (!changed) return;
 
     const totalClients = nap.clients.length;
-    const offlineClients = nap.clients.filter((client) => {
-      const status = String(client.status || '').toLowerCase();
-      return status !== 'online' && status !== 'active';
-    }).length;
+    const offlineClients = nap.clients.filter((client) => !isOnlineStatus(client.status)).length;
 
     nap.totalClients = totalClients;
     nap.offlineClients = offlineClients;
     nap.onlineClients = totalClients - offlineClients;
-    nap.status = offlineClients === totalClients
-      ? 'offline'
-      : offlineClients > 0
-        ? 'partial'
-        : 'online';
+    nap.status = getNapStatusFromClients(nap.clients);
     changedNaps.push(nap);
+    recordNapSnapshotTransition(nap, previousNapStatus, statusChanges);
   });
 
   if (changedNaps.length > 0) {
@@ -454,7 +548,10 @@ export function recordStatusChangeEvent(data) {
   const reasonText = (data.reason || '').toLowerCase();
   const catText = (data.category || '').toLowerCase();
 
-  const isOnline = (data.newStatus || '').toLowerCase() === 'online' || (data.newStatus || '').toLowerCase() === 'active';
+  const isNapHistoryEvent = String(data.sn || '').startsWith('NAP:');
+  const isOnline = isNapHistoryEvent
+    ? String(data.napStatus || '').toLowerCase() === 'online'
+    : isOnlineStatus(data.newStatus);
 
   if (isOnline) {
     failureType = 'recovery';

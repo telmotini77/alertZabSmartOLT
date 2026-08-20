@@ -1464,6 +1464,7 @@ function renderHistoryList() {
 
     const timeAgo = formatTimeAgo(new Date(item.timestamp));
     const isResolved = Boolean(item.resolved);
+    const isNapEvent = String(item.sn || '').startsWith('NAP:');
 
     li.innerHTML = `
       <div class="history-item-top">
@@ -1485,7 +1486,9 @@ function renderHistoryList() {
           </span>
         </div>
         <div class="history-client-tag">
-          👤 <b>${item.onuName}</b> (<code>${item.sn}</code>)
+          ${isNapEvent
+            ? `📦 <b>${item.onuName}</b>`
+            : `👤 <b>${item.onuName}</b> (<code>${item.sn}</code>)`}
         </div>
         <div class="history-status-transition">
           <b>Transición:</b> <span>${item.previousStatus} ➔ <b>${item.newStatus}</b></span>
