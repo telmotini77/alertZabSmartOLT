@@ -81,6 +81,15 @@ function getDb() {
           timestamp TEXT
         )
       `);
+      // Records one-time migrations. Without this marker, clearing the SQL
+      // history could re-import obsolete data from a legacy JSON file after a
+      // restart.
+      db.run(`
+        CREATE TABLE IF NOT EXISTS app_meta (
+          key TEXT PRIMARY KEY,
+          value TEXT
+        )
+      `);
     });
   }
   return db;
@@ -224,10 +233,19 @@ async function runMigration() {
 
     // 2. Migrate Status History
     const historyCountRow = await get('SELECT COUNT(*) as count FROM status_history');
-    if (historyCountRow.count === 0 && fs.existsSync(historyFile)) {
+    const historyMigrationKey = 'legacy_status_history_v1_processed';
+    const historyMigrationMarker = await get('SELECT value FROM app_meta WHERE key = ?', [historyMigrationKey]);
+    if (!historyMigrationMarker && historyCountRow.count === 0 && fs.existsSync(historyFile)) {
       console.log('📋 Migrating Status History from JSON to SQLite...');
       const historyData = JSON.parse(fs.readFileSync(historyFile, 'utf8'));
       if (Array.isArray(historyData)) {
+        // These two records came from the integration fixture, not from the
+        // operator's network. Never revive them from an old persistent JSON
+        // file after the user has removed them from the map.
+        const validHistory = historyData.filter((item) =>
+          item?.napName !== 'NAP-ZABBIX-1' &&
+          !String(item?.sn || '').toUpperCase().startsWith('FHTTZAB')
+        );
         await new Promise((resolve, reject) => {
           getDb().serialize(() => {
             getDb().run('BEGIN TRANSACTION');
@@ -238,7 +256,7 @@ async function runMigration() {
                 reason, resolved, resolvedAt, oltName, board, port, latitude, longitude
               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             `);
-            historyData.forEach((item) => {
+            validHistory.forEach((item) => {
               stmt.run(
                 item.id,
                 item.timestamp,
@@ -269,8 +287,14 @@ async function runMigration() {
             });
           });
         });
-        console.log(`✅ Migrated ${historyData.length} history items to SQLite.`);
+        console.log(`✅ Migrated ${validHistory.length} history items to SQLite.`);
       }
+    }
+    if (!historyMigrationMarker) {
+      await run(
+        'INSERT OR REPLACE INTO app_meta (key, value) VALUES (?, ?)',
+        [historyMigrationKey, new Date().toISOString()]
+      );
     }
   } catch (err) {
     console.error('⚠️ Error during migration to SQLite:', err.message);
