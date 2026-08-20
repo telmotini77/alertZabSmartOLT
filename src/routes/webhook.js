@@ -51,10 +51,18 @@ const normalizeNapName = (value) => String(value || '')
   .replace(/[^a-zA-Z0-9]/g, '')
   .toUpperCase();
 
-const findCachedNap = (napName) => {
+const findCachedNap = (napName, referenceOnu = null) => {
   const normalizedName = normalizeNapName(napName);
   if (!normalizedName) return null;
-  return getCachedNaps().find((nap) => normalizeNapName(nap.name) === normalizedName) || null;
+  const candidates = getCachedNaps().filter((nap) => normalizeNapName(nap.name) === normalizedName);
+  if (!referenceOnu) return candidates[0] || null;
+  const accountId = String(referenceOnu.smartolt_account_id || referenceOnu.smartOltAccountId || 'default').trim();
+  const oltId = String(referenceOnu.olt_id ?? referenceOnu.oltId ?? '').trim();
+  return candidates.find((nap) => {
+    const napAccountId = String(nap.smartolt_account_id || 'default').trim();
+    if (napAccountId !== accountId) return false;
+    return !oltId || String(nap.olt_id || '').trim() === oltId;
+  }) || null;
 };
 
 const findCachedNapBySn = (sn) => {
@@ -160,24 +168,24 @@ const activeNapIncidentNotifications = new Set();
 // duplicating an alert that Zabbix already delivered first.
 const activeOperationalNotifications = new Set();
 
-const operationalNotificationKey = (sn, category) =>
-  `${String(sn || '').trim().toUpperCase()}:${String(category || '').trim().toLowerCase()}`;
+const operationalNotificationKey = (sn, category, olt = {}) =>
+  `${getOltIdentity(olt)}:${String(sn || '').trim().toUpperCase()}:${String(category || '').trim().toLowerCase()}`;
 
-export function hasActiveOperationalNotification(sn, category) {
-  return activeOperationalNotifications.has(operationalNotificationKey(sn, category));
+export function hasActiveOperationalNotification(sn, category, olt = {}) {
+  return activeOperationalNotifications.has(operationalNotificationKey(sn, category, olt));
 }
 
 export function clearActiveOperationalNotification(sn, napName = '', olt = {}) {
-  const prefix = `${String(sn || '').trim().toUpperCase()}:`;
+  const prefix = `${getOltIdentity(olt)}:${String(sn || '').trim().toUpperCase()}:`;
   for (const key of activeOperationalNotifications) {
     if (key.startsWith(prefix)) activeOperationalNotifications.delete(key);
   }
   if (napName) activeNapIncidentNotifications.delete(getNapIncidentKey(napName, olt));
 }
 
-function markActiveOperationalNotification(sn, category) {
+function markActiveOperationalNotification(sn, category, olt = {}) {
   if (sn && category) {
-    activeOperationalNotifications.add(operationalNotificationKey(sn, category));
+    activeOperationalNotifications.add(operationalNotificationKey(sn, category, olt));
   }
 }
 
@@ -383,15 +391,19 @@ const isReportableSmartOltFailure = (onu) =>
   ['power_fail', 'loss'].includes(getExplicitSmartOltFailureCategory(onu));
 
 const getOltIdentity = (onu = {}) => {
+  const accountId = String(onu?.smartolt_account_id || onu?.smartOltAccountId || 'default').trim();
   const oltId = String(onu?.olt_id ?? onu?.oltId ?? '').trim();
-  if (oltId) return `id:${oltId}`;
-  return `name:${String(onu?.olt_name || onu?.oltName || '').trim().toUpperCase()}`;
+  if (oltId) return `account:${accountId}:id:${oltId}`;
+  return `account:${accountId}:name:${String(onu?.olt_name || onu?.oltName || '').trim().toUpperCase()}`;
 };
 
 const getNapIncidentKey = (napName, olt = {}) =>
   `${getOltIdentity(olt)}:${normalizeNapName(napName)}`;
 
 const sameOlt = (left = {}, right = {}) => {
+  const leftAccount = String(left?.smartolt_account_id || left?.smartOltAccountId || 'default').trim();
+  const rightAccount = String(right?.smartolt_account_id || right?.smartOltAccountId || 'default').trim();
+  if (leftAccount !== rightAccount) return false;
   const leftId = String(left?.olt_id ?? left?.oltId ?? '').trim();
   const rightId = String(right?.olt_id ?? right?.oltId ?? '').trim();
   // If either source has a real OLT id, only an identical real id is a
@@ -1173,7 +1185,7 @@ async function trySendSmartOltFirstNapIncident(payload, nap, referenceOnu, event
   // before calculating totals or rendering the Telegram notification.
   const changedNaps = applyOnuStatusSnapshot(confirmation.onus || []);
   changedNaps.forEach((changedNap) => broadcast('nap_status_update', changedNap));
-  const confirmedNap = findCachedNap(nap.name) || nap;
+  const confirmedNap = findCachedNap(nap.name, referenceOnu) || nap;
   const notificationKey = getNapIncidentKey(confirmedNap.name, referenceOnu);
 
   if (activeNapIncidentNotifications.has(notificationKey)) {
@@ -1547,7 +1559,7 @@ async function generateNapReport(onu, eventStatus, severity, hostName, eventName
   let cachedNap = null;
   let coordinates = null;
   if (napBox) {
-    cachedNap = findCachedNap(napBox);
+    cachedNap = findCachedNap(napBox, onu);
     // Cache coordinates are an average of associated ONUs, so they represent
     // an approximate NAP position. Use the affected ONU as a fallback while
     // the NAP cache is being built.
@@ -1947,13 +1959,13 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
   }
 
   if (eventStatus === 'PROBLEM' && payload.source_system === 'smartolt_radar' &&
-      hasActiveOperationalNotification(sn, category)) {
+      hasActiveOperationalNotification(sn, category, onu)) {
     console.log(`[Radar fallback] Suppressed duplicate ${category} alert for ${sn}; it was already delivered.`);
     return { sn, enriched: smartOltEnriched, sent: false, reason: 'Incident already notified' };
   }
 
   if (eventStatus === 'PROBLEM' && onu && !getClientName(onu)) {
-    const napWithNamedClient = findCachedNap(getNapNameFromOnu(onu));
+    const napWithNamedClient = findCachedNap(getNapNameFromOnu(onu), onu);
     if (!getAffectedClientNames(napWithNamedClient?.clients || []).length) {
       console.log('[Notification Filter] Suppressing alert because Smart OLT did not provide affected client names.');
       return { sn, enriched: smartOltEnriched, sent: false, reason: 'Affected client names unavailable' };
@@ -2053,7 +2065,7 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
   } else if (onu) {
     const napBox = (onu.odb_name ? onu.odb_name.trim() : '') || (onu.odb ? onu.odb.trim() : '') || extractNapBox(onu.address) || extractNapBox(onu.description);
     if (napBox) {
-      const cachedNap = findCachedNap(napBox);
+      const cachedNap = findCachedNap(napBox, onu);
       if (cachedNap) {
         const totalClients = cachedNap.clients?.length || cachedNap.totalClients || 1;
         const offlineClients = cachedNap.clients?.filter(c => {
@@ -2087,7 +2099,7 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
   } else if (onu) {
     const napBox = (onu.odb_name ? onu.odb_name.trim() : '') || (onu.odb ? onu.odb.trim() : '') || extractNapBox(onu.address) || extractNapBox(onu.description);
     if (napBox) {
-      const cachedNap = findCachedNap(napBox);
+      const cachedNap = findCachedNap(napBox, onu);
       if (cachedNap) {
         const totalClients = cachedNap.clients?.length || cachedNap.totalClients || 1;
         const offlineClients = cachedNap.clients?.filter(c => {
@@ -2184,7 +2196,7 @@ ${sourceNote}
         });
       }
       
-      const coordinates = (napBox ? getCoordinates(findCachedNap(napBox)) : null) || getCoordinates(onu);
+      const coordinates = (napBox ? getCoordinates(findCachedNap(napBox, onu)) : null) || getCoordinates(onu);
       if (coordinates) {
         firstRow.push({
           text: '📍 Google Maps',
@@ -2204,7 +2216,7 @@ ${sourceNote}
     }
     await sendNotification(targetChatId, enrichedText.trim(), sendOptions);
     if (eventStatus === 'PROBLEM') {
-      markActiveOperationalNotification(sn, category);
+      markActiveOperationalNotification(sn, category, onu);
     }
   }
   return { sn, enriched: smartOltEnriched, sent: !options.suppressSend };
@@ -2374,12 +2386,13 @@ export async function processZabbixAlert(payload) {
               ? 'LOS'
               : 'Offline';
         smartNap = updateOnuStatusInCache(cleanSn, smartStatus, {
+          smartolt_account_id: freshOnu.smartolt_account_id,
           reason: freshOltStatusReason || 'Estado consultado en Smart OLT',
           category: freshCategory,
           eventTime: extractEventTime(payload)
         });
         if (smartNap) broadcast('nap_status_update', smartNap);
-        smartNap = smartNap || findCachedNap(getNapNameFromOnu(freshOnu));
+        smartNap = smartNap || findCachedNap(getNapNameFromOnu(freshOnu), freshOnu);
       } else {
         smartNap = findCachedNapBySn(cleanSn);
       }
@@ -2453,7 +2466,7 @@ export async function runLiveDiagnostics(chatId, messageId, snParam) {
       return;
     }
     
-    const liveStatus = await getOnuStatus(onu.external_id);
+    const liveStatus = await getOnuStatus(onu.external_id, onu.smartolt_account_id);
     if (!liveStatus) {
       await replyToMessage(chatId, messageId, `❌ No se pudo obtener la potencia óptica en vivo para <code>${onu.sn}</code>.`);
       return;
@@ -2496,7 +2509,7 @@ export async function runLiveDiagnostics(chatId, messageId, snParam) {
         });
       }
       
-      const coordinates = (napBox ? getCoordinates(findCachedNap(napBox)) : null) || getCoordinates(onu);
+      const coordinates = (napBox ? getCoordinates(findCachedNap(napBox, onu)) : null) || getCoordinates(onu);
       if (coordinates) {
         firstRow.push({
           text: '📍 Google Maps',
@@ -2800,7 +2813,7 @@ Comandos disponibles:
         let smartOltAlert = null;
         try {
           console.log(`Querying live status for ONU ${onu.external_id} (${sn}) on Smart OLT...`);
-          const liveStatus = await getOnuStatus(onu.external_id);
+          const liveStatus = await getOnuStatus(onu.external_id, onu.smartolt_account_id);
           if (liveStatus && liveStatus.status) {
             const rawReason = liveStatus.last_down_reason || liveStatus.offline_reason ||
               liveStatus.status_reason || liveStatus.reason || '';
@@ -2864,7 +2877,7 @@ Comandos disponibles:
               });
             }
             
-            const coordinates = (napBox ? getCoordinates(findCachedNap(napBox)) : null) || getCoordinates(onu);
+            const coordinates = (napBox ? getCoordinates(findCachedNap(napBox, onu)) : null) || getCoordinates(onu);
             if (coordinates) {
               firstRow.push({
                 text: '📍 Google Maps',
@@ -3197,7 +3210,7 @@ router.get('/onu/sn/:sn/status', async (req, res) => {
       return res.status(400).json({ error: `ONU has no external ID registered in Smart OLT` });
     }
 
-    const liveStatus = await getOnuStatus(onu.external_id);
+    const liveStatus = await getOnuStatus(onu.external_id, onu.smartolt_account_id);
     if (!liveStatus) {
       return res.status(500).json({ error: `Failed to fetch live status for ONU ${sn} (External ID: ${onu.external_id})` });
     }

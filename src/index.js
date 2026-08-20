@@ -8,6 +8,7 @@ import { getUpdates, setWebhook, getWebhookInfo, deleteWebhook, setBotCommands }
 import { initWebSocketServer } from './services/websocket.js';
 import { initCache } from './services/cache.js';
 import { getScannerStatus, startScanner } from './services/scanner.js';
+import { getSmartOltAccounts } from './services/smartOlt.js';
 import { PUBLIC_URL } from './config/publicUrl.js';
 
 dotenv.config();
@@ -72,6 +73,7 @@ app.get('/health', async (req, res) => {
     port:         PORT,
     publicUrl:    PUBLIC_URL || null,
     webhook:      _webhookInfoCache || null,
+    smartOltAccounts: getSmartOltAccounts(),
     smartOltScanner: getScannerStatus(),
     memory: {
       rss_mb:       (mem.rss          / 1024 / 1024).toFixed(1),

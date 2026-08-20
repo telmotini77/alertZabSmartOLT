@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { fetchAllOnus, fetchAllOnuStatuses } from './smartOlt.js';
+import { fetchAllOnus, fetchAllOnuStatuses, getSmartOltAccounts } from './smartOlt.js';
 import { extractNapBox } from '../utils/parser.js';
 import { broadcast } from './websocket.js';
 import {
@@ -44,10 +44,24 @@ const formatNapStatus = (status) => ({
   offline: 'NAP caída total'
 }[status] || 'NAP sin estado');
 
+const getSmartOltAccountKey = (value = {}) => String(
+  value?.smartolt_account_id || value?.smartOltAccountId || 'default'
+).trim().toUpperCase() || 'DEFAULT';
+
 const getNapHistoryKey = (nap) => {
+  const account = getSmartOltAccountKey(nap);
   const olt = String(nap?.olt_id || nap?.olt_name || 'OLT').trim().toUpperCase();
   const name = String(nap?.name || 'NAP').trim().toUpperCase();
-  return `NAP:${olt}:${name}`;
+  return `NAP:${account}:${olt}:${name}`;
+};
+
+const getNapSourceKey = (value = {}, napName = '') => {
+  const account = getSmartOltAccountKey(value);
+  const olt = String(value?.olt_id || value?.oltId || value?.olt_name || value?.oltName || 'OLT')
+    .trim()
+    .toUpperCase();
+  const name = String(napName || value?.name || '').trim().toUpperCase();
+  return `${account}:${olt}:${name}`;
 };
 
 function getSmartOltFailureDetails(changes = []) {
@@ -124,27 +138,34 @@ function recordNapSnapshotTransition(nap, previousNapStatus, changes = []) {
  */
 export function mergeStatusSnapshotWithCache(statusOnus = []) {
   const cachedBySn = new Map();
+  const cachedByUnscopedSn = new Map();
   cachedNaps.forEach((nap) => {
     (nap.clients || []).forEach((client) => {
       const sn = String(client?.sn || '').trim().toUpperCase();
       if (!sn) return;
-      cachedBySn.set(sn, {
+      const cached = {
         ...client,
         sn,
         odb_name: nap.name,
+        smartolt_account_id: client.smartolt_account_id || nap.smartolt_account_id || '',
         olt_id: nap.olt_id,
         olt_name: nap.olt_name,
         board: nap.board,
         port: nap.port,
         latitude: client.latitude ?? nap.latitude,
         longitude: client.longitude ?? nap.longitude
-      });
+      };
+      const accountKey = getSmartOltAccountKey(cached);
+      cachedBySn.set(`${accountKey}:${sn}`, cached);
+      // Compatibility for old rows created before account metadata existed.
+      if (!cachedByUnscopedSn.has(sn)) cachedByUnscopedSn.set(sn, cached);
     });
   });
 
   return statusOnus.map((statusOnu) => {
     const sn = String(statusOnu?.sn || '').trim().toUpperCase();
-    const cached = cachedBySn.get(sn) || {};
+    const accountKey = getSmartOltAccountKey(statusOnu);
+    const cached = cachedBySn.get(`${accountKey}:${sn}`) || cachedByUnscopedSn.get(sn) || {};
     return {
       ...cached,
       ...statusOnu,
@@ -153,6 +174,8 @@ export function mergeStatusSnapshotWithCache(statusOnus = []) {
       name: statusOnu?.name || cached.name || '',
       status: statusOnu?.status || cached.status || 'Offline',
       odb_name: statusOnu?.odb_name || statusOnu?.odb || cached.odb_name || '',
+      smartolt_account_id: statusOnu?.smartolt_account_id || cached.smartolt_account_id || '',
+      smartolt_subdomain: statusOnu?.smartolt_subdomain || cached.smartolt_subdomain || '',
       olt_id: statusOnu?.olt_id ?? statusOnu?.oltId ?? cached.olt_id ?? '',
       olt_name: statusOnu?.olt_name || cached.olt_name || '',
       board: statusOnu?.board ?? cached.board,
@@ -181,6 +204,8 @@ export function findCachedOnuBySn(sn) {
       ...client,
       sn: normalizedSn,
       odb_name: nap.name,
+      smartolt_account_id: client.smartolt_account_id || nap.smartolt_account_id || '',
+      smartolt_subdomain: client.smartolt_subdomain || nap.smartolt_subdomain || '',
       olt_id: nap.olt_id,
       olt_name: nap.olt_name,
       board: nap.board,
@@ -205,8 +230,13 @@ export async function initCache() {
     cachedNaps = await dbGetAllNaps();
     console.log(`📦 Loaded ${cachedNaps.length} NAPs from SQLite database.`);
 
-    if (cachedNaps.length === 0) {
-      console.log('📦 No NAPs found in SQLite. Running initial sync with Smart OLT...');
+    const configuredAccountIds = getSmartOltAccounts().map((account) => account.id);
+    const cachedAccountIds = new Set(cachedNaps.map((nap) => String(nap.smartolt_account_id || '').trim()));
+    const needsAccountMetadata = configuredAccountIds.some((id) => !cachedAccountIds.has(id));
+    if (cachedNaps.length === 0 || needsAccountMetadata) {
+      console.log(cachedNaps.length === 0
+        ? '📦 No NAPs found in SQLite. Running initial sync with Smart OLT...'
+        : '📦 New Smart OLT domain detected. Loading its ONU/NAP metadata...');
       try {
         await syncCacheWithSmartOlt();
       } catch (syncErr) {
@@ -254,9 +284,15 @@ export async function syncCacheWithSmartOlt() {
       const napName = (onu.odb_name ? onu.odb_name.trim() : '') || (onu.odb ? onu.odb.trim() : '') || extractNapBox(onu.address) || extractNapBox(onu.description);
       if (!napName) return;
 
-      if (!napMap[napName]) {
-        napMap[napName] = {
+      // OLT ids may be reused by different Smart OLT domains. Keep both the
+      // account and the OLT in the cache key so their boxes/clients never
+      // merge into the same NAP incident.
+      const napSourceKey = getNapSourceKey(onu, napName);
+      if (!napMap[napSourceKey]) {
+        napMap[napSourceKey] = {
           name: napName,
+          smartolt_account_id: onu.smartolt_account_id || '',
+          smartolt_subdomain: onu.smartolt_subdomain || '',
           olt_id: onu.olt_id || onu.oltId || '',
           olt_name: onu.olt_name || 'OLT Desconocida',
           board: onu.board || '0',
@@ -273,6 +309,9 @@ export async function syncCacheWithSmartOlt() {
       const client = {
         name: onu.name,
         sn: onu.sn.toUpperCase(),
+        external_id: onu.external_id || onu.unique_external_id || '',
+        smartolt_account_id: onu.smartolt_account_id || '',
+        smartolt_subdomain: onu.smartolt_subdomain || '',
         olt_id: onu.olt_id || onu.oltId || '',
         status: onu.status || 'Offline',
         onu_id: onu.onu_id || 'N/A'
@@ -285,8 +324,8 @@ export async function syncCacheWithSmartOlt() {
       if (!isNaN(lat) && !isNaN(lng) && lat !== 0 && lng !== 0) {
         client.latitude = lat;
         client.longitude = lng;
-        napMap[napName].lats.push(lat);
-        napMap[napName].lngs.push(lng);
+        napMap[napSourceKey].lats.push(lat);
+        napMap[napSourceKey].lngs.push(lng);
       }
 
       // Automatically save optical power history record in background for online ONUs
@@ -299,12 +338,13 @@ export async function syncCacheWithSmartOlt() {
         dbSaveOpticalRecord(onu.sn, rx, tx, temp, volt, bias).catch(() => {});
       }
 
-      napMap[napName].clients.push(client);
+      napMap[napSourceKey].clients.push(client);
     });
 
     // Build the final NAPs list
-    const naps = Object.keys(napMap).map((name) => {
-      const group = napMap[name];
+    const naps = Object.keys(napMap).map((sourceKey) => {
+      const group = napMap[sourceKey];
+      const name = group.name;
       
       // Calculate average coordinates
       let latitude = null;
@@ -315,7 +355,7 @@ export async function syncCacheWithSmartOlt() {
       }
 
       // Preserve previously set coordinates if the new sync has no coordinates
-      const oldNap = cachedNaps.find(n => n.name.toUpperCase() === name.toUpperCase());
+      const oldNap = cachedNaps.find((nap) => getNapSourceKey(nap, nap.name) === sourceKey);
       const finalLat = (latitude !== null) ? latitude : (oldNap ? oldNap.latitude : null);
       const finalLng = (longitude !== null) ? longitude : (oldNap ? oldNap.longitude : null);
 
@@ -335,6 +375,8 @@ export async function syncCacheWithSmartOlt() {
 
       return {
         name,
+        smartolt_account_id: group.smartolt_account_id,
+        smartolt_subdomain: group.smartolt_subdomain,
         olt_id: group.olt_id,
         olt_name: group.olt_name,
         board: group.board,
@@ -370,12 +412,16 @@ export async function syncCacheWithSmartOlt() {
 export function updateOnuStatusInCache(sn, newStatus, eventMetadata = {}) {
   if (!sn) return null;
   const cleanSn = sn.toUpperCase();
+  const accountId = String(eventMetadata.smartolt_account_id || eventMetadata.smartOltAccountId || '').trim();
   let affectedNap = null;
   let clientFound = null;
   let previousStatus = 'Online';
 
   cachedNaps.forEach((nap) => {
-    const client = nap.clients.find(c => c.sn === cleanSn);
+    const client = nap.clients.find((candidate) =>
+      String(candidate.sn || '').toUpperCase() === cleanSn &&
+      (!accountId || String(candidate.smartolt_account_id || nap.smartolt_account_id || '').trim() === accountId)
+    );
     if (client) {
       previousStatus = client.status || 'Online';
       client.status = newStatus;
@@ -453,8 +499,9 @@ export function applyOnuStatusSnapshot(onus) {
     if (sn && onu?.status !== undefined && onu?.status !== null) {
       const latitude = Number(onu.gps_lat ?? onu.latitude);
       const longitude = Number(onu.gps_lng ?? onu.longitude);
-      snapshotBySn.set(sn, {
+      snapshotBySn.set(`${getSmartOltAccountKey(onu)}:${sn}`, {
         status: String(onu.status),
+        smartolt_account_id: onu.smartolt_account_id || '',
         olt_id: String(onu.olt_id ?? onu.oltId ?? '').trim(),
         reason: String(onu.offline_reason || onu.last_down_reason || onu.status_reason || onu.reason || onu.status || '').trim(),
         eventTime: onu.last_status_change || onu.last_down_time || onu.status_changed_at || null,
@@ -473,7 +520,8 @@ export function applyOnuStatusSnapshot(onus) {
     const statusChanges = [];
 
     nap.clients.forEach((client) => {
-      const snapshot = snapshotBySn.get(String(client.sn || '').toUpperCase());
+      const clientSn = String(client.sn || '').toUpperCase();
+      const snapshot = snapshotBySn.get(`${getSmartOltAccountKey(client.smartolt_account_id ? client : nap)}:${clientSn}`);
       if (snapshot?.status && String(client.status || '') !== snapshot.status) {
         statusChanges.push({
           name: client.name || '',
@@ -487,6 +535,10 @@ export function applyOnuStatusSnapshot(onus) {
       }
       if (snapshot?.olt_id && String(client.olt_id || '') !== snapshot.olt_id) {
         client.olt_id = snapshot.olt_id;
+        changed = true;
+      }
+      if (snapshot?.smartolt_account_id && client.smartolt_account_id !== snapshot.smartolt_account_id) {
+        client.smartolt_account_id = snapshot.smartolt_account_id;
         changed = true;
       }
       if (snapshot && snapshot.latitude !== null && snapshot.longitude !== null) {

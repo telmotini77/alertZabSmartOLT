@@ -2,7 +2,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 const SMARTOLT_SUBDOMAIN = (process.env.SMARTOLT_SUBDOMAIN || '').trim();
-const SMARTOLT_API_KEY   = (process.env.SMARTOLT_API_KEY   || '').trim();
+const SMARTOLT_API_KEY = (process.env.SMARTOLT_API_KEY || '').trim();
 
 const DEFAULT_TIMEOUT_MS = 5_000;
 const FULL_SNAPSHOT_DEFAULT_TTL_MS = 60 * 60 * 1_000;
@@ -20,8 +20,93 @@ let statusSnapshotCache = {
   fetchedAt: 0,
   inFlight: null
 };
-let liveStatusQueue = Promise.resolve();
-const liveStatusRequestTimes = [];
+// A Smart OLT account/domain has its own API quota. Keep the emergency live
+// diagnostic queue separate per account so one domain cannot throttle another.
+const liveStatusQueues = new Map();
+const liveStatusRequestTimes = new Map();
+
+const normalizeSubdomain = (value) => String(value || '')
+  .trim()
+  .toLowerCase()
+  .replace(/^https?:\/\//, '')
+  .replace(/\.smartolt\.com(?:\/.*)?$/, '')
+  .replace(/\/$/, '');
+
+function readSmartOltAccounts() {
+  const raw = String(process.env.SMARTOLT_ACCOUNTS_JSON || '').trim();
+  let entries = [];
+
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      entries = Array.isArray(parsed) ? parsed : parsed?.accounts;
+      if (!Array.isArray(entries)) {
+        return { accounts: [], error: 'SMARTOLT_ACCOUNTS_JSON debe ser una lista JSON de cuentas Smart OLT.' };
+      }
+    } catch {
+      return { accounts: [], error: 'SMARTOLT_ACCOUNTS_JSON no contiene JSON válido.' };
+    }
+  } else if (SMARTOLT_SUBDOMAIN || SMARTOLT_API_KEY) {
+    // Backward-compatible single-domain configuration. Existing deployments
+    // continue working until SMARTOLT_ACCOUNTS_JSON is added in Render.
+    entries = [{ id: 'default', subdomain: SMARTOLT_SUBDOMAIN, apiKey: SMARTOLT_API_KEY }];
+  }
+
+  const ids = new Set();
+  const accounts = [];
+  for (let index = 0; index < entries.length; index++) {
+    const entry = entries[index] || {};
+    const subdomain = normalizeSubdomain(entry.subdomain || entry.domain || entry.host);
+    const apiKey = String(entry.apiKey || entry.api_key || entry.token || '').trim();
+    const id = String(entry.id || entry.name || subdomain || `account-${index + 1}`).trim();
+    if (!subdomain || !apiKey) {
+      return { accounts: [], error: `La cuenta Smart OLT #${index + 1} necesita subdomain y apiKey.` };
+    }
+    if (ids.has(id)) {
+      return { accounts: [], error: `El identificador de cuenta Smart OLT "${id}" está repetido.` };
+    }
+    ids.add(id);
+    accounts.push({ id, subdomain, apiKey });
+  }
+
+  return { accounts, error: '' };
+}
+
+const smartOltAccountConfig = readSmartOltAccounts();
+
+/**
+ * Safe account metadata for health checks. API keys are never exposed.
+ */
+export function getSmartOltAccounts() {
+  return smartOltAccountConfig.accounts.map(({ id, subdomain }) => ({ id, subdomain }));
+}
+
+function getConfiguredAccounts() {
+  if (smartOltAccountConfig.error) throw new Error(smartOltAccountConfig.error);
+  if (smartOltAccountConfig.accounts.length === 0) {
+    throw new Error('No hay cuentas Smart OLT configuradas. Define SMARTOLT_ACCOUNTS_JSON o SMARTOLT_SUBDOMAIN/SMARTOLT_API_KEY.');
+  }
+  return smartOltAccountConfig.accounts;
+}
+
+function getAccount(accountId = '') {
+  const accounts = getConfiguredAccounts();
+  const cleanId = String(accountId || '').trim();
+  if (cleanId) {
+    const account = accounts.find((candidate) => candidate.id === cleanId);
+    if (!account) throw new Error(`La cuenta Smart OLT "${cleanId}" no está configurada.`);
+    return account;
+  }
+  if (accounts.length === 1) return accounts[0];
+  throw new Error('La ONU no identifica su cuenta Smart OLT; no se puede consultar un external_id ambiguo entre dominios.');
+}
+
+const addAccountContext = (onu, account) => ({
+  ...onu,
+  smartolt_account_id: account.id,
+  smartolt_subdomain: account.subdomain,
+  external_id: onu?.external_id || onu?.unique_external_id || ''
+});
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -61,45 +146,76 @@ const getLiveStatusWindowLimit = () =>
  * already paced by the scanner; this protects bursty alert correlations from
  * exhausting Smart OLT's hourly API allowance.
  */
-async function acquireLiveStatusSlot() {
+async function acquireLiveStatusSlot(accountId) {
   if (process.env.NODE_ENV === 'test') return;
 
-  const queuedTask = liveStatusQueue.then(async () => {
+  const queue = liveStatusQueues.get(accountId) || Promise.resolve();
+  const requestTimes = liveStatusRequestTimes.get(accountId) || [];
+  const queuedTask = queue.then(async () => {
     const windowMs = getLiveStatusWindowMs();
     const limit = getLiveStatusWindowLimit();
 
     while (true) {
       const now = Date.now();
-      while (liveStatusRequestTimes.length > 0 && liveStatusRequestTimes[0] <= now - windowMs) {
-        liveStatusRequestTimes.shift();
+      while (requestTimes.length > 0 && requestTimes[0] <= now - windowMs) {
+        requestTimes.shift();
       }
 
-      if (liveStatusRequestTimes.length < limit) {
-        liveStatusRequestTimes.push(Date.now());
+      if (requestTimes.length < limit) {
+        requestTimes.push(Date.now());
         return;
       }
 
-      const retryAt = liveStatusRequestTimes[0] + windowMs;
+      const retryAt = requestTimes[0] + windowMs;
       await wait(Math.max(1, retryAt - now));
     }
   });
 
   // Keep the queue usable after any unexpected error in a caller.
-  liveStatusQueue = queuedTask.catch(() => {});
+  liveStatusQueues.set(accountId, queuedTask.catch(() => {}));
+  liveStatusRequestTimes.set(accountId, requestTimes);
   await queuedTask;
 }
 
-const getHeaders = () => ({
-  'X-Token': SMARTOLT_API_KEY,
+const getHeaders = (account) => ({
+  'X-Token': account.apiKey,
   'Accept':  'application/json'
 });
 
-const getBaseUrl = () => {
-  if (!SMARTOLT_SUBDOMAIN) {
-    throw new Error('SMARTOLT_SUBDOMAIN environment variable is missing.');
+const getBaseUrl = (account) => `https://${account.subdomain}.smartolt.com/api`;
+
+async function requestAccountJson(account, path, timeoutMs = DEFAULT_TIMEOUT_MS) {
+  const response = await fetchWithTimeout(
+    `${getBaseUrl(account)}${path}`,
+    { method: 'GET', headers: getHeaders(account) },
+    timeoutMs
+  );
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Smart OLT account "${account.id}" responded with status ${response.status}: ${errorText}`);
   }
-  return `https://${SMARTOLT_SUBDOMAIN}.smartolt.com/api`;
-};
+  return response.json();
+}
+
+async function collectAccounts(operation, label) {
+  const accounts = getConfiguredAccounts();
+  const results = await Promise.allSettled(accounts.map(operation));
+  const successful = [];
+  const failed = [];
+
+  results.forEach((result, index) => {
+    if (result.status === 'fulfilled') successful.push(result.value);
+    else failed.push({ account: accounts[index], error: result.reason });
+  });
+
+  failed.forEach(({ account, error }) =>
+    console.error(`Smart OLT ${label} failed for account "${account.id}" (${account.subdomain}):`, error?.message || error)
+  );
+  if (successful.length === 0) {
+    throw new Error(`No se pudo consultar ninguna cuenta Smart OLT para ${label}: ${failed.map(({ account, error }) => `${account.id}: ${error?.message || error}`).join(' | ')}`);
+  }
+  return successful;
+}
 
 /**
  * Fetch with an AbortController timeout so a slow/dead Smart OLT API
@@ -128,26 +244,17 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = DEFAULT_TIMEOUT_M
  */
 export async function findOnuBySn(sn) {
   if (!sn) return null;
-  
   const cleanSn = sn.trim();
-  const url = `${getBaseUrl()}/onu/get_all_onus_details?sn=${encodeURIComponent(cleanSn)}`;
-  
   try {
-    const response = await fetchWithTimeout(url, { method: 'GET', headers: getHeaders() });
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Smart OLT API responded with status ${response.status}: ${errorText}`);
-    }
-    
-    const data = await response.json();
-    
-    if (data && data.status && data.onus && data.onus.length > 0) {
-      // Return the first matching ONU
-      return data.onus[0];
-    }
-    
-    return null;
+    const responses = await collectAccounts(async (account) => {
+      const data = await requestAccountJson(
+        account,
+        `/onu/get_all_onus_details?sn=${encodeURIComponent(cleanSn)}`
+      );
+      const onu = Array.isArray(data?.onus) && data.onus.length > 0 ? data.onus[0] : null;
+      return onu ? addAccountContext(onu, account) : null;
+    }, `buscar ONU ${cleanSn}`);
+    return responses.find(Boolean) || null;
   } catch (error) {
     console.error(`Error fetching ONU by SN (${cleanSn}) from Smart OLT:`, error.message);
     throw error;
@@ -159,24 +266,14 @@ export async function findOnuBySn(sn) {
  * @param {string} externalId - ONU external_id
  * @returns {Promise<Object|null>} - Returns live status details (like Rx power, temperature, status description)
  */
-export async function getOnuStatus(externalId) {
+export async function getOnuStatus(externalId, smartOltAccountId = '') {
   if (!externalId) return null;
-
-  await acquireLiveStatusSlot();
-  
-  const url = `${getBaseUrl()}/onu/get_onu_status/${encodeURIComponent(externalId)}`;
-  
+  const account = getAccount(smartOltAccountId);
+  await acquireLiveStatusSlot(account.id);
   try {
-    const response = await fetchWithTimeout(url, { method: 'GET', headers: getHeaders() });
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Smart OLT API responded with status ${response.status}: ${errorText}`);
-    }
-    
-    const data = await response.json();
+    const data = await requestAccountJson(account, `/onu/get_onu_status/${encodeURIComponent(externalId)}`);
     if (data && data.status) {
-      return data;
+      return addAccountContext(data, account);
     }
     return null;
   } catch (error) {
@@ -192,25 +289,16 @@ export async function getOnuStatus(externalId) {
  */
 export async function findOnusByAddressQuery(addressQuery) {
   if (!addressQuery) return [];
-  
   const cleanQuery = addressQuery.trim();
-  const url = `${getBaseUrl()}/onu/get_all_onus_details?address=${encodeURIComponent(cleanQuery)}`;
-  
   try {
-    const response = await fetchWithTimeout(url, { method: 'GET', headers: getHeaders() });
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Smart OLT API responded with status ${response.status}: ${errorText}`);
-    }
-    
-    const data = await response.json();
-    
-    if (data && data.status && data.onus) {
-      return data.onus;
-    }
-    
-    return [];
+    const responses = await collectAccounts(async (account) => {
+      const data = await requestAccountJson(
+        account,
+        `/onu/get_all_onus_details?address=${encodeURIComponent(cleanQuery)}`
+      );
+      return Array.isArray(data?.onus) ? data.onus.map((onu) => addAccountContext(onu, account)) : [];
+    }, `buscar dirección ${cleanQuery}`);
+    return responses.flat();
   } catch (error) {
     console.error(`Error fetching ONUs by address query (${cleanQuery}) from Smart OLT:`, error.message);
     throw error;
@@ -223,9 +311,10 @@ export async function findOnusByAddressQuery(addressQuery) {
  * @param {string|number} board - Slot / Board number
  * @param {string|number} port - PON Port number
  * @param {string} [oltName] - OLT Name for local fallback filtering
+ * @param {string} [smartOltAccountId] - Account/domain that owns the OLT
  * @returns {Promise<Array>} - List of ONUs on that port
  */
-export async function findOnusByPort(oltId, board, port, oltName) {
+export async function findOnusByPort(oltId, board, port, oltName, smartOltAccountId = '') {
   if (board === undefined || port === undefined) return [];
   
   if (!oltId) {
@@ -255,27 +344,19 @@ export async function findOnusByPort(oltId, board, port, oltName) {
     }
   }
 
-  const url = `${getBaseUrl()}/onu/get_all_onus_details?board=${encodeURIComponent(board)}&port=${encodeURIComponent(port)}&olt_id=${encodeURIComponent(oltId)}`;
-  
   try {
-    const response = await fetchWithTimeout(url, { method: 'GET', headers: getHeaders() });
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Smart OLT API responded with status ${response.status}: ${errorText}`);
-    }
-    
-    const data = await response.json();
-    
-    if (data && data.status && data.onus) {
-      let filtered = data.onus;
-      if (oltName) {
-        filtered = filtered.filter(o => !o.olt_name || o.olt_name === oltName);
-      }
-      return filtered;
-    }
-    
-    return [];
+    const accounts = smartOltAccountId ? [getAccount(smartOltAccountId)] : getConfiguredAccounts();
+    const responses = await collectAccounts(async (account) => {
+      if (!accounts.some((candidate) => candidate.id === account.id)) return [];
+      const data = await requestAccountJson(
+        account,
+        `/onu/get_all_onus_details?board=${encodeURIComponent(board)}&port=${encodeURIComponent(port)}&olt_id=${encodeURIComponent(oltId)}`
+      );
+      return Array.isArray(data?.onus) ? data.onus.map((onu) => addAccountContext(onu, account)) : [];
+    }, `buscar puerto ${board}/${port}`);
+    let filtered = responses.flat();
+    if (oltName) filtered = filtered.filter((onu) => !onu.olt_name || onu.olt_name === oltName);
+    return filtered;
   } catch (error) {
     console.error(`Error fetching ONUs by port (${board}/${port}) from Smart OLT:`, error.message);
     throw error;
@@ -301,27 +382,20 @@ export async function fetchAllOnuStatuses({ forceRefresh = false } = {}) {
     return statusSnapshotCache.inFlight;
   }
 
-  const url = `${getBaseUrl()}/onu/get_onus_statuses`;
   const request = (async () => {
     try {
-      const response = await fetchWithTimeout(url, { method: 'GET', headers: getHeaders() }, 15_000);
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Smart OLT API responded with status ${response.status}: ${errorText}`);
-      }
+      const accountOnus = await collectAccounts(async (account) => {
+        const data = await requestAccountJson(account, '/onu/get_onus_statuses', 15_000);
+        const rawOnus = Array.isArray(data?.response)
+          ? data.response
+          : Array.isArray(data?.onus)
+            ? data.onus
+            : [];
+        return rawOnus.map((onu) => addAccountContext(onu, account));
+      }, 'estado masivo de ONUs');
+      const onus = accountOnus.flat();
 
-      const data = await response.json();
-      const rawOnus = Array.isArray(data?.response)
-        ? data.response
-        : Array.isArray(data?.onus)
-          ? data.onus
-          : [];
-      const onus = rawOnus.map((onu) => ({
-        ...onu,
-        external_id: onu.external_id || onu.unique_external_id || ''
-      }));
-
-      if (data?.status && process.env.NODE_ENV !== 'test') {
+      if (process.env.NODE_ENV !== 'test') {
         statusSnapshotCache = { onus, fetchedAt: Date.now(), inFlight: null };
       }
       return onus;
@@ -355,25 +429,17 @@ export async function fetchAllOnus({ forceRefresh = false } = {}) {
     return fullSnapshotCache.inFlight;
   }
 
-  const url = `${getBaseUrl()}/onu/get_all_onus_details`;
-
   const request = (async () => {
     try {
-      const response = await fetchWithTimeout(url, { method: 'GET', headers: getHeaders() }, 25_000);
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Smart OLT API responded with status ${response.status}: ${errorText}`);
+      const accountOnus = await collectAccounts(async (account) => {
+        const data = await requestAccountJson(account, '/onu/get_all_onus_details', 25_000);
+        return Array.isArray(data?.onus) ? data.onus.map((onu) => addAccountContext(onu, account)) : [];
+      }, 'inventario de ONUs');
+      const onus = accountOnus.flat();
+      if (process.env.NODE_ENV !== 'test') {
+        fullSnapshotCache = { onus, fetchedAt: Date.now(), inFlight: null };
       }
-
-      const data = await response.json();
-      if (data && data.status && data.onus) {
-        if (process.env.NODE_ENV !== 'test') {
-          fullSnapshotCache = { onus: data.onus, fetchedAt: Date.now(), inFlight: null };
-        }
-        return data.onus;
-      }
-      return [];
+      return onus;
     } catch (error) {
       console.error('Error fetching all ONUs from Smart OLT:', error.message);
       throw error;

@@ -28,6 +28,8 @@ function getDb() {
       db.run(`
         CREATE TABLE IF NOT EXISTS naps (
           name TEXT PRIMARY KEY,
+          smartolt_account_id TEXT,
+          smartolt_subdomain TEXT,
           olt_id TEXT,
           olt_name TEXT,
           board TEXT,
@@ -45,6 +47,8 @@ function getDb() {
       // duplicate-column error so direct cache/test use is migrated too (not
       // only the HTTP-server initialization path).
       db.run('ALTER TABLE naps ADD COLUMN olt_id TEXT', () => {});
+      db.run('ALTER TABLE naps ADD COLUMN smartolt_account_id TEXT', () => {});
+      db.run('ALTER TABLE naps ADD COLUMN smartolt_subdomain TEXT', () => {});
       db.run(`
         CREATE TABLE IF NOT EXISTS status_history (
           id TEXT PRIMARY KEY,
@@ -141,6 +145,13 @@ export async function initDb() {
     await run('ALTER TABLE naps ADD COLUMN olt_id TEXT');
   } catch (error) {
     if (!String(error.message || '').includes('duplicate column name')) throw error;
+  }
+  for (const column of ['smartolt_account_id', 'smartolt_subdomain']) {
+    try {
+      await run(`ALTER TABLE naps ADD COLUMN ${column} TEXT`);
+    } catch (error) {
+      if (!String(error.message || '').includes('duplicate column name')) throw error;
+    }
   }
   await runMigration();
   // Some Render volumes still carry the obsolete JSON/SQLite fixture from an
@@ -335,11 +346,13 @@ export async function dbSaveNap(nap) {
   try {
     await run(
       `INSERT OR REPLACE INTO naps (
-        name, olt_id, olt_name, board, port, latitude, longitude,
+        name, smartolt_account_id, smartolt_subdomain, olt_id, olt_name, board, port, latitude, longitude,
         totalClients, onlineClients, offlineClients, status, clients
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         nap.name,
+        nap.smartolt_account_id || null,
+        nap.smartolt_subdomain || null,
         nap.olt_id || null,
         nap.olt_name,
         nap.board,

@@ -80,14 +80,18 @@ const normalizeNapName = (name) => String(name || '')
   .toUpperCase();
 
 const getOltKey = (onu = {}) => {
+  const accountId = String(onu?.smartolt_account_id || onu?.smartOltAccountId || 'default').trim();
   const oltId = String(onu?.olt_id ?? onu?.oltId ?? '').trim();
-  if (oltId) return `id:${oltId}`;
-  return `name:${String(onu?.olt_name || onu?.oltName || 'unknown').trim().toUpperCase()}`;
+  if (oltId) return `account:${accountId}:id:${oltId}`;
+  return `account:${accountId}:name:${String(onu?.olt_name || onu?.oltName || 'unknown').trim().toUpperCase()}`;
 };
 
 const napKey = (name, olt = {}) => `${getOltKey(olt)}:${normalizeNapName(name)}`;
 
 const getNapKeyForOnu = (onu) => napKey(getNapName(onu), onu);
+
+const getOnuKey = (onu = {}) =>
+  `${String(onu?.smartolt_account_id || onu?.smartOltAccountId || 'default').trim()}:${String(onu?.sn || '').trim().toUpperCase()}`;
 
 const isExplicitFiberCut = (onu) => {
   const text = `${getRawFailureReason(onu)} ${onu?.status || ''}`
@@ -133,7 +137,7 @@ function seedPreviousStateFromCache() {
       // restart. A generic Offline remains ignored because it has no
       // actionable cause. This prevents a deployment from re-sending every
       // already active electrical/LOS incident.
-      previousStateMap.set(sn, getOperationalState(client));
+      previousStateMap.set(getOnuKey(client), getOperationalState(client));
       seededClients++;
     });
     const relevantClients = clients.filter((client) =>
@@ -161,7 +165,7 @@ function getPreviousNapCategory(nap, key) {
   if (previousNapStateMap.has(key)) return previousNapStateMap.get(key);
 
   const relevantOnus = nap.onus.filter((onu) => isOnline(onu) || getReportableFailureCategory(onu));
-  const states = relevantOnus.map((onu) => previousStateMap.get(String(onu?.sn || '').trim().toUpperCase()));
+  const states = relevantOnus.map((onu) => previousStateMap.get(getOnuKey(onu)));
   return relevantOnus.length >= getMinimumNapClients() &&
     states.length === relevantOnus.length &&
     states.every((state) => state === 'power_fail')
@@ -233,6 +237,7 @@ export async function runScanCycle() {
     (onus || []).forEach((onu) => {
       const key = getOltKey(onu);
       const entry = oltSummary.get(key) || {
+        accountId: String(onu?.smartolt_account_id || onu?.smartOltAccountId || 'default').trim(),
         id: String(onu?.olt_id ?? onu?.oltId ?? '').trim() || null,
         name: String(onu?.olt_name || onu?.oltName || '').trim() || 'OLT sin nombre',
         onus: 0
@@ -289,13 +294,14 @@ export async function runScanCycle() {
     for (const onu of onus) {
       const sn = String(onu.sn || '').toUpperCase();
       if (!sn) continue;
+      const onuKey = getOnuKey(onu);
 
       const currentState = getOperationalState(onu);
       if (currentState === 'online') {
         clearActiveOperationalNotification(sn, getNapName(onu), onu);
       }
       if (!isFirstScan) {
-        const previousState = previousStateMap.get(sn);
+        const previousState = previousStateMap.get(onuKey);
 
         // Partial Power fail and ordinary partial LOS are intentionally silent.
         // The only individual optical exception is a physical fibre cut
@@ -305,7 +311,7 @@ export async function runScanCycle() {
           explicitFiberCuts.push(onu);
         }
       }
-      previousStateMap.set(sn, currentState);
+      previousStateMap.set(onuKey, currentState);
     }
 
     if (isFirstScan) {
@@ -356,7 +362,7 @@ async function handleExplicitFiberCut(onu) {
     console.log(`[Radar] Individual drop ${sn} suppressed: it is not an explicit Smart OLT fibre cut.`);
     return { sent: false, reason: 'Not an explicit fibre cut' };
   }
-  if (hasActiveOperationalNotification(sn, failure.category)) {
+  if (hasActiveOperationalNotification(sn, failure.category, onu)) {
     console.log(`[Radar] Individual drop ${sn} already notified by Zabbix; fallback suppressed.`);
     return { sent: false, reason: 'Incident already notified' };
   }
@@ -394,7 +400,7 @@ async function handleNapOutage(nap, category) {
   const referenceOnu = nap.onus.find((onu) => getReportableFailureCategory(onu) === category);
   const sn = String(referenceOnu?.sn || '').toUpperCase();
   if (!referenceOnu || !sn) return { sent: false, reason: 'NAP has no reference ONU' };
-  if (hasActiveOperationalNotification(sn, category)) {
+  if (hasActiveOperationalNotification(sn, category, referenceOnu)) {
     console.log(`[Radar] NAP ${nap.name} already has a delivered ${category} alert; fallback suppressed.`);
     return { sent: false, reason: 'Incident already notified' };
   }
