@@ -390,7 +390,7 @@ await import('./index.js');
 await new Promise(resolve => setTimeout(resolve, 1000));
 
 try {
-  console.log('\n[0] Testing Smart OLT-only NAP GPS policy...');
+  console.log('\n[0] Testing read-only NAP GPS policy...');
   const manualGpsResponse = await originalFetch('http://localhost:3001/webhook/naps/coordinates', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -400,7 +400,7 @@ try {
     console.error('❌ Manual GPS update was not blocked');
     process.exit(1);
   }
-  console.log('✅ Manual/CSV GPS updates are blocked; Smart OLT is the sole source: PASS');
+  console.log('✅ Manual/CSV GPS updates are blocked; map locations come from controlled synchronization: PASS');
 
   console.log('\n[1] Testing Direct Zabbix Webhook (Push workflow - Loss Event)...');
   fetchLog = [];

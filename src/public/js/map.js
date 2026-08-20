@@ -344,6 +344,11 @@ function getPopupContent(nap) {
   // Google Maps and Street View integrations for field engineers
   const googleMapsUrl = `https://www.google.com/maps/dir/?api=1&destination=${nap.latitude},${nap.longitude}`;
   const streetViewUrl = `https://www.google.com/maps/@?api=1&map_action=pano&viewpoint=${nap.latitude},${nap.longitude}`;
+  const coordinateSourceLabel = {
+    smartolt: 'SmartOLT',
+    system_backup: 'Sistema (respaldo)',
+    system_csv: 'Sistema (CSV)'
+  }[nap.coordinate_source] || 'No identificada';
 
   // Recent history for this specific NAP
   const napHistory = historyData.filter(h => (h.napName || '').toUpperCase() === nap.name.toUpperCase()).slice(0, 3);
@@ -376,7 +381,8 @@ function getPopupContent(nap) {
       <div class="map-popup-details">
         <b>OLT:</b> ${nap.olt_name}<br>
         <b>Puerto:</b> Slot ${nap.board} | Pon ${nap.port}<br>
-        <b>Clientes Activos:</b> ${nap.onlineClients} de ${nap.totalClients}
+        <b>Clientes Activos:</b> ${nap.onlineClients} de ${nap.totalClients}<br>
+        <b>Ubicación:</b> ${coordinateSourceLabel}
       </div>
       <div class="map-popup-clients">
         ${clientRows}

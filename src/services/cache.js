@@ -65,9 +65,9 @@ const getNapSourceKey = (value = {}, napName = '') => {
 };
 
 /**
- * SQLite used to contain manually entered and CSV-imported locations. Keep
- * its inventory only as a temporary metadata cache; a NAP position must be
- * obtained again from Smart OLT before it can be displayed or alerted.
+ * Do not trust coordinates embedded in an old SQLite row directly. The map
+ * rebuilds positions from Smart OLT first, then from the verified system
+ * backup/CSV fallback below when Smart OLT has no GPS for that NAP.
  */
 const withoutStoredCoordinates = (nap = {}) => ({
   ...nap,
@@ -79,6 +79,140 @@ const withoutStoredCoordinates = (nap = {}) => ({
     longitude: null
   }))
 });
+
+const normalizeCoordinateName = (value) => String(value || '').trim().toUpperCase();
+
+const hasValidCoordinates = (latitude, longitude) => {
+  const lat = Number(latitude);
+  const lng = Number(longitude);
+  return Number.isFinite(lat) && Number.isFinite(lng) && lat !== 0 && lng !== 0;
+};
+
+const coordinateFrom = (value = {}) => {
+  const latitude = Number(value.latitude ?? value.gps_lat);
+  const longitude = Number(value.longitude ?? value.gps_lng);
+  return hasValidCoordinates(latitude, longitude) ? { latitude, longitude } : null;
+};
+
+let localCoordinateFallbacks = null;
+
+function addUniqueCoordinate(map, duplicates, name, coordinate) {
+  if (!name || !coordinate || duplicates.has(name)) return;
+  if (map.has(name)) {
+    map.delete(name);
+    duplicates.add(name);
+    return;
+  }
+  map.set(name, coordinate);
+}
+
+/**
+ * Load the system-maintained location sources once. They are a controlled
+ * fallback for NAPs that Smart OLT itself has not georeferenced. They never
+ * replace a valid coordinate received from Smart OLT.
+ */
+function loadLocalCoordinateFallbacks() {
+  if (localCoordinateFallbacks) return localCoordinateFallbacks;
+
+  const legacyByName = new Map();
+  const legacyDuplicates = new Set();
+  const csvByName = new Map();
+  const csvDuplicates = new Set();
+
+  try {
+    const legacyPath = path.resolve(__dirname, '../../data/nap_cache.json');
+    if (fs.existsSync(legacyPath)) {
+      const legacyNaps = JSON.parse(fs.readFileSync(legacyPath, 'utf8'));
+      if (Array.isArray(legacyNaps)) {
+        legacyNaps.forEach((nap) => {
+          const name = normalizeCoordinateName(nap?.name);
+          const coordinate = coordinateFrom(nap);
+          if (coordinate) {
+            addUniqueCoordinate(legacyByName, legacyDuplicates, name, {
+              ...coordinate,
+              olt_name: String(nap?.olt_name || '').trim(),
+              board: String(nap?.board ?? '').trim(),
+              port: String(nap?.port ?? '').trim(),
+              source: 'system_backup'
+            });
+          }
+        });
+      }
+    }
+  } catch (err) {
+    console.error('⚠️ Could not read system NAP coordinate backup:', err.message);
+  }
+
+  try {
+    const csvPath = path.resolve(__dirname, '../public/coordenadas_mymaps.csv');
+    if (fs.existsSync(csvPath)) {
+      const lines = fs.readFileSync(csvPath, 'utf8').split(/\r?\n/);
+      lines.slice(1).forEach((line) => {
+        if (!line.trim()) return;
+        const columns = parseCsvLine(line);
+        const name = normalizeCoordinateName(columns[1]);
+        const coordinate = coordinateFrom({ latitude: columns[2], longitude: columns[3] });
+        if (coordinate) addUniqueCoordinate(csvByName, csvDuplicates, name, { ...coordinate, source: 'system_csv' });
+      });
+    }
+  } catch (err) {
+    console.error('⚠️ Could not read system NAP coordinate CSV:', err.message);
+  }
+
+  localCoordinateFallbacks = { legacyByName, csvByName };
+  return localCoordinateFallbacks;
+}
+
+function matchesLegacyNapScope(coordinate, nap) {
+  const matches = (left, right) => !left || !right || String(left).trim().toUpperCase() === String(right).trim().toUpperCase();
+  return matches(coordinate.olt_name, nap.olt_name) &&
+    matches(coordinate.board, nap.board) &&
+    matches(coordinate.port, nap.port);
+}
+
+function applySystemCoordinateFallbacks(naps = []) {
+  const { legacyByName, csvByName } = loadLocalCoordinateFallbacks();
+  const nameOccurrences = new Map();
+  naps.forEach((nap) => {
+    const name = normalizeCoordinateName(nap.name);
+    nameOccurrences.set(name, (nameOccurrences.get(name) || 0) + 1);
+  });
+
+  const summary = { smartOlt: 0, systemBackup: 0, systemCsv: 0, missing: 0 };
+  naps.forEach((nap) => {
+    if (hasValidCoordinates(nap.latitude, nap.longitude)) {
+      nap.coordinate_source = 'smartolt';
+      summary.smartOlt++;
+      return;
+    }
+
+    const name = normalizeCoordinateName(nap.name);
+    const legacy = legacyByName.get(name);
+    // The legacy backup includes OLT/slot/port metadata, so it remains safe
+    // even when future Smart OLT domains reuse a NAP name.
+    const fallback = legacy && matchesLegacyNapScope(legacy, nap)
+      ? legacy
+      // CSV has only a NAP name; use it only when the name is unique among
+      // active Smart OLT NAPs to avoid cross-OLT placement.
+      : nameOccurrences.get(name) === 1
+        ? csvByName.get(name)
+        : null;
+
+    if (fallback) {
+      nap.latitude = fallback.latitude;
+      nap.longitude = fallback.longitude;
+      nap.coordinate_source = fallback.source;
+      if (fallback.source === 'system_backup') summary.systemBackup++;
+      else summary.systemCsv++;
+    } else {
+      nap.latitude = null;
+      nap.longitude = null;
+      nap.coordinate_source = null;
+      summary.missing++;
+    }
+  });
+  return summary;
+}
 
 function getSmartOltFailureDetails(changes = []) {
   const offlineChanges = changes.filter((change) => !isOnlineStatus(change.newStatus));
@@ -245,7 +379,7 @@ export async function initCache() {
     // 2. Load NAPs from database
     const storedNaps = await dbGetAllNaps();
     cachedNaps = storedNaps.map(withoutStoredCoordinates);
-    console.log(`📦 Loaded ${cachedNaps.length} NAPs from SQLite database (stored GPS ignored; source: Smart OLT).`);
+    console.log(`📦 Loaded ${cachedNaps.length} NAPs from SQLite database (stored GPS ignored; source: Smart OLT with verified system fallback).`);
 
     const configuredAccountIds = getSmartOltAccounts().map((account) => account.id);
     const cachedAccountIds = new Set(cachedNaps.map((nap) => String(nap.smartolt_account_id || '').trim()));
@@ -254,7 +388,7 @@ export async function initCache() {
       ? '📦 No NAPs found in SQLite. Loading NAP metadata and GPS from Smart OLT...'
       : needsAccountMetadata
         ? '📦 New Smart OLT domain detected. Refreshing NAP metadata and GPS from Smart OLT...'
-        : '📍 Refreshing NAP GPS exclusively from Smart OLT...');
+        : '📍 Refreshing NAP GPS from Smart OLT with verified system fallback...');
     try {
       // This is intentionally done at every process start. Persisted GPS
       // values therefore never appear after a restart, even momentarily.
@@ -370,9 +504,9 @@ export async function syncCacheWithSmartOlt({ forceRefresh = false } = {}) {
         longitude = group.lngs.reduce((sum, val) => sum + val, 0) / group.lngs.length;
       }
 
-      // Never fall back to SQLite, CSV, or manually placed GPS. A NAP with no
-      // valid Smart OLT coordinates remains unlocated until Smart OLT reports
-      // its position.
+      // Smart OLT coordinates always have priority. System locations are
+      // filled only after the whole inventory is built, and only for NAPs
+      // without a valid Smart OLT coordinate.
       const finalLat = latitude;
       const finalLng = longitude;
 
@@ -408,11 +542,12 @@ export async function syncCacheWithSmartOlt({ forceRefresh = false } = {}) {
       };
     });
 
+    const coordinateSummary = applySystemCoordinateFallbacks(naps);
     cachedNaps = naps;
     
     // Save NAPs to SQLite in background
     await Promise.all(naps.map(nap => dbSaveNap(nap)));
-    console.log(`✅ Synced and saved ${cachedNaps.length} NAPs successfully to SQLite database.`);
+    console.log(`✅ Synced and saved ${cachedNaps.length} NAPs successfully to SQLite database. GPS: ${coordinateSummary.smartOlt} Smart OLT, ${coordinateSummary.systemBackup} system backup, ${coordinateSummary.systemCsv} system CSV, ${coordinateSummary.missing} unavailable.`);
   } catch (err) {
     console.error('❌ Error during syncCacheWithSmartOlt:', err.message);
     throw err;
@@ -579,6 +714,7 @@ export function applyOnuStatusSnapshot(onus) {
       if (nap.latitude !== latitude || nap.longitude !== longitude) {
         nap.latitude = latitude;
         nap.longitude = longitude;
+        nap.coordinate_source = 'smartolt';
         changed = true;
       }
     }
@@ -781,20 +917,21 @@ export function getCachedNaps() {
 }
 
 /**
- * Manual map placement is deliberately disabled. Smart OLT owns NAP GPS.
+ * Manual map placement is deliberately disabled. Controlled synchronization
+ * owns NAP GPS (Smart OLT first, verified system fallback second).
  * Retained as a no-op for compatibility with older local integrations.
  */
 export function updateNapCoordinates(napName, latitude, longitude) {
-  console.warn(`📍 Ignored manual GPS update for NAP ${napName || '(unknown)'}; source is Smart OLT.`);
+  console.warn(`📍 Ignored manual GPS update for NAP ${napName || '(unknown)'}; location source is controlled synchronization.`);
   return null;
 }
 
 /**
- * CSV/KML coordinate imports are deliberately disabled. Smart OLT owns NAP
- * GPS. Retained as a no-op for older local integrations.
+ * CSV/KML coordinate imports are deliberately disabled. The verified system
+ * sources are read by the synchronization process, never by a browser upload.
  */
 export function updateNapCoordinatesBulk(updates) {
-  console.warn(`📍 Ignored ${Array.isArray(updates) ? updates.length : 0} imported GPS update(s); source is Smart OLT.`);
+  console.warn(`📍 Ignored ${Array.isArray(updates) ? updates.length : 0} imported GPS update(s); location source is controlled synchronization.`);
   return [];
 }
 
@@ -819,59 +956,11 @@ function parseCsvLine(line) {
 }
 
 /**
- * Reads coordinates from coordinates_mymaps.csv and seeds the cache NAPs that don't have coordinates.
+ * Apply controlled system fallback locations to cached NAPs. Smart OLT GPS
+ * always remains the first priority.
  */
 export function applyCsvCoordinatesToCache() {
-  console.warn('📍 Ignored local coordenadas_mymaps.csv; source is Smart OLT.');
-  return 0;
-
-  /* Legacy parser retained below solely for backward source compatibility.
-     The early return above ensures CSV coordinates can never enter the cache. */
-  const csvPath = path.resolve(__dirname, '../public/coordenadas_mymaps.csv');
-  if (!fs.existsSync(csvPath)) {
-    console.log('⚠️ coordenadas_mymaps.csv not found, skipping coordinates auto-seed.');
-    return;
-  }
-
-  try {
-    const text = fs.readFileSync(csvPath, 'utf8');
-    const lines = text.split(/\r?\n/);
-    const coordsMap = {};
-
-    for (let i = 1; i < lines.length; i++) {
-      const line = lines[i].trim();
-      if (!line) continue;
-      const cols = parseCsvLine(line);
-      if (cols.length < 4) continue;
-      const name = cols[1].trim().toUpperCase();
-      const lat = parseFloat(cols[2]);
-      const lng = parseFloat(cols[3]);
-      if (name && !isNaN(lat) && !isNaN(lng) && lat !== 0 && lng !== 0) {
-        coordsMap[name] = { latitude: lat, longitude: lng };
-      }
-    }
-
-    let updatedCount = 0;
-    cachedNaps.forEach((nap) => {
-      if (nap.latitude === null || nap.longitude === null) {
-         const match = coordsMap[nap.name.trim().toUpperCase()];
-         if (match) {
-           nap.latitude = match.latitude;
-           nap.longitude = match.longitude;
-           dbSaveNap(nap).catch(() => {});
-           updatedCount++;
-         }
-      }
-    });
-
-    if (updatedCount > 0) {
-      console.log(`📍 Auto-seeded ${updatedCount} NAPs coordinates to SQLite from coordenadas_mymaps.csv`);
-    } else {
-      console.log('ℹ️ All NAPs already have coordinates or no matching NAP names were found in CSV.');
-    }
-  } catch (err) {
-    console.error('❌ Error applying CSV coordinates to cache:', err.message);
-  }
+  return applySystemCoordinateFallbacks(cachedNaps);
 }
 
 /**
