@@ -5,9 +5,7 @@ import {
   classifySmartOltAlert,
   clearActiveOperationalNotification,
   hasActiveNapIncidentNotification,
-  hasActiveOperationalNotification,
   isNapIncidentRepeatDue,
-  isOperationalAlertRepeatDue,
   processAndSendAlert
 } from '../routes/webhook.js';
 
@@ -95,14 +93,6 @@ const getNapKeyForOnu = (onu) => napKey(getNapName(onu), onu);
 
 const getOnuKey = (onu = {}) =>
   `${String(onu?.smartolt_account_id || onu?.smartOltAccountId || 'default').trim()}:${String(onu?.sn || '').trim().toUpperCase()}`;
-
-const isExplicitFiberCut = (onu) => {
-  const text = `${getRawFailureReason(onu)} ${onu?.status || ''}`
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase();
-  return /(corte\s*(de\s*)?fibra|fibra\s*cort|fiber\s*(cut|break)|break\s*fiber|rotura\s*(de\s*)?fibra)/.test(text);
-};
 
 const getMinimumNapClients = () => {
   // A NAP with one provisioned/active router is also fully affected when
@@ -270,7 +260,6 @@ export async function runScanCycle() {
     changedNaps.forEach((nap) => broadcast('nap_status_update', nap));
 
     const naps = groupOnusByNap(onus);
-    const completeNapIncidentKeys = new Set();
     const newlyOfflineNaps = [];
     const minimumNapClients = getMinimumNapClients();
 
@@ -285,8 +274,6 @@ export async function runScanCycle() {
         new Set(categories).size === 1
         ? categories[0]
         : null;
-      if (completeCategory) completeNapIncidentKeys.add(key);
-
       const previousCategory = getPreviousNapCategory(nap, key);
       const repeatDue = completeCategory && isNapIncidentRepeatDue(nap.name, nap.onus[0] || {});
       if (completeCategory &&
@@ -296,29 +283,15 @@ export async function runScanCycle() {
       previousNapStateMap.set(key, completeCategory);
     });
 
-    const explicitFiberCuts = [];
     for (const onu of onus) {
       const sn = String(onu.sn || '').toUpperCase();
       if (!sn) continue;
-      const onuKey = getOnuKey(onu);
 
       const currentState = getOperationalState(onu);
       if (currentState === 'online') {
         clearActiveOperationalNotification(sn, getNapName(onu), onu);
       }
-      if (!isFirstScan) {
-        const previousState = previousStateMap.get(onuKey);
-
-        // Partial Power fail and ordinary partial LOS are intentionally silent.
-        // The only individual optical exception is a physical fibre cut
-        // explicitly diagnosed by Smart OLT.
-        if (currentState === 'loss' && isExplicitFiberCut(onu) &&
-            (previousState !== currentState || isOperationalAlertRepeatDue(sn, currentState, onu)) &&
-            !completeNapIncidentKeys.has(getNapKeyForOnu(onu))) {
-          explicitFiberCuts.push(onu);
-        }
-      }
-      previousStateMap.set(onuKey, currentState);
+      previousStateMap.set(getOnuKey(onu), currentState);
     }
 
     if (isFirstScan) {
@@ -329,12 +302,9 @@ export async function runScanCycle() {
       for (const nap of newlyOfflineNaps) {
         results.push(await handleNapOutage(nap, nap.category));
       }
-      for (const onu of explicitFiberCuts) {
-        results.push(await handleExplicitFiberCut(onu));
-      }
       const delivered = results.filter((result) => result?.sent).length;
       scannerRuntimeStatus.lastFallbackAlerts = delivered;
-      console.log(`Radar scan complete. Smart OLT observed ${newlyOfflineNaps.length} total NAP outage(s) and ${explicitFiberCuts.length} explicit fibre cut(s); ${delivered} fallback alert(s) delivered.`);
+      console.log(`Radar scan complete. Smart OLT observed ${newlyOfflineNaps.length} total NAP outage(s); ${delivered} fallback alert(s) delivered.`);
     }
     scannerRuntimeStatus.lastSuccessAt = new Date().toISOString();
     scannerRuntimeStatus.lastError = null;
@@ -353,45 +323,6 @@ export async function runScanCycle() {
   } finally {
     scannerRuntimeStatus.running = false;
     scannerRuntimeStatus.lastCompletedAt = new Date().toISOString();
-  }
-}
-
-async function resolveOnuFailure(onu) {
-  const reason = getRawFailureReason(onu) || String(onu?.status || '').trim();
-  const classification = classifySmartOltAlert(reason, onu);
-  return { ...classification, reason };
-}
-
-async function handleExplicitFiberCut(onu) {
-  const sn = String(onu.sn || '').toUpperCase();
-  const failure = await resolveOnuFailure(onu);
-  if (failure.category !== 'loss' || !isExplicitFiberCut(onu)) {
-    console.log(`[Radar] Individual drop ${sn} suppressed: it is not an explicit Smart OLT fibre cut.`);
-    return { sent: false, reason: 'Not an explicit fibre cut' };
-  }
-  if (hasActiveOperationalNotification(sn, failure.category, onu)) {
-    console.log(`[Radar] Individual drop ${sn} already notified by Zabbix; fallback suppressed.`);
-    return { sent: false, reason: 'Incident already notified' };
-  }
-
-  console.log(`[Radar] Detected explicit fibre cut for ONU ${sn}. Firing fallback alert...`);
-
-  const zabbixLikePayload = {
-    event_name: 'Smart OLT Radar: Fibre cut detected',
-    trigger_description: failure.reason,
-    host_name: onu.olt_name || 'Smart OLT',
-    event_severity: 'High',
-    event_status: 'PROBLEM',
-    chat_id: process.env.TELEGRAM_CHAT_ID,
-    onu_sn: sn,
-    source_system: 'smartolt_radar'
-  };
-
-  try {
-    return await processAndSendAlert(zabbixLikePayload, onu, failure.reason);
-  } catch (err) {
-    console.error(`[Radar] Error firing alert for ${sn}:`, err.message);
-    return { sent: false, reason: err.message };
   }
 }
 

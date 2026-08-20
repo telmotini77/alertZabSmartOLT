@@ -195,10 +195,6 @@ export function hasActiveOperationalNotification(sn, category, olt = {}) {
   return wasSentWithinRepeatWindow(activeOperationalNotifications, operationalNotificationKey(sn, category, olt));
 }
 
-export function isOperationalAlertRepeatDue(sn, category, olt = {}) {
-  return isRepeatDue(activeOperationalNotifications, operationalNotificationKey(sn, category, olt));
-}
-
 export function hasActiveNapIncidentNotification(napName, olt = {}) {
   return wasSentWithinRepeatWindow(activeNapIncidentNotifications, napNotificationKey(napName, olt));
 }
@@ -478,14 +474,6 @@ const sameOlt = (left = {}, right = {}) => {
   return Boolean(leftName && rightName && leftName === rightName);
 };
 
-function isExplicitSmartOltFiberCut(reason = '', onu = {}) {
-  const text = `${reason} ${onu?.offline_reason || ''} ${onu?.last_down_reason || ''} ${onu?.status || ''}`
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase();
-  return /(corte\s*(de\s*)?fibra|fibra\s*cort|fiber\s*(cut|break)|break\s*fiber|rotura\s*(de\s*)?fibra)/.test(text);
-}
-
 function getNapOnusFromSnapshot(referenceOnu, onus = []) {
   const napKey = normalizeNapName(getNapNameFromOnu(referenceOnu));
   if (!napKey) return [];
@@ -511,12 +499,9 @@ function getCompleteNapIncident(snapshotOnus, referenceOnu, expectedCategory) {
   return { complete, napOnus, actionableOnus };
 }
 
-async function isTelegramEligibleOperationalAlert(onu, category, oltStatusReason = '') {
+async function isTelegramEligibleOperationalAlert(onu, category) {
   if (!onu || !['power_fail', 'loss'].includes(category)) {
     return { eligible: false, reason: 'No corroborated Smart OLT incident' };
-  }
-  if (category === 'loss' && isExplicitSmartOltFiberCut(oltStatusReason, onu)) {
-    return { eligible: true, reason: 'Explicit Smart OLT fibre cut' };
   }
 
   try {
@@ -2109,14 +2094,13 @@ export async function processAndSendAlert(payload, prefetchedOnu = null, prefetc
     }
 
     // Telegram is intentionally reserved for a complete NAP outage of one
-    // type, or a physical fibre cut explicitly diagnosed by Smart OLT. A
-    // partial Power fail/LOS and any generic Offline state remain visible in
-    // monitoring but are never sent as an operational alert.
+    // type. Partial Power fail/LOS and any generic Offline state remain
+    // visible in monitoring but are never sent as an operational alert.
     if (!smartOltEnriched || !onu) {
       console.log(`[Notification Filter] Suppressing ${category}: Smart OLT did not provide a verifiable NAP scope.`);
       return { sn, enriched: false, sent: false, reason: 'Smart OLT scope unavailable' };
     }
-    const eligibility = await isTelegramEligibleOperationalAlert(onu, category, oltStatusReason);
+    const eligibility = await isTelegramEligibleOperationalAlert(onu, category);
     if (!eligibility.eligible) {
       console.log(`[Notification Filter] Suppressing ${category} for ${sn}: ${eligibility.reason}.`);
       return { sn, enriched: true, sent: false, reason: eligibility.reason };

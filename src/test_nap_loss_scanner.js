@@ -118,19 +118,14 @@ try {
   await runScanCycle();
   assert.strictEqual(telegramMessages.length, 2, 'A normal partial LOS must not send Telegram alerts');
 
-  // Smart OLT's explicit physical fibre-cut diagnosis remains the one
-  // individual optical exception requested by operations.
+  // A fibre-cut reason on one ONU is still a partial NAP incident. LOS is
+  // operationally notified only when the entire NAP has lost signal.
   statuses = ['Online', 'Online', 'Offline', 'Online'];
   await runScanCycle();
   statuses = ['Fiber cut', 'Online', 'Offline', 'Online'];
   await runScanCycle();
-  assert.strictEqual(telegramMessages.length, 3, 'An explicit Smart OLT fibre cut must send a Telegram alert');
-  const fiberMessage = telegramMessages[2].text;
-  assert.ok(fiberMessage.includes('Pérdida de señal'));
-  assert.ok(fiberMessage.includes('Cliente 1'));
-  assert.ok(!fiberMessage.includes('Cliente 3'), 'Bare Offline clients must not appear in fibre-cut reports');
-  assert.ok(fiberMessage.includes('Fecha y hora:'));
-  assert.ok(!fiberMessage.includes('FHTTTEST0001'));
+  assert.strictEqual(telegramMessages.length, 2,
+    'A partial fibre-cut diagnosis must not send a router/ONU LOS alert');
 
   // A sector-wide electrical outage must remain Power Fail and must never be
   // relabelled as a fibre cut merely because the complete NAP is offline.
@@ -138,8 +133,8 @@ try {
   await runScanCycle();
   statuses = ['Power fail', 'Power fail', 'Offline', 'Online'];
   await runScanCycle();
-  assert.strictEqual(telegramMessages.length, 4, 'A full-NAP electrical outage must send one consolidated alert');
-  const totalPowerMessage = telegramMessages[3].text;
+  assert.strictEqual(telegramMessages.length, 3, 'A full-NAP electrical outage must send one consolidated alert');
+  const totalPowerMessage = telegramMessages[2].text;
   assert.ok(totalPowerMessage.includes('Corte de energía'));
   assert.ok(!totalPowerMessage.includes('Pérdida de señal (LOS)'));
   assert.ok(totalPowerMessage.includes('Cliente 1') && totalPowerMessage.includes('Cliente 2'));
