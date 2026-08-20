@@ -143,6 +143,17 @@ export async function initDb() {
     if (!String(error.message || '').includes('duplicate column name')) throw error;
   }
   await runMigration();
+  // Some Render volumes still carry the obsolete JSON/SQLite fixture from an
+  // old integration test. Remove its exact signature on every startup so it
+  // cannot reappear in the operator's map history after a redeploy.
+  const purgeResult = await run(
+    `DELETE FROM status_history
+     WHERE napName = ? OR UPPER(COALESCE(sn, '')) LIKE ?`,
+    ['NAP-ZABBIX-1', 'FHTTZAB%']
+  );
+  if (purgeResult.changes > 0) {
+    console.log(`🧹 Removed ${purgeResult.changes} obsolete integration-test history record(s).`);
+  }
 }
 
 /**
