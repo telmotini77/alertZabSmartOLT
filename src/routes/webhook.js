@@ -451,7 +451,8 @@ const isReportableSmartOltFailure = (onu) =>
 
 const getPowerFailAlertMinimumPercent = () => {
   const configured = Number(process.env.NAP_POWER_FAIL_MIN_PERCENT);
-  // Electrical incidents are operationally relevant once 60% or more of the
+  // Electrical incidents are operationally relevant only once more than 60%
+  // of the
   // non-permanent clients in one NAP lose power. Clamp the value so a bad
   // environment variable cannot silently disable every alert.
   if (!Number.isFinite(configured)) return 60;
@@ -488,7 +489,7 @@ export const hasExplicitSmartOltFiberCut = (onu = {}) =>
  *
  * - LOS: every actionable ONU in the NAP must be LOS, unless SmartOLT itself
  *   reports an explicit fibre cut.
- * - Power Fail: explicit electrical failures must affect at least the
+ * - Power Fail: explicit electrical failures must affect more than the
  *   configured percentage (60% by default) of actionable clients.
  *
  * Bare Offline ONU records are permanent/disconnected inventory and are not
@@ -509,8 +510,11 @@ export function getNapOperationalEligibility(napOnus = [], expectedCategory = ''
   const powerPercent = totalActionable > 0
     ? (powerOnus.length / totalActionable) * 100
     : 0;
+  // This comparison is intentionally strict: with an operational threshold
+  // of 60, exactly 60.0% must remain silent. Telegram is reserved for a
+  // majority electrical outage of the NAP, never an individual router.
   const powerMeetsThreshold = totalActionable >= minimumClients &&
-    powerOnus.length > 0 && powerPercent >= getPowerFailAlertMinimumPercent();
+    powerOnus.length > 0 && powerPercent > getPowerFailAlertMinimumPercent();
 
   let category = null;
   let scope = '';
@@ -541,7 +545,7 @@ export function getNapOperationalEligibility(napOnus = [], expectedCategory = ''
       : scope === 'total_loss'
         ? 'Todas las ONU/routers accionables de la NAP están en LOS'
         : `${powerOnus.length}/${totalActionable} clientes con Power Fail (${powerPercent.toFixed(1)}%)`
-    : `No cumple la política Telegram (LOS total/corte de fibra o Power Fail ≥ ${getPowerFailAlertMinimumPercent()}%)`;
+    : `No cumple la política Telegram (LOS total/corte de fibra o Power Fail > ${getPowerFailAlertMinimumPercent()}%)`;
 
   return {
     eligible: Boolean(category && expectedMatches),

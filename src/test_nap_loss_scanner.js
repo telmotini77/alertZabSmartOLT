@@ -82,6 +82,7 @@ globalThis.fetch = async (url, options = {}) => {
 
 const { syncCacheWithSmartOlt, getCachedNaps } = await import('./services/cache.js');
 const { getScannerStatus, runScanCycle } = await import('./services/scanner.js');
+const { getNapOperationalEligibility } = await import('./routes/webhook.js');
 
 try {
   await syncCacheWithSmartOlt();
@@ -144,8 +145,17 @@ try {
   assert.ok(telegramMessages.at(-1).text.includes('CORTE DE FIBRA CONFIRMADO'),
     'The fibre-cut alert must identify the SmartOLT diagnosis explicitly');
 
-  // Power Fail becomes alertable at 60%. Here 2 of 3 actionable routers are
-  // electrically down (66.7%), while the third is still online.
+  // Exactly 60% is deliberately not enough: Power Fail must be greater than
+  // the configured threshold, not an individual or borderline outage.
+  const exactSixtyPercent = getNapOperationalEligibility([
+    ...Array.from({ length: 3 }, () => ({ status: 'Power fail', offline_reason: '' })),
+    ...Array.from({ length: 2 }, () => ({ status: 'Online', offline_reason: '' }))
+  ]);
+  assert.strictEqual(exactSixtyPercent.eligible, false,
+    'Exactly 60% Power Fail must not send a Telegram alert');
+
+  // Here 2 of 3 actionable routers are electrically down (66.7%), while the
+  // third is still online, so the NAP-wide Power Fail alert is allowed.
   statuses = ['Online', 'Online', 'Online', 'Online'];
   await runScanCycle();
   statuses = ['Power fail', 'Power fail', 'Online', 'Online'];
