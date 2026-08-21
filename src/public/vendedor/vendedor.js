@@ -8,6 +8,10 @@ let activeLayer = 'hybrid';
 let sellerPosition = null;
 let sellerMarker = null;
 let searchCircle = null;
+let gpsAccuracyCircle = null;
+let gpsWatchId = null;
+let bestGpsAccuracy = Number.POSITIVE_INFINITY;
+let currentLocationMode = null;
 let closestNapId = null;
 let pickLocationMode = false;
 let rulerEnabled = false;
@@ -25,6 +29,7 @@ document.addEventListener('DOMContentLoaded', () => {
     pick: document.getElementById('btn-pick-location'),
     locationStatus: document.getElementById('location-status'),
     locationHelp: document.getElementById('location-help'),
+    gpsAccuracy: document.getElementById('gps-accuracy'),
     radius: document.getElementById('search-radius'),
     nearbySummary: document.getElementById('nearby-summary'),
     nearbyList: document.getElementById('nearby-list'),
@@ -170,28 +175,77 @@ function requestGpsLocation() {
     setLocationMessage('Este dispositivo no permite GPS. Usa “Elegir en mapa”.', 'error');
     return;
   }
+  stopGpsTracking();
+  bestGpsAccuracy = Number.POSITIVE_INFINITY;
+  currentLocationMode = 'gps';
   els.locate.disabled = true;
-  els.locate.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Buscando GPS';
-  setLocationMessage('Buscando tu ubicación…', 'loading');
+  els.locate.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Buscando señal';
+  setLocationMessage('Buscando una señal GPS precisa; permanece en este lugar unos segundos.', 'loading');
   navigator.geolocation.getCurrentPosition(
     (position) => {
-      setSellerPosition([position.coords.latitude, position.coords.longitude], 'GPS actual');
+      acceptGpsPosition(position, { initial: true });
+      startGpsTracking();
       els.locate.disabled = false;
-      els.locate.innerHTML = '<i class="fa-solid fa-crosshairs"></i> Actualizar GPS';
+      els.locate.innerHTML = '<i class="fa-solid fa-satellite-dish"></i> Mejorar GPS';
     },
     (error) => {
       console.warn('Seller GPS error:', error.message);
-      setLocationMessage('No se pudo usar el GPS. Selecciona el punto en el mapa.', 'error');
+      setLocationMessage('No se pudo obtener GPS preciso. Activa la ubicación del dispositivo o usa “Elegir en mapa”.', 'error');
       els.locate.disabled = false;
-      els.locate.innerHTML = '<i class="fa-solid fa-crosshairs"></i> Usar mi GPS';
+      els.locate.innerHTML = '<i class="fa-solid fa-satellite-dish"></i> GPS preciso';
     },
-    { enableHighAccuracy: true, timeout: 12_000, maximumAge: 30_000 }
+    { enableHighAccuracy: true, timeout: 20_000, maximumAge: 0 }
   );
 }
 
+function startGpsTracking() {
+  if (!navigator.geolocation) return;
+  stopGpsTracking();
+  gpsWatchId = navigator.geolocation.watchPosition(
+    (position) => acceptGpsPosition(position, { initial: false }),
+    (error) => console.warn('GPS precision update unavailable:', error.message),
+    { enableHighAccuracy: true, timeout: 20_000, maximumAge: 0 }
+  );
+}
+
+function stopGpsTracking() {
+  if (gpsWatchId !== null && navigator.geolocation) navigator.geolocation.clearWatch(gpsWatchId);
+  gpsWatchId = null;
+}
+
+function acceptGpsPosition(position, { initial }) {
+  const latitude = Number(position?.coords?.latitude);
+  const longitude = Number(position?.coords?.longitude);
+  const accuracy = Number(position?.coords?.accuracy);
+  if (currentLocationMode !== 'gps' || !Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
+
+  const effectiveAccuracy = Number.isFinite(accuracy) && accuracy > 0 ? accuracy : 1_000;
+  const improvesPosition = initial || !sellerPosition || effectiveAccuracy <= bestGpsAccuracy + 5;
+  if (!improvesPosition) return;
+
+  bestGpsAccuracy = Math.min(bestGpsAccuracy, effectiveAccuracy);
+  const accurate = effectiveAccuracy <= 50;
+  setSellerPosition([latitude, longitude], accurate
+    ? `GPS preciso (${formatDistance(effectiveAccuracy)} de margen)`
+    : `GPS aproximado (${formatDistance(effectiveAccuracy)} de margen)`, {
+    mode: 'gps',
+    accuracy: effectiveAccuracy,
+    recenter: initial
+  });
+  updateGpsAccuracy(effectiveAccuracy);
+}
+
 function togglePickLocation() {
-  pickLocationMode = !pickLocationMode;
-  if (pickLocationMode) disableRuler();
+  setPickLocationMode(!pickLocationMode);
+}
+
+function setPickLocationMode(enabled) {
+  pickLocationMode = enabled;
+  if (pickLocationMode) {
+    stopGpsTracking();
+    currentLocationMode = 'manual';
+    disableRuler();
+  }
   els.pick.classList.toggle('active', pickLocationMode);
   els.pick.innerHTML = pickLocationMode
     ? '<i class="fa-solid fa-xmark"></i> Cancelar punto'
@@ -202,14 +256,15 @@ function togglePickLocation() {
 
 function handleMapClick(event) {
   if (pickLocationMode) {
-    setSellerPosition(event.latlng, 'Punto elegido en mapa');
-    togglePickLocation();
+    setSellerPosition(event.latlng, 'Punto elegido en mapa', { mode: 'manual' });
+    setPickLocationMode(false);
     return;
   }
   if (rulerEnabled) addRulerPoint(event.latlng);
 }
 
-function setSellerPosition(latlng, sourceLabel) {
+function setSellerPosition(latlng, sourceLabel, { mode = 'manual', accuracy = null, recenter = true } = {}) {
+  currentLocationMode = mode;
   sellerPosition = L.latLng(latlng);
   const userIcon = L.divIcon({
     className: 'seller-location-marker', html: '<div></div>', iconSize: [20, 20], iconAnchor: [10, 10]
@@ -223,8 +278,20 @@ function setSellerPosition(latlng, sourceLabel) {
   }).addTo(map);
   searchCircle.setRadius(Number(els.radius.value));
 
-  setLocationMessage(`${sourceLabel} confirmada. Calculando NAPs cercanas…`, 'ready');
-  map.flyTo(sellerPosition, Math.max(map.getZoom(), 15), { animate: true, duration: .7 });
+  if (mode === 'gps' && Number.isFinite(accuracy)) {
+    if (gpsAccuracyCircle) gpsAccuracyCircle.setLatLng(sellerPosition).setRadius(accuracy);
+    else gpsAccuracyCircle = L.circle(sellerPosition, {
+      radius: accuracy, color: '#2dd4bf', weight: 1, dashArray: '5 6', fillColor: '#2dd4bf', fillOpacity: 0.04, interactive: false
+    }).addTo(map);
+  } else if (gpsAccuracyCircle) {
+    map.removeLayer(gpsAccuracyCircle);
+    gpsAccuracyCircle = null;
+    els.gpsAccuracy.hidden = true;
+  }
+
+  const isAccurateGps = mode === 'gps' && Number.isFinite(accuracy) && accuracy <= 50;
+  setLocationMessage(`${sourceLabel} confirmado. Calculando NAPs cercanas…`, isAccurateGps ? 'ready' : mode === 'gps' ? 'approximate' : 'ready');
+  if (recenter) map.flyTo(sellerPosition, Math.max(map.getZoom(), 15), { animate: true, duration: .7 });
   updateNearbyResults();
 }
 
@@ -373,8 +440,21 @@ function clearRuler() {
 
 function setLocationMessage(message, state) {
   els.locationHelp.textContent = message;
-  els.locationStatus.textContent = state === 'ready' ? 'Ubicación lista' : state === 'loading' ? 'Ubicando…' : 'Revisar GPS';
-  els.locationStatus.className = `status-chip${state === 'ready' ? ' ready' : state === 'loading' ? ' loading' : ''}`;
+  const labels = {
+    ready: 'Ubicación lista',
+    loading: 'Ubicando…',
+    approximate: 'GPS aprox.',
+    error: 'Revisar GPS'
+  };
+  els.locationStatus.textContent = labels[state] || labels.error;
+  els.locationStatus.className = `status-chip${state === 'ready' ? ' ready' : state === 'loading' || state === 'approximate' ? ' loading' : ''}`;
+}
+
+function updateGpsAccuracy(accuracy) {
+  const accurate = accuracy <= 50;
+  els.gpsAccuracy.hidden = false;
+  els.gpsAccuracy.classList.toggle('approximate', !accurate);
+  els.gpsAccuracy.innerHTML = `<i class="fa-solid ${accurate ? 'fa-satellite-dish' : 'fa-triangle-exclamation'}"></i> ${accurate ? 'Precisión GPS' : 'Precisión aproximada'}: ±${formatDistance(accuracy)}${accurate ? '' : '. Esperando una señal mejor…'}`;
 }
 
 function setLocatedCount(value) { els.locatedCount.textContent = value; }

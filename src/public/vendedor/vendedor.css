@@ -78,6 +78,16 @@ h2 i { margin-right: 7px; color: var(--blue); }
 .nap-count { color: var(--blue); background: rgba(56, 189, 248, 0.12); }
 
 .location-card p { margin: 10px 0 13px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.gps-accuracy {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: -4px 0 13px !important;
+  color: var(--green) !important;
+  font-size: 11px !important;
+  font-weight: 700;
+}
+.gps-accuracy.approximate { color: var(--orange) !important; }
 .location-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .primary-button, .secondary-button, .map-button, .ruler-info button {
   min-height: 38px;
