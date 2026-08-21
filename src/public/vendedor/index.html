@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0f172a">
+  <title>NAP Cerca | Mapa para vendedores</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.4.1/dist/MarkerCluster.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.4.1/dist/MarkerCluster.Default.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" referrerpolicy="no-referrer">
+  <link rel="stylesheet" href="./vendedor.css">
+</head>
+<body>
+  <div class="sales-app">
+    <aside class="sales-sidebar" aria-label="Herramientas de ubicación NAP">
+      <header class="sales-header">
+        <div class="brand-icon"><i class="fa-solid fa-map-location-dot"></i></div>
+        <div>
+          <p class="eyebrow">HERRAMIENTA COMERCIAL</p>
+          <h1>NAP Cerca</h1>
+        </div>
+      </header>
+      <p class="subtitle">Encuentra la caja NAP más cercana a tu ubicación de venta.</p>
+
+      <section class="location-card" aria-labelledby="location-title">
+        <div class="section-title-row">
+          <h2 id="location-title"><i class="fa-solid fa-location-crosshairs"></i> Mi ubicación</h2>
+          <span id="location-status" class="status-chip">Sin ubicar</span>
+        </div>
+        <p id="location-help">Permite el GPS para buscar cobertura alrededor de donde estás.</p>
+        <div class="location-actions">
+          <button id="btn-locate" class="primary-button" type="button">
+            <i class="fa-solid fa-crosshairs"></i> Usar mi GPS
+          </button>
+          <button id="btn-pick-location" class="secondary-button" type="button" title="Elegir una ubicación manualmente en el mapa">
+            <i class="fa-solid fa-hand-pointer"></i> Elegir en mapa
+          </button>
+        </div>
+      </section>
+
+      <section class="nearby-card" aria-labelledby="nearby-title">
+        <div class="section-title-row">
+          <h2 id="nearby-title"><i class="fa-solid fa-tower-cell"></i> NAPs cercanas</h2>
+          <span id="located-count" class="nap-count">Cargando</span>
+        </div>
+        <label class="field-label" for="search-radius">Radio de búsqueda</label>
+        <select id="search-radius">
+          <option value="250">250 metros</option>
+          <option value="500">500 metros</option>
+          <option value="1000" selected>1 kilómetro</option>
+          <option value="1500">1.5 kilómetros</option>
+          <option value="3000">3 kilómetros</option>
+          <option value="5000">5 kilómetros</option>
+        </select>
+        <p id="nearby-summary" class="nearby-summary">Ubícate para conocer las cajas disponibles.</p>
+        <ol id="nearby-list" class="nearby-list" aria-live="polite"></ol>
+      </section>
+
+      <section class="search-card" aria-labelledby="search-title">
+        <h2 id="search-title"><i class="fa-solid fa-magnifying-glass"></i> Buscar caja NAP</h2>
+        <label class="sr-only" for="nap-search">Código de caja NAP</label>
+        <div class="search-input-wrap">
+          <i class="fa-solid fa-magnifying-glass"></i>
+          <input id="nap-search" type="search" autocomplete="off" placeholder="Ej.: SM7038-1">
+          <button id="clear-search" type="button" class="clear-search" aria-label="Limpiar búsqueda" hidden>&times;</button>
+        </div>
+        <ul id="nap-search-results" class="search-results"></ul>
+      </section>
+
+      <footer class="privacy-note">
+        <i class="fa-solid fa-shield-halved"></i>
+        <span>Este mapa muestra únicamente la ubicación y código de las cajas NAP. No incluye clientes ni datos técnicos.</span>
+      </footer>
+    </aside>
+
+    <main class="map-shell">
+      <div id="map" aria-label="Mapa de cajas NAP"></div>
+
+      <div class="map-controls" aria-label="Controles del mapa">
+        <button id="btn-show-all" class="map-button" type="button" title="Ver todas las cajas NAP">
+          <i class="fa-solid fa-expand"></i><span>Todas las NAP</span>
+        </button>
+        <button id="btn-ruler" class="map-button" type="button" title="Medir distancia entre puntos">
+          <i class="fa-solid fa-ruler-combined"></i><span>Regla</span>
+        </button>
+        <div class="layer-menu">
+          <button id="btn-layers" class="map-button" type="button" aria-expanded="false">
+            <i class="fa-solid fa-layer-group"></i><span>Capa</span>
+          </button>
+          <div id="layer-options" class="layer-options" hidden>
+            <button type="button" data-layer="hybrid" class="active">Satélite</button>
+            <button type="button" data-layer="streets">Calles</button>
+            <button type="button" data-layer="dark">Oscuro</button>
+            <button type="button" data-layer="osm">OpenStreetMap</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="ruler-info" class="ruler-info" hidden>
+        <div><i class="fa-solid fa-ruler-combined"></i> Regla activa: toca el mapa para medir <strong id="ruler-distance">0 m</strong></div>
+        <button id="btn-clear-ruler" type="button">Limpiar</button>
+        <button id="btn-close-ruler" type="button" aria-label="Cerrar regla">&times;</button>
+      </div>
+
+      <button id="mobile-panel-toggle" class="mobile-panel-toggle" type="button" aria-expanded="true">
+        <i class="fa-solid fa-chevron-down"></i><span>Herramientas</span>
+      </button>
+    </main>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script src="https://unpkg.com/leaflet.markercluster@1.4.1/dist/leaflet.markercluster.js"></script>
+  <script src="./vendedor.js"></script>
+</body>
+</html>

@@ -655,6 +655,33 @@ router.get('/naps', (req, res) => {
   res.json(getCachedNaps());
 });
 
+// GET /webhook/sales/naps - Public, privacy-safe map feed for sellers.
+// It deliberately exposes only a NAP identifier and its Smart OLT position;
+// subscriber names, ONU serials, signal data, OLT status and incident history
+// never leave the monitoring API through this route.
+router.get('/sales/naps', (req, res) => {
+  const naps = getCachedNaps()
+    .map((nap) => {
+      const coordinates = getCoordinates(nap);
+      const name = String(nap?.name || '').trim();
+      if (!coordinates || !name) return null;
+
+      const account = String(nap?.smartolt_account_id || 'default').trim().toUpperCase();
+      const olt = String(nap?.olt_id || nap?.olt_name || 'OLT').trim().toUpperCase();
+      return {
+        id: `${account}:${olt}:${name.toUpperCase()}`,
+        name,
+        latitude: coordinates.latitude,
+        longitude: coordinates.longitude
+      };
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.name.localeCompare(right.name, 'es'));
+
+  res.set('Cache-Control', 'no-store');
+  res.json({ updatedAt: new Date().toISOString(), count: naps.length, naps });
+});
+
 // GET /webhook/nearby-places?lat=-2.1&lng=-79.9&radius=1500
 // Returns useful OpenStreetMap points around a NAP for on-site work.
 router.get('/nearby-places', async (req, res) => {

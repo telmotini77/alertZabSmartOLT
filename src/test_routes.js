@@ -419,6 +419,22 @@ try {
   }
   console.log('✅ Manual/CSV GPS updates are blocked; map locations come from controlled synchronization: PASS');
 
+  console.log('\n[0.1] Testing privacy-safe seller NAP map feed...');
+  const sellerNapsResponse = await originalFetch('http://localhost:3001/webhook/sales/naps');
+  const sellerNapsData = await sellerNapsResponse.json();
+  const sellerFields = ['id', 'name', 'latitude', 'longitude'];
+  const sellerFeedIsSafe = sellerNapsResponse.status === 200 &&
+    Array.isArray(sellerNapsData.naps) && sellerNapsData.naps.length > 0 &&
+    sellerNapsData.naps.every((nap) =>
+      Object.keys(nap).every((field) => sellerFields.includes(field)) &&
+      sellerFields.every((field) => Object.hasOwn(nap, field))
+    );
+  if (!sellerFeedIsSafe) {
+    console.error('❌ Seller NAP map feed returned extra monitoring/customer data');
+    process.exit(1);
+  }
+  console.log('✅ Seller map endpoint returns coordinates only, without client or ONU data: PASS');
+
   console.log('\n[1] Testing Direct Zabbix Webhook (Push workflow - Loss Event)...');
   fetchLog = [];
   
