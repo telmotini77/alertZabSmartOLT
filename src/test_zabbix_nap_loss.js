@@ -33,6 +33,16 @@ globalThis.fetch = async (url, options = {}) => {
     telegramMessages.push(JSON.parse(options.body));
     return { ok: true, status: 200, json: async () => ({ ok: true, result: { message_id: 1 } }) };
   }
+  if (String(url).includes('/system/get_odbs')) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        status: true,
+        response: [{ name: 'NAP-ZABBIX-1', latitude: '-2.9110', longitude: '-78.9665' }]
+      })
+    };
+  }
   if (String(url).includes('/onu/get_all_onus_details')) {
     return { ok: true, status: 200, json: async () => ({ status: true, onus }) };
   }

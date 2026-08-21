@@ -53,6 +53,21 @@ globalThis.fetch = async (url) => {
     return { ok: true, status: 200, json: async () => ({ status: true, onus }) };
   }
 
+  if (parsed.pathname.endsWith('/system/get_odbs')) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        status: true,
+        response: [{
+          name: `NAP-${account.toUpperCase()}`,
+          latitude: account === 'norte' ? '-2.90' : '-2.91',
+          longitude: '-78.97'
+        }]
+      })
+    };
+  }
+
   if (parsed.pathname.endsWith('/onu/get_onu_status/onu-sur')) {
     assert.strictEqual(host, 'sur-red.smartolt.com', 'Live status must use the ONU account domain.');
     return { ok: true, status: 200, json: async () => ({ status: true, onu_status: 'Online' }) };
@@ -65,6 +80,7 @@ const {
   getSmartOltAccounts,
   fetchAllOnuStatuses,
   fetchAllOnus,
+  fetchAllOdbs,
   findOnuBySn,
   getOnuStatus
 } = await import('./services/smartOlt.js');
@@ -83,6 +99,10 @@ try {
 
   const onus = await fetchAllOnus();
   assert.strictEqual(onus.length, 2, 'Metadata sync must include every configured domain.');
+
+  const odbs = await fetchAllOdbs();
+  assert.strictEqual(odbs.length, 2, 'Splitter GPS metadata must include every configured domain.');
+  assert.deepStrictEqual(odbs.map((odb) => odb.smartolt_account_id).sort(), ['norte', 'sur']);
 
   const onu = await findOnuBySn('SUR0001');
   assert.strictEqual(onu.smartolt_account_id, 'sur');

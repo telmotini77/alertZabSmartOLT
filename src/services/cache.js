@@ -1,4 +1,4 @@
-import { fetchAllOnus, fetchAllOnuStatuses, getSmartOltAccounts } from './smartOlt.js';
+import { fetchAllOdbs, fetchAllOnus, fetchAllOnuStatuses, getSmartOltAccounts } from './smartOlt.js';
 import { extractNapBox } from '../utils/parser.js';
 import { broadcast } from './websocket.js';
 import {
@@ -58,6 +58,14 @@ const getNapSourceKey = (value = {}, napName = '') => {
   return `${account}:${olt}:${name}`;
 };
 
+const getOdbSourceKey = (value = {}, odbName = '') => {
+  const account = getSmartOltAccountKey(value);
+  const name = String(odbName || value?.name || value?.odb_name || value?.odb || '')
+    .trim()
+    .toUpperCase();
+  return `${account}:${name}`;
+};
+
 /**
  * Do not trust coordinates embedded in an old SQLite row directly. The map
  * rebuilds every position exclusively from the current Smart OLT inventory.
@@ -66,6 +74,7 @@ const withoutStoredCoordinates = (nap = {}) => ({
   ...nap,
   latitude: null,
   longitude: null,
+  coordinate_source: null,
   clients: (nap.clients || []).map((client) => ({
     ...client,
     latitude: null,
@@ -83,7 +92,7 @@ function applySmartOltCoordinates(naps = []) {
   const summary = { smartOlt: 0, missing: 0 };
   naps.forEach((nap) => {
     if (hasValidCoordinates(nap.latitude, nap.longitude)) {
-      nap.coordinate_source = 'smartolt';
+      nap.coordinate_source = nap.coordinate_source || 'smartolt_onu';
       summary.smartOlt++;
       return;
     }
@@ -309,7 +318,33 @@ export async function initCache() {
 export async function syncCacheWithSmartOlt({ forceRefresh = false } = {}) {
   try {
     const onus = await fetchAllOnus({ forceRefresh });
+    let odbs = [];
+    try {
+      odbs = await fetchAllOdbs({ forceRefresh });
+    } catch (odbError) {
+      // Keep status/alert monitoring available if Smart OLT temporarily
+      // denies the metadata endpoint. The next slow metadata sync retries it.
+      console.error('⚠️ Smart OLT ODB GPS sync failed; using ONU GPS only for this cycle:', odbError.message);
+    }
     console.log(`Smart OLT returned ${onus.length} ONUs. Processing NAPs...`);
+
+    // A splitter is the physical NAP box. Its Smart OLT coordinates are more
+    // accurate than an average of the individual customer ONUs. Do not assign
+    // an ODB coordinate when the same name is ambiguous within one account.
+    const odbCoordinates = new Map();
+    const ambiguousOdbCoordinates = new Set();
+    odbs.forEach((odb) => {
+      const key = getOdbSourceKey(odb);
+      const latitude = Number(odb?.latitude ?? odb?.gps_lat);
+      const longitude = Number(odb?.longitude ?? odb?.gps_lng);
+      if (!key || !hasValidCoordinates(latitude, longitude) || ambiguousOdbCoordinates.has(key)) return;
+      if (odbCoordinates.has(key)) {
+        odbCoordinates.delete(key);
+        ambiguousOdbCoordinates.add(key);
+        return;
+      }
+      odbCoordinates.set(key, { latitude, longitude });
+    });
 
     const napMap = {};
 
@@ -388,9 +423,12 @@ export async function syncCacheWithSmartOlt({ forceRefresh = false } = {}) {
         longitude = group.lngs.reduce((sum, val) => sum + val, 0) / group.lngs.length;
       }
 
-      // Only Smart OLT may provide NAP locations.
-      const finalLat = latitude;
-      const finalLng = longitude;
+      // Prefer the physical Splitter/ODB GPS from Smart OLT. ONU GPS remains
+      // a Smart OLT fallback for legacy accounts that have not georeferenced
+      // their Splitters yet.
+      const odbCoordinate = odbCoordinates.get(getOdbSourceKey(group, name));
+      const finalLat = odbCoordinate?.latitude ?? latitude;
+      const finalLng = odbCoordinate?.longitude ?? longitude;
 
       const totalClients = group.clients.length;
       const offlineClients = group.clients.filter(c => {
@@ -416,6 +454,7 @@ export async function syncCacheWithSmartOlt({ forceRefresh = false } = {}) {
         port: group.port,
         latitude: finalLat,
         longitude: finalLng,
+        coordinate_source: odbCoordinate ? 'smartolt_odb' : null,
         totalClients,
         onlineClients,
         offlineClients,
@@ -429,7 +468,8 @@ export async function syncCacheWithSmartOlt({ forceRefresh = false } = {}) {
     
     // Save NAPs to SQLite in background
     await Promise.all(naps.map(nap => dbSaveNap(nap)));
-    console.log(`✅ Synced and saved ${cachedNaps.length} NAPs successfully to SQLite database. GPS: ${coordinateSummary.smartOlt} Smart OLT, ${coordinateSummary.missing} without Smart OLT coordinates.`);
+    const odbLocated = naps.filter((nap) => nap.coordinate_source === 'smartolt_odb').length;
+    console.log(`✅ Synced and saved ${cachedNaps.length} NAPs successfully to SQLite database. GPS: ${coordinateSummary.smartOlt} Smart OLT (${odbLocated} from Splitters), ${coordinateSummary.missing} without Smart OLT coordinates.`);
   } catch (err) {
     console.error('❌ Error during syncCacheWithSmartOlt:', err.message);
     throw err;
@@ -590,13 +630,13 @@ export function applyOnuStatusSnapshot(onus) {
     const coordinates = nap.clients
       .filter((client) => Number.isFinite(client.latitude) && Number.isFinite(client.longitude))
       .map((client) => ({ latitude: client.latitude, longitude: client.longitude }));
-    if (coordinates.length > 0) {
+    if (nap.coordinate_source !== 'smartolt_odb' && coordinates.length > 0) {
       const latitude = coordinates.reduce((sum, coordinate) => sum + coordinate.latitude, 0) / coordinates.length;
       const longitude = coordinates.reduce((sum, coordinate) => sum + coordinate.longitude, 0) / coordinates.length;
       if (nap.latitude !== latitude || nap.longitude !== longitude) {
         nap.latitude = latitude;
         nap.longitude = longitude;
-        nap.coordinate_source = 'smartolt';
+        nap.coordinate_source = 'smartolt_onu';
         changed = true;
       }
     }

@@ -59,6 +59,23 @@ globalThis.fetch = async (url, options) => {
     body: options?.body ? JSON.parse(options.body) : null 
   });
 
+  // Smart OLT Splitter/ODB GPS mock response. NAP locations are sourced
+  // from these physical boxes, not calculated from customer ONU coordinates.
+  if (url.includes('/system/get_odbs')) {
+    return {
+      ok: true,
+      status: 200,
+      text: async () => '',
+      json: async () => ({
+        status: true,
+        response: [
+          { name: 'NAP-04-A', latitude: '-2.900000', longitude: '-79.000000' },
+          { name: 'NAP-04-B', latitude: '-2.901000', longitude: '-79.001000' }
+        ]
+      })
+    };
+  }
+
   // Smart OLT compact monitoring status feed mock
   if (url.includes('/onu/get_onus_statuses')) {
     if (simulateSmartOltRateLimit) {

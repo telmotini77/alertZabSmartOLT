@@ -60,6 +60,11 @@ const mockOnus = [
   }
 ];
 
+let mockOdbs = [
+  { name: 'NAP-04-A', latitude: '-12.0500', longitude: '-77.0600' },
+  { name: 'NAP-04-B', latitude: '-12.0800', longitude: '-77.0500' }
+];
+
 // Set process env variables
 process.env.SMARTOLT_SUBDOMAIN = 'testcompany';
 process.env.SMARTOLT_API_KEY = 'test_key';
@@ -67,6 +72,13 @@ process.env.NAP_CACHE_FILE = path.resolve('data/.nap_cache.test.json');
 
 // Mock global fetch to intercept Smart OLT request
 globalThis.fetch = async (url) => {
+  if (url.includes('/system/get_odbs')) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ status: true, response: mockOdbs })
+    };
+  }
   if (url.includes('/onu/get_all_onus_details')) {
     return {
       ok: true,
@@ -116,14 +128,11 @@ async function runTests() {
     // NAP-04-B has 1 online -> status should be 'online'
     assert.strictEqual(napB.status, 'online', 'NAP-04-B status should be online');
     
-    // Check average coordinates calculation
-    // napA lats: -12.0463 and -12.0465 (ZTEG is 0.0, which is ignored)
-    // avgLat = (-12.0463 + -12.0465) / 2 = -12.0464
-    const expectedAvgLat = (-12.0463 + -12.0465) / 2;
-    const expectedAvgLng = (-77.0427 + -77.0429) / 2;
-    
-    assert.strictEqual(napA.latitude, expectedAvgLat, 'NAP-04-A average latitude is incorrect');
-    assert.strictEqual(napA.longitude, expectedAvgLng, 'NAP-04-A average longitude is incorrect');
+    // A NAP is physically represented by its ODB/Splitter. Its Smart OLT
+    // coordinate must win over the average of its individual ONU locations.
+    assert.strictEqual(napA.latitude, -12.0500, 'NAP-04-A must use its Smart OLT Splitter latitude');
+    assert.strictEqual(napA.longitude, -77.0600, 'NAP-04-A must use its Smart OLT Splitter longitude');
+    assert.strictEqual(napA.coordinate_source, 'smartolt_odb', 'NAP-04-A GPS must identify the Smart OLT Splitter source');
     
     console.log('✅ Grouping, Status and Average GPS Coordinate calculation: PASS');
 
@@ -157,8 +166,10 @@ async function runTests() {
     // inventory must not reuse a stored or CSV position.
     console.log('\n[4] Testing Smart OLT-only GPS policy...');
     const savedNapBCoordinates = { gps_lat: mockOnus[3].gps_lat, gps_lng: mockOnus[3].gps_lng };
+    const savedOdbBCoordinates = { ...mockOdbs[1] };
     mockOnus[3].gps_lat = '0.0';
     mockOnus[3].gps_lng = '0.0';
+    mockOdbs[1] = { ...mockOdbs[1], latitude: '0.0', longitude: '0.0' };
     await syncCacheWithSmartOlt({ forceRefresh: true });
     const napBWithoutSmartOltGps = getCachedNaps().find(n => n.name === 'NAP-04-B');
     assert.strictEqual(napBWithoutSmartOltGps.latitude, null,
@@ -167,6 +178,7 @@ async function runTests() {
       'A NAP without Smart OLT GPS must not reuse an old stored coordinate');
     mockOnus[3].gps_lat = savedNapBCoordinates.gps_lat;
     mockOnus[3].gps_lng = savedNapBCoordinates.gps_lng;
+    mockOdbs[1] = savedOdbBCoordinates;
     await syncCacheWithSmartOlt({ forceRefresh: true });
     const refreshedNapB = getCachedNaps().find(n => n.name === 'NAP-04-B');
     assert.strictEqual(refreshedNapB.latitude, -12.0800, 'NAP GPS must be restored from Smart OLT');

@@ -15,6 +15,11 @@ let fullSnapshotCache = {
   fetchedAt: 0,
   inFlight: null
 };
+let odbSnapshotCache = {
+  odbs: null,
+  fetchedAt: 0,
+  inFlight: null
+};
 let statusSnapshotCache = {
   onus: null,
   fetchedAt: 0,
@@ -450,6 +455,57 @@ export async function fetchAllOnus({ forceRefresh = false } = {}) {
 
   if (process.env.NODE_ENV !== 'test') {
     fullSnapshotCache.inFlight = request;
+  }
+  return request;
+}
+
+/**
+ * Fetch all distribution boxes (ODBs / Splitters) from Smart OLT.
+ * Smart OLT stores the authoritative NAP latitude/longitude on the ODB,
+ * rather than necessarily duplicating it on every attached ONU.
+ */
+export async function fetchAllOdbs({ forceRefresh = false } = {}) {
+  const now = Date.now();
+  const snapshotTtlMs = getFullSnapshotTtlMs();
+
+  if (process.env.NODE_ENV !== 'test' && !forceRefresh && odbSnapshotCache.odbs &&
+      now - odbSnapshotCache.fetchedAt < snapshotTtlMs) {
+    return odbSnapshotCache.odbs;
+  }
+  if (process.env.NODE_ENV !== 'test' && !forceRefresh && odbSnapshotCache.inFlight) {
+    return odbSnapshotCache.inFlight;
+  }
+
+  const request = (async () => {
+    try {
+      const accountOdbs = await collectAccounts(async (account) => {
+        const data = await requestAccountJson(account, '/system/get_odbs', 15_000);
+        const odbs = Array.isArray(data?.response)
+          ? data.response
+          : Array.isArray(data?.odbs)
+            ? data.odbs
+            : Array.isArray(data?.data)
+              ? data.data
+              : Array.isArray(data)
+                ? data
+                : [];
+        return odbs.map((odb) => addAccountContext(odb, account));
+      }, 'inventario de Splitters/ODBs');
+      const odbs = accountOdbs.flat();
+      if (process.env.NODE_ENV !== 'test') {
+        odbSnapshotCache = { odbs, fetchedAt: Date.now(), inFlight: null };
+      }
+      return odbs;
+    } catch (error) {
+      console.error('Error fetching Smart OLT ODB snapshot:', error.message);
+      throw error;
+    } finally {
+      if (odbSnapshotCache.inFlight) odbSnapshotCache.inFlight = null;
+    }
+  })();
+
+  if (process.env.NODE_ENV !== 'test') {
+    odbSnapshotCache.inFlight = request;
   }
   return request;
 }

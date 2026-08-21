@@ -39,6 +39,20 @@ globalThis.fetch = async (url, options = {}) => {
     return { ok: true, status: 200, json: async () => ({ ok: true, result: { message_id: 1 } }) };
   }
 
+  if (String(url).includes('/system/get_odbs')) {
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        status: true,
+        response: [
+          { name: 'NAP-TEST-1', latitude: '-2.9110', longitude: '-78.9665' },
+          { name: 'NAP-TEST-2', latitude: '-2.9120', longitude: '-78.9675' }
+        ]
+      })
+    };
+  }
+
   if (String(url).includes('/onu/get_all_onus_details')) {
     return { ok: true, status: 200, json: async () => ({ status: true, onus: onus() }) };
   }
