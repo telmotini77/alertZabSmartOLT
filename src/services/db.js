@@ -28,6 +28,7 @@ function getDb() {
       db.run(`
         CREATE TABLE IF NOT EXISTS naps (
           name TEXT PRIMARY KEY,
+          display_name TEXT,
           smartolt_account_id TEXT,
           smartolt_subdomain TEXT,
           olt_id TEXT,
@@ -47,6 +48,7 @@ function getDb() {
       // duplicate-column error so direct cache/test use is migrated too (not
       // only the HTTP-server initialization path).
       db.run('ALTER TABLE naps ADD COLUMN olt_id TEXT', () => {});
+      db.run('ALTER TABLE naps ADD COLUMN display_name TEXT', () => {});
       db.run('ALTER TABLE naps ADD COLUMN smartolt_account_id TEXT', () => {});
       db.run('ALTER TABLE naps ADD COLUMN smartolt_subdomain TEXT', () => {});
       db.run(`
@@ -155,7 +157,7 @@ export async function initDb() {
   } catch (error) {
     if (!String(error.message || '').includes('duplicate column name')) throw error;
   }
-  for (const column of ['smartolt_account_id', 'smartolt_subdomain']) {
+  for (const column of ['display_name', 'smartolt_account_id', 'smartolt_subdomain']) {
     try {
       await run(`ALTER TABLE naps ADD COLUMN ${column} TEXT`);
     } catch (error) {
@@ -163,6 +165,7 @@ export async function initDb() {
     }
   }
   await runMigration();
+  await migrateNapStorageKeys();
   // Some Render volumes still carry the obsolete JSON/SQLite fixture from an
   // old integration test. Remove its exact signature on every startup so it
   // cannot reappear in the operator's map history after a redeploy.
@@ -173,6 +176,42 @@ export async function initDb() {
   );
   if (purgeResult.changes > 0) {
     console.log(`🧹 Removed ${purgeResult.changes} obsolete integration-test history record(s).`);
+  }
+}
+
+/**
+ * A NAP code is only unique within its SmartOLT account and OLT. The original
+ * table used the visible code as its primary key, so identical codes from two
+ * domains overwrote each other after a restart. Keep the readable code in
+ * display_name and use the complete source identity as the storage key.
+ */
+function getNapStorageKey(nap = {}) {
+  const account = String(nap.smartolt_account_id || nap.smartOltAccountId || 'default')
+    .trim()
+    .toUpperCase() || 'DEFAULT';
+  const olt = String(nap.olt_id || nap.oltId || nap.olt_name || nap.oltName || 'OLT')
+    .trim()
+    .toUpperCase() || 'OLT';
+  const name = String(nap.display_name || nap.name || '').trim().toUpperCase();
+  return `${account}:${olt}:${name}`;
+}
+
+async function migrateNapStorageKeys() {
+  const rows = await all(`
+    SELECT name, display_name, smartolt_account_id, olt_id, olt_name
+    FROM naps
+  `);
+
+  for (const row of rows) {
+    const displayName = String(row.display_name || row.name || '').trim();
+    if (!displayName) continue;
+
+    const storageKey = getNapStorageKey({ ...row, display_name: displayName });
+    if (row.name === storageKey && row.display_name === displayName) continue;
+    await run(
+      'UPDATE naps SET name = ?, display_name = ? WHERE name = ?',
+      [storageKey, displayName, row.name]
+    );
   }
 }
 
@@ -269,6 +308,9 @@ export async function dbGetAllNaps() {
     const rows = await all('SELECT * FROM naps');
     return rows.map((r) => ({
       ...r,
+      // The `name` column stores an internal account/OLT/NAP key. Keep the
+      // original code visible to the cache and map API.
+      name: r.display_name || r.name,
       clients: JSON.parse(r.clients || '[]')
     }));
   } catch (err) {
@@ -282,13 +324,16 @@ export async function dbGetAllNaps() {
  */
 export async function dbSaveNap(nap) {
   try {
+    const displayName = String(nap?.name || '').trim();
+    const storageKey = getNapStorageKey({ ...nap, display_name: displayName });
     await run(
       `INSERT OR REPLACE INTO naps (
-        name, smartolt_account_id, smartolt_subdomain, olt_id, olt_name, board, port, latitude, longitude,
+        name, display_name, smartolt_account_id, smartolt_subdomain, olt_id, olt_name, board, port, latitude, longitude,
         totalClients, onlineClients, offlineClients, status, clients
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        nap.name,
+        storageKey,
+        displayName,
         nap.smartolt_account_id || null,
         nap.smartolt_subdomain || null,
         nap.olt_id || null,

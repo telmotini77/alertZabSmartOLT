@@ -84,6 +84,7 @@ const {
   findOnuBySn,
   getOnuStatus
 } = await import('./services/smartOlt.js');
+const { initDb, dbGetAllNaps, dbSaveNap } = await import('./services/db.js');
 
 try {
   assert.deepStrictEqual(getSmartOltAccounts(), [
@@ -112,6 +113,29 @@ try {
   assert.strictEqual(live.smartolt_account_id, 'sur');
   assert.ok(requestedHosts.includes('norte-red.smartolt.com'));
   assert.ok(requestedHosts.includes('sur-red.smartolt.com'));
+
+  // The same visible NAP code may exist in two SmartOLT domains. Persisted
+  // storage must retain both entries so a process restart cannot drop an OLT
+  // from either map or the alert correlation cache.
+  await initDb();
+  await Promise.all([
+    dbSaveNap({
+      name: 'NAP-CODE-SHARED-TEST', smartolt_account_id: 'norte', olt_id: '2', olt_name: 'OLT norte',
+      board: '1', port: '1', totalClients: 1, onlineClients: 1, offlineClients: 0, status: 'online', clients: []
+    }),
+    dbSaveNap({
+      name: 'NAP-CODE-SHARED-TEST', smartolt_account_id: 'sur', olt_id: '2', olt_name: 'OLT sur',
+      board: '1', port: '1', totalClients: 1, onlineClients: 1, offlineClients: 0, status: 'online', clients: []
+    })
+  ]);
+  const persistedSharedNaps = (await dbGetAllNaps())
+    .filter((nap) => nap.name === 'NAP-CODE-SHARED-TEST');
+  assert.strictEqual(persistedSharedNaps.length, 2,
+    'Identical NAP codes from distinct SmartOLT domains must not overwrite each other in SQLite.');
+  assert.deepStrictEqual(
+    persistedSharedNaps.map((nap) => nap.smartolt_account_id).sort(),
+    ['norte', 'sur']
+  );
 
   console.log('Smart OLT multi-domain account separation: PASS');
 } catch (error) {
