@@ -93,11 +93,6 @@
           <span>Regla</span>
         </button>
 
-        <button id="btn-nearby-toggle" class="btn-map-control" title="Ver sitios cercanos a una caja NAP">
-          <i class="fa-solid fa-map-location-dot"></i>
-          <span>Cercanos</span>
-        </button>
-
         <!-- Layer Selector Dropdown -->
         <div class="map-layer-selector">
           <button id="btn-layer-dropdown" class="btn-map-control" title="Cambiar tema/capa del mapa">
@@ -172,41 +167,6 @@
         </div>
       </aside>
 
-      <!-- Secondary map: nearby places around the selected NAP -->
-      <aside id="nearby-drawer" class="nearby-drawer hidden" aria-label="Mapa de sitios cercanos">
-        <div class="nearby-header">
-          <div>
-            <h2><i class="fa-solid fa-map-location-dot logo-icon"></i> Sitios cercanos</h2>
-            <p>Referencias alrededor de una caja NAP</p>
-          </div>
-          <button id="btn-close-nearby" class="btn-close-drawer" title="Cerrar panel">&times;</button>
-        </div>
-        <div class="nearby-filters">
-          <label for="nearby-nap-select">Caja NAP</label>
-          <select id="nearby-nap-select" disabled>
-            <option>Cargando cajas con GPS...</option>
-          </select>
-          <div class="nearby-radius-row">
-            <div>
-              <label for="nearby-radius-select">Radio de búsqueda</label>
-              <select id="nearby-radius-select">
-                <option value="500">500 m</option>
-                <option value="1000">1 km</option>
-                <option value="1500" selected>1.5 km</option>
-                <option value="3000">3 km</option>
-                <option value="5000">5 km</option>
-              </select>
-            </div>
-            <button id="btn-refresh-nearby" class="btn-icon" title="Actualizar sitios cercanos">
-              <i class="fa-solid fa-arrows-rotate"></i>
-            </button>
-          </div>
-        </div>
-        <div id="nearby-map" aria-label="Mapa de lugares cercanos"></div>
-        <div class="nearby-legend"><span class="nearby-nap-dot"></span> NAP <span class="nearby-place-dot"></span> Sitio cercano</div>
-        <div id="nearby-status" class="nearby-status">Elige una caja NAP para cargar las referencias.</div>
-        <ul id="nearby-places-list" class="nearby-places-list"></ul>
-      </aside>
     </main>
   </div>
 
