@@ -4,6 +4,7 @@ import { extractNapBox } from '../utils/parser.js';
 import {
   classifySmartOltAlert,
   clearActiveOperationalNotification,
+  getNapOperationalEligibility,
   hasActiveNapIncidentNotification,
   isNapIncidentRepeatDue,
   processAndSendAlert
@@ -94,14 +95,6 @@ const getNapKeyForOnu = (onu) => napKey(getNapName(onu), onu);
 const getOnuKey = (onu = {}) =>
   `${String(onu?.smartolt_account_id || onu?.smartOltAccountId || 'default').trim()}:${String(onu?.sn || '').trim().toUpperCase()}`;
 
-const getMinimumNapClients = () => {
-  // A NAP with one provisioned/active router is also fully affected when
-  // that router is explicitly reported Power fail or LOS.  This setting is
-  // deliberately separate from the previous LOS/Zabbix evidence threshold.
-  const configured = Number.parseInt(process.env.NAP_TOTAL_OUTAGE_MIN_ONUS, 10);
-  return Number.isInteger(configured) && configured > 0 ? configured : 1;
-};
-
 function groupOnusByNap(onus) {
   const naps = new Map();
 
@@ -133,16 +126,7 @@ function seedPreviousStateFromCache() {
       previousStateMap.set(getOnuKey(client), getOperationalState(client));
       seededClients++;
     });
-    const relevantClients = clients.filter((client) =>
-      isOnline(client) || getReportableFailureCategory(client)
-    );
-    const categories = relevantClients.map(getReportableFailureCategory).filter(Boolean);
-    const completeCategory = relevantClients.length >= getMinimumNapClients() &&
-      categories.length === relevantClients.length &&
-      new Set(categories).size === 1
-      ? categories[0]
-      : null;
-    previousNapStateMap.set(napKey(nap.name, nap), completeCategory);
+    previousNapStateMap.set(napKey(nap.name, nap), getNapOperationalEligibility(clients).category);
   });
 
   if (seededClients > 0) {
@@ -157,17 +141,14 @@ function seedPreviousStateFromCache() {
 function getPreviousNapCategory(nap, key) {
   if (previousNapStateMap.has(key)) return previousNapStateMap.get(key);
 
-  const relevantOnus = nap.onus.filter((onu) => isOnline(onu) || getReportableFailureCategory(onu));
-  const states = relevantOnus.map((onu) => previousStateMap.get(getOnuKey(onu)));
-  return relevantOnus.length >= getMinimumNapClients() &&
-    states.length === relevantOnus.length &&
-    states.every((state) => state === 'power_fail')
-    ? 'power_fail'
-    : relevantOnus.length >= getMinimumNapClients() &&
-      states.length === relevantOnus.length &&
-      states.every((state) => state === 'loss')
-      ? 'loss'
-      : null;
+  const previousStateOnus = nap.onus.map((onu) => {
+    const state = previousStateMap.get(getOnuKey(onu));
+    if (state === 'power_fail') return { ...onu, status: 'Power fail', offline_reason: 'Power fail' };
+    if (state === 'loss') return { ...onu, status: 'LOS', offline_reason: 'Loss of Signal' };
+    if (state === 'online') return { ...onu, status: 'Online', offline_reason: '' };
+    return { ...onu, status: 'Offline', offline_reason: '' };
+  });
+  return getNapOperationalEligibility(previousStateOnus).category;
 }
 
 /**
@@ -261,24 +242,15 @@ export async function runScanCycle() {
 
     const naps = groupOnusByNap(onus);
     const newlyOfflineNaps = [];
-    const minimumNapClients = getMinimumNapClients();
 
     naps.forEach((nap, key) => {
-      // Do not allow permanent bare-Offline ONUs to convert a normal power
-      // incident into a "full NAP" outage. Only Online and explicitly
-      // classified Power fail/LOS ONUs participate in this decision.
-      const relevantOnus = nap.onus.filter((onu) => isOnline(onu) || getReportableFailureCategory(onu));
-      const categories = relevantOnus.map(getReportableFailureCategory).filter(Boolean);
-      const completeCategory = relevantOnus.length >= minimumNapClients &&
-        categories.length === relevantOnus.length &&
-        new Set(categories).size === 1
-        ? categories[0]
-        : null;
+      const eligibility = getNapOperationalEligibility(nap.onus);
+      const completeCategory = eligibility.category;
       const previousCategory = getPreviousNapCategory(nap, key);
       const repeatDue = completeCategory && isNapIncidentRepeatDue(nap.name, nap.onus[0] || {});
       if (completeCategory &&
           ((!isFirstScan && previousCategory !== completeCategory) || repeatDue)) {
-        newlyOfflineNaps.push({ ...nap, category: completeCategory });
+        newlyOfflineNaps.push({ ...nap, category: completeCategory, eligibility });
       }
       previousNapStateMap.set(key, completeCategory);
     });
@@ -300,11 +272,11 @@ export async function runScanCycle() {
     } else {
       const results = [];
       for (const nap of newlyOfflineNaps) {
-        results.push(await handleNapOutage(nap, nap.category));
+        results.push(await handleNapOutage(nap, nap.category, nap.eligibility));
       }
       const delivered = results.filter((result) => result?.sent).length;
       scannerRuntimeStatus.lastFallbackAlerts = delivered;
-      console.log(`Radar scan complete. Smart OLT observed ${newlyOfflineNaps.length} total NAP outage(s); ${delivered} fallback alert(s) delivered.`);
+      console.log(`Radar scan complete. Smart OLT observed ${newlyOfflineNaps.length} Telegram-eligible NAP incident(s); ${delivered} fallback alert(s) delivered.`);
     }
     scannerRuntimeStatus.lastSuccessAt = new Date().toISOString();
     scannerRuntimeStatus.lastError = null;
@@ -327,15 +299,18 @@ export async function runScanCycle() {
 }
 
 /**
- * Classify and send one complete-NAP incident. A total outage is not
- * automatically called LOS: Dying Gasp/Power Fail remains an electrical
- * outage, while LOS remains a fibre/signal outage.
+ * Classify and send one Telegram-eligible NAP incident. A total LOS or an
+ * explicit SmartOLT fibre cut may alert; Power Fail needs >=60% impact.
  */
-async function handleNapOutage(nap, category) {
+async function handleNapOutage(nap, category, knownEligibility = null) {
   if (!isSupportedFailure(category)) {
-    return { sent: false, reason: 'Unsupported complete NAP cause' };
+    return { sent: false, reason: 'Unsupported NAP incident cause' };
   }
-  const referenceOnu = nap.onus.find((onu) => getReportableFailureCategory(onu) === category);
+  const eligibility = knownEligibility || getNapOperationalEligibility(nap.onus, category);
+  if (!eligibility.eligible || eligibility.category !== category) {
+    return { sent: false, reason: eligibility.reason || 'NAP does not meet Telegram policy' };
+  }
+  const referenceOnu = eligibility.affectedOnus.find((onu) => getReportableFailureCategory(onu) === category);
   const sn = String(referenceOnu?.sn || '').toUpperCase();
   if (!referenceOnu || !sn) return { sent: false, reason: 'NAP has no reference ONU' };
   if (hasActiveNapIncidentNotification(nap.name, referenceOnu)) {
@@ -343,22 +318,22 @@ async function handleNapOutage(nap, category) {
     return { sent: false, reason: 'Incident already notified' };
   }
 
-  // Do not describe permanently disconnected bare-Offline ONUs as part of
-  // this incident's scope.
-  const totalClients = nap.onus.filter((onu) =>
-    isOnline(onu) || getReportableFailureCategory(onu)
-  ).length;
+  const totalClients = eligibility.totalActionable;
+  const affectedClients = eligibility.affectedOnus.length;
+  const percentage = Number(eligibility.percentage || 0).toFixed(1);
   const failureType = category === 'power_fail' ? 'Power Fail' : 'Loss of Signal';
   const reason = category === 'power_fail'
     ? 'Corte de Energía (Dying Gasp)'
     : 'Pérdida de Señal (LOS)';
-  console.log(`[Radar] NAP ${nap.name}: ${totalClients}/${totalClients} ONUs offline. Sending consolidated ${failureType} fallback alert...`);
+  console.log(`[Radar] NAP ${nap.name}: ${affectedClients}/${totalClients} ONU(s) affected (${percentage}%). Sending consolidated ${failureType} fallback alert...`);
 
   const payload = {
     event_name: `Smart OLT Radar: NAP ${nap.name} ${failureType}`,
     trigger_description: category === 'power_fail'
-      ? `Corte de energía confirmado: ${totalClients}/${totalClients} ONU/router de ${nap.name} están apagados.`
-      : `Pérdida de señal confirmada: ${totalClients}/${totalClients} ONUs de ${nap.name} están sin señal.`,
+      ? `Corte de energía confirmado: ${affectedClients}/${totalClients} ONU/router de ${nap.name} están apagados (${percentage}% de afectación).`
+      : eligibility.scope === 'fiber_cut'
+        ? `Corte de fibra confirmado por Smart OLT: ${affectedClients}/${totalClients} ONUs de ${nap.name} presentan pérdida de señal.`
+        : `Pérdida de señal confirmada: ${affectedClients}/${totalClients} ONUs de ${nap.name} están sin señal.`,
     host_name: referenceOnu.olt_name || 'Smart OLT',
     event_severity: 'High',
     event_status: 'PROBLEM',

@@ -449,6 +449,115 @@ function getExplicitSmartOltFailureCategory(onu = {}) {
 const isReportableSmartOltFailure = (onu) =>
   ['power_fail', 'loss'].includes(getExplicitSmartOltFailureCategory(onu));
 
+const getPowerFailAlertMinimumPercent = () => {
+  const configured = Number(process.env.NAP_POWER_FAIL_MIN_PERCENT);
+  // Electrical incidents are operationally relevant once 60% or more of the
+  // non-permanent clients in one NAP lose power. Clamp the value so a bad
+  // environment variable cannot silently disable every alert.
+  if (!Number.isFinite(configured)) return 60;
+  return Math.min(Math.max(configured, 1), 100);
+};
+
+const getSmartOltDiagnosticText = (onu = {}) => `${
+  onu.offline_reason || ''
+} ${
+  onu.last_down_reason || ''
+} ${
+  onu.status_reason || ''
+} ${
+  onu.reason || ''
+} ${
+  onu.status_desc || ''
+} ${
+  onu.onu_status || ''
+} ${
+  onu.status || ''
+}`.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+
+/**
+ * SmartOLT sometimes identifies the physical fibre break explicitly before
+ * every ONU in the box has transitioned to LOS. This diagnosis is sufficient
+ * for a fibre-cut notification; a generic/partial LOS is not.
+ */
+export const hasExplicitSmartOltFiberCut = (onu = {}) =>
+  /(?:corte\s+(?:de\s+)?fibra|fibra\s+(?:cortada|corte)|fiber\s+cut|cut\s+fiber|fiber\s+break|break\s+fiber|ruptura\s+de\s+fibra)/
+    .test(getSmartOltDiagnosticText(onu));
+
+/**
+ * Single source of truth for automatic Telegram eligibility.
+ *
+ * - LOS: every actionable ONU in the NAP must be LOS, unless SmartOLT itself
+ *   reports an explicit fibre cut.
+ * - Power Fail: explicit electrical failures must affect at least the
+ *   configured percentage (60% by default) of actionable clients.
+ *
+ * Bare Offline ONU records are permanent/disconnected inventory and are not
+ * part of either denominator or affected-customer list.
+ */
+export function getNapOperationalEligibility(napOnus = [], expectedCategory = '') {
+  const actionableOnus = napOnus.filter((onu) =>
+    isOnuOnline(onu) || isReportableSmartOltFailure(onu)
+  );
+  const minimumClients = getMinimumNapClients();
+  const categories = actionableOnus.map(getExplicitSmartOltFailureCategory);
+  const lossOnus = actionableOnus.filter((_, index) => categories[index] === 'loss');
+  const powerOnus = actionableOnus.filter((_, index) => categories[index] === 'power_fail');
+  const totalActionable = actionableOnus.length;
+  const lossIsTotal = totalActionable >= minimumClients &&
+    lossOnus.length === totalActionable;
+  const hasFiberCut = lossOnus.some(hasExplicitSmartOltFiberCut);
+  const powerPercent = totalActionable > 0
+    ? (powerOnus.length / totalActionable) * 100
+    : 0;
+  const powerMeetsThreshold = totalActionable >= minimumClients &&
+    powerOnus.length > 0 && powerPercent >= getPowerFailAlertMinimumPercent();
+
+  let category = null;
+  let scope = '';
+  let affectedOnus = [];
+  if (lossIsTotal) {
+    category = 'loss';
+    scope = 'total_loss';
+    affectedOnus = lossOnus;
+  } else if (hasFiberCut) {
+    category = 'loss';
+    scope = 'fiber_cut';
+    affectedOnus = lossOnus;
+  } else if (powerMeetsThreshold) {
+    category = 'power_fail';
+    scope = 'power_threshold';
+    affectedOnus = powerOnus;
+  }
+
+  const expectedMatches = !expectedCategory || category === expectedCategory;
+  const percentage = category === 'power_fail'
+    ? powerPercent
+    : totalActionable > 0
+      ? (affectedOnus.length / totalActionable) * 100
+      : 0;
+  const reason = category
+    ? scope === 'fiber_cut'
+      ? 'Smart OLT confirmó un corte de fibra'
+      : scope === 'total_loss'
+        ? 'Todas las ONU/routers accionables de la NAP están en LOS'
+        : `${powerOnus.length}/${totalActionable} clientes con Power Fail (${powerPercent.toFixed(1)}%)`
+    : `No cumple la política Telegram (LOS total/corte de fibra o Power Fail ≥ ${getPowerFailAlertMinimumPercent()}%)`;
+
+  return {
+    eligible: Boolean(category && expectedMatches),
+    category,
+    scope,
+    reason,
+    actionableOnus,
+    affectedOnus,
+    totalActionable,
+    percentage,
+    powerPercent,
+    powerFailureCount: powerOnus.length,
+    lossCount: lossOnus.length
+  };
+}
+
 const getOltIdentity = (onu = {}) => {
   const accountId = String(onu?.smartolt_account_id || onu?.smartOltAccountId || 'default').trim();
   const oltId = String(onu?.olt_id ?? onu?.oltId ?? '').trim();
@@ -489,14 +598,10 @@ function getNapOnusFromSnapshot(referenceOnu, onus = []) {
 
 function getCompleteNapIncident(snapshotOnus, referenceOnu, expectedCategory) {
   const napOnus = getNapOnusFromSnapshot(referenceOnu, snapshotOnus);
-  const actionableOnus = napOnus.filter((candidate) =>
-    isOnuOnline(candidate) || isReportableSmartOltFailure(candidate)
-  );
-  const categories = actionableOnus.map(getExplicitSmartOltFailureCategory);
-  const complete = actionableOnus.length >= getMinimumNapClients() &&
-    categories.length === actionableOnus.length &&
-    categories.every((category) => category === expectedCategory);
-  return { complete, napOnus, actionableOnus };
+  const eligibility = getNapOperationalEligibility(napOnus, expectedCategory);
+  // Preserve the old `complete` field for the callers, while its meaning now
+  // follows the configured policy (complete LOS/fibre-cut or >=60% power).
+  return { complete: eligibility.eligible, napOnus, ...eligibility };
 }
 
 async function isTelegramEligibleOperationalAlert(onu, category) {
@@ -510,10 +615,10 @@ async function isTelegramEligibleOperationalAlert(onu, category) {
     const snapshotOnus = await fetchMonitoringOnus({ forceRefresh: true });
     const incident = getCompleteNapIncident(snapshotOnus, onu, category);
     return incident.complete
-      ? { eligible: true, reason: `Complete ${category} NAP incident`, ...incident }
-      : { eligible: false, reason: 'NAP is not totally affected by one confirmed cause', ...incident };
+      ? { eligible: true, reason: incident.reason, ...incident }
+      : { eligible: false, reason: incident.reason, ...incident };
   } catch (error) {
-    return { eligible: false, reason: `Unable to verify total NAP scope: ${error.message}` };
+    return { eligible: false, reason: `Unable to verify NAP alert scope: ${error.message}` };
   }
 }
 
@@ -612,39 +717,11 @@ async function corroborateTotalNapIncidentWithSmartOlt(nap, referenceOnu) {
   try {
     const returnedOnus = await fetchMonitoringOnus({ forceRefresh: true });
     const onus = getNapOnusFromSnapshot(referenceOnu, returnedOnus);
-    const actionableOnus = onus.filter((onu) =>
-      isOnuOnline(onu) || isReportableSmartOltFailure(onu)
-    );
-    const minimumClients = getMinimumNapClients();
-
-    if (actionableOnus.length < minimumClients) {
-      return { confirmed: false, reason: `Smart OLT returned only ${actionableOnus.length} actionable ONU(s) for ${napName}` };
+    const eligibility = getNapOperationalEligibility(onus);
+    if (!eligibility.eligible) {
+      return { confirmed: false, onus, ...eligibility };
     }
-    if (actionableOnus.some(isOnuOnline)) {
-      return { confirmed: false, reason: 'Smart OLT still reports online ONUs in the NAP' };
-    }
-
-    // Being 100% offline describes the impact, not the cause. If Smart OLT
-    // reports Dying Gasp/Power Fail, this is an electrical incident affecting
-    // the ONUs/routers and must never be announced as a fibre or NAP LOS.
-    const causeCategories = actionableOnus.map(getExplicitSmartOltFailureCategory);
-    let powerFailureCount = causeCategories.filter((category) => category === 'power_fail').length;
-    let lossCount = causeCategories.filter((category) => category === 'loss').length;
-
-    if (powerFailureCount > 0 && lossCount > 0) {
-      return {
-        confirmed: false,
-        category: 'mixed',
-        reason: `Smart OLT reports mixed causes (${powerFailureCount} power, ${lossCount} LOS)`
-      };
-    }
-    if (powerFailureCount === actionableOnus.length) {
-      return { confirmed: true, category: 'power_fail', onus, powerFailureCount };
-    }
-    if (lossCount === actionableOnus.length) {
-      return { confirmed: true, category: 'loss', onus };
-    }
-    return { confirmed: false, reason: 'Smart OLT did not provide an electrical or optical failure cause' };
+    return { confirmed: true, onus, ...eligibility };
   } catch (error) {
     return { confirmed: false, reason: `Smart OLT query failed: ${error.message}` };
   }
@@ -1102,18 +1179,24 @@ function cancelPendingAlertsForNap(nap) {
 }
 
 /**
- * Send a single NAP-level LOS report after the Smart OLT snapshot confirmed
- * the complete impact and Zabbix supplied fresh evidence for every ONU.
+ * Send a single NAP-level LOS report after Smart OLT confirms either the
+ * complete impact or an explicit fibre cut.
  */
-async function sendCachedNapLossAlert(payload, nap, eventTime = '') {
-  const referenceClient = nap.clients?.find((client) => client.sn);
+async function sendCachedNapLossAlert(payload, nap, confirmation, eventTime = '') {
+  const affectedSerials = new Set((confirmation?.affectedOnus || [])
+    .map((onu) => String(onu?.sn || '').trim().toUpperCase())
+    .filter(Boolean));
+  const affectedClients = (nap.clients || []).filter((client) =>
+    affectedSerials.has(String(client?.sn || '').trim().toUpperCase())
+  );
+  const referenceClient = affectedClients.find((client) => client.sn) || nap.clients?.find((client) => client.sn);
   if (!referenceClient) return { sent: false, reason: 'NAP has no clients' };
 
-  const totalClients = nap.totalClients || nap.clients.length;
-  // This path runs only after Smart OLT corroborated a NAP-wide LOS event.
-  // Store the confirmed type, not a generic Offline state, so the detailed
-  // report lists only the actual LOS clients.
-  nap.clients.forEach((client) => {
+  const totalClients = confirmation?.totalActionable || nap.totalClients || nap.clients.length;
+  const affectedCount = affectedClients.length || confirmation?.affectedOnus?.length || 0;
+  // Store only the confirmed LOS clients. For an explicit fibre cut SmartOLT
+  // may detect the cause before every router has transitioned to LOS.
+  affectedClients.forEach((client) => {
     updateOnuStatusInCache(client.sn, 'LOS', {
       smartolt_account_id: client.smartolt_account_id || nap.smartolt_account_id || '',
       reason: 'Pérdida de Señal (LOS)',
@@ -1141,31 +1224,46 @@ async function sendCachedNapLossAlert(payload, nap, eventTime = '') {
     zabbix_event_name: payload.zabbix_event_name || payload.event_name || payload.trigger_name || '',
     zabbix_trigger_description: payload.zabbix_trigger_description || payload.trigger_description || '',
     event_name: payload.event_name || `NAP ${nap.name}: Loss of Signal`,
-    trigger_description: `${payload.trigger_description || ''}\nCaída total confirmada: ${totalClients}/${totalClients} ONUs de la NAP ${nap.name} están sin señal.`.trim(),
+    trigger_description: `${payload.trigger_description || ''}\n${
+      confirmation?.scope === 'fiber_cut'
+        ? `Corte de fibra confirmado por Smart OLT: ${affectedCount}/${totalClients} ONU(s) de la NAP ${nap.name} con pérdida de señal.`
+        : `Caída total confirmada: ${affectedCount}/${totalClients} ONUs de la NAP ${nap.name} están sin señal.`
+    }`.trim(),
     event_time: payload.event_time || eventTime
   };
 
   const result = await processAndSendAlert(
     enrichedPayload,
     representativeOnu,
-    'Pérdida de Señal (LOS)'
+    confirmation?.scope === 'fiber_cut'
+      ? 'Corte de fibra confirmado por Smart OLT (LOS)'
+      : 'Pérdida de Señal (LOS)'
   );
-  console.log(`[NAP LOS] Sent consolidated cache-backed alert for ${nap.name}: ${totalClients}/${totalClients} ONUs offline.`);
+  console.log(`[NAP LOS] Sent cache-backed ${confirmation?.scope || 'loss'} alert for ${nap.name}: ${affectedCount}/${totalClients} ONU(s) affected.`);
   return result;
 }
 
 /**
- * Send one consolidated power-failure report when every ONU/router in a NAP
- * is offline and Smart OLT explicitly reports an electrical cause.
+ * Send one consolidated power-failure report after the SmartOLT-confirmed
+ * electrical impact reaches the configured NAP threshold (60% by default).
  */
 async function sendCachedNapPowerFailAlert(payload, nap, confirmation, eventTime = '') {
-  const referenceClient = nap.clients?.find((client) => client.sn);
+  const affectedSerials = new Set((confirmation?.affectedOnus || [])
+    .map((onu) => String(onu?.sn || '').trim().toUpperCase())
+    .filter(Boolean));
+  const affectedClients = (nap.clients || []).filter((client) =>
+    affectedSerials.has(String(client?.sn || '').trim().toUpperCase())
+  );
+  const referenceClient = affectedClients.find((client) => client.sn) || nap.clients?.find((client) => client.sn);
   if (!referenceClient) return { sent: false, reason: 'NAP has no clients' };
 
-  const totalClients = nap.totalClients || nap.clients.length;
+  const totalClients = confirmation?.totalActionable || nap.totalClients || nap.clients.length;
+  const affectedCount = affectedClients.length || confirmation?.affectedOnus?.length || 0;
+  const percentage = Number(confirmation?.percentage || 0).toFixed(1);
   // This path has already been confirmed by Smart OLT as an electrical
-  // incident for the NAP. Preserve Power fail rather than generic Offline.
-  nap.clients.forEach((client) => {
+  // incident for the NAP. Preserve only the confirmed Power fail clients,
+  // because the remaining routers may still be online below 100% impact.
+  affectedClients.forEach((client) => {
     updateOnuStatusInCache(client.sn, 'Power fail', {
       smartolt_account_id: client.smartolt_account_id || nap.smartolt_account_id || '',
       reason: 'Corte de Energía (Dying Gasp)',
@@ -1194,13 +1292,13 @@ async function sendCachedNapPowerFailAlert(payload, nap, confirmation, eventTime
     zabbix_event_name: payload.zabbix_event_name || payload.event_name || payload.trigger_name || '',
     zabbix_trigger_description: payload.zabbix_trigger_description || payload.trigger_description || '',
     event_name: `NAP ${nap.name}: Power failure detected`,
-    trigger_description: `Corte de energía confirmado: ${totalClients}/${totalClients} ONU/router de la NAP ${nap.name} están apagados por falta de alimentación eléctrica.`,
+    trigger_description: `Corte de energía confirmado: ${affectedCount}/${totalClients} ONU/router de la NAP ${nap.name} están apagados por falta de alimentación eléctrica (${percentage}% de afectación).`,
     event_time: payload.event_time || eventTime
   };
 
   // Correct the optimistic LOS history entries created before Smart OLT
   // supplied the definitive electrical cause.
-  nap.clients.forEach((client) => {
+  affectedClients.forEach((client) => {
     updateHistoryEventDetails(client.sn, 'power_fail', 'Corte de Energía (Dying Gasp)');
   });
 
@@ -1209,7 +1307,7 @@ async function sendCachedNapPowerFailAlert(payload, nap, confirmation, eventTime
     representativeOnu,
     'Corte de Energía (Dying Gasp)'
   );
-  console.log(`[NAP Power Fail] Sent consolidated power alert for ${nap.name}: ${totalClients}/${totalClients} ONU/router offline.`);
+  console.log(`[NAP Power Fail] Sent cache-backed power alert for ${nap.name}: ${affectedCount}/${totalClients} ONU/router offline (${percentage}%).`);
   return result;
 }
 
@@ -1246,7 +1344,7 @@ async function trySendSmartOltFirstNapIncident(payload, nap, referenceOnu, event
   try {
     const result = confirmation.category === 'power_fail'
       ? await sendCachedNapPowerFailAlert(payload, confirmedNap, confirmation, eventTime)
-      : await sendCachedNapLossAlert(payload, confirmedNap, eventTime);
+      : await sendCachedNapLossAlert(payload, confirmedNap, confirmation, eventTime);
     return result?.sent !== false;
   } finally {
     pendingNapIncidentNotifications.delete(notificationKey);
@@ -1754,6 +1852,11 @@ ${comparisonText || ''}
   const isNapTotalPowerFailure = isPower && totalClients > 0 && totalOffline === totalClients;
   const isNapTotalLoss = !isPower && ((totalClients > 1 && totalOffline === totalClients) || (totalClients > 1 && totalOnline === 0));
   const isNapPartialLoss = !isPower && totalOffline > 1 && totalOnline > 0;
+  const isConfirmedFiberCut = !isPower && (
+    hasExplicitSmartOltFiberCut(onu) ||
+    /(?:corte\s+(?:de\s+)?fibra|fibra\s+(?:cortada|corte)|fiber\s+cut|fiber\s+break)/
+      .test(String(oltStatusReason || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase())
+  );
   const isIndividualIncident = totalOffline <= 1 || totalOnline > 0;
 
   let effectiveEmoji = statusEmoji;
@@ -1779,6 +1882,12 @@ ${comparisonText || ''}
     effectiveTitle = '🚨🔴 <b>RIESGO ALTO: CAÍDA TOTAL EN CAJA NAP</b>';
     effectiveReason = oltStatusReason || 'Pérdida de Potencia Óptica (LOS)';
     effectiveTechExplanation = '\n💡 <b>Diagnóstico Técnico:</b> Pérdida total de potencia óptica (LOS). La caja NAP completa no recibe luz de la OLT.\n• <b>Causas probables:</b> Rotura de fibra troncal, corte de acometida general o daño físico en la caja NAP.';
+  } else if (isConfirmedFiberCut) {
+    effectiveEmoji = '🧵';
+    effectiveStatusLabel = 'Corte de fibra confirmado (LOS)';
+    effectiveTitle = '🧵🚨 <b>CORTE DE FIBRA CONFIRMADO POR SMART OLT</b>';
+    effectiveReason = oltStatusReason || 'Corte de fibra confirmado por Smart OLT';
+    effectiveTechExplanation = '\n💡 <b>Diagnóstico Técnico:</b> Smart OLT reporta explícitamente un corte de fibra. Se notifica aunque la transición LOS todavía sea parcial.';
   } else if (isNapPartialLoss) {
     effectiveEmoji = '⚠️';
     effectiveStatusLabel = 'Pérdida Parcial de Señal en NAP';
@@ -1806,7 +1915,9 @@ ${comparisonText || ''}
     ? '🔌 <b>Power Fail en ONU/routers</b> (no clasificado como caída de NAP ni LOS)'
     : isNapTotalLoss
       ? '🛑 <b>¡CAÍDA TOTAL DE LA CAJA NAP!</b> (Todas las conexiones están sin servicio)'
-    : isNapPartialLoss
+      : isConfirmedFiberCut
+        ? '🧵 <b>¡CORTE DE FIBRA CONFIRMADO POR SMART OLT!</b>'
+      : isNapPartialLoss
       ? `⚠️ <b>¡CAÍDA PARCIAL EN LA CAJA NAP!</b> (${totalOffline} de ${totalClients} conexiones caídas)`
       : isPower
         ? 'ℹ️ <b>Incidente de energía en ONU/router</b> (no clasificado como caída de NAP)'

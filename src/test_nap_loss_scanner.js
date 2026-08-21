@@ -11,6 +11,7 @@ process.env.TELEGRAM_CHAT_ID = '-100987654321';
 process.env.TELEGRAM_ADDITIONAL_CHAT_IDS = '';
 process.env.NAP_CACHE_FILE = cacheFile;
 process.env.NAP_TOTAL_OUTAGE_MIN_ONUS = '1';
+process.env.NAP_POWER_FAIL_MIN_PERCENT = '60';
 
 // The third ONU is intentionally permanently Offline. It must neither trigger
 // a message nor inflate the impact of a real Power fail / LOS incident.
@@ -120,8 +121,8 @@ try {
   assert.strictEqual(telegramMessages.length, 2,
     'An active total NAP outage must receive one reminder after six hours');
 
-  // Recovery rearms the incident. A partial Power Fail and a normal partial
-  // LOS must stay silent: Telegram is reserved for complete NAP outages.
+  // Recovery rearms the incident. A partial Power Fail below 60% and a
+  // normal partial LOS must stay silent.
   statuses = ['Online', 'Online', 'Offline', 'Online'];
   await runScanCycle();
   statuses = ['Power fail', 'Online', 'Offline', 'Online'];
@@ -132,33 +133,36 @@ try {
   await runScanCycle();
   assert.strictEqual(telegramMessages.length, 2, 'A normal partial LOS must not send Telegram alerts');
 
-  // A fibre-cut reason on one ONU is still a partial NAP incident. LOS is
-  // operationally notified only when the entire NAP has lost signal.
+  // SmartOLT explicitly diagnosing a fibre cut is an exception to the
+  // total-LOS rule and must alert even before every router transitions.
   statuses = ['Online', 'Online', 'Offline', 'Online'];
   await runScanCycle();
   statuses = ['Fiber cut', 'Online', 'Offline', 'Online'];
   await runScanCycle();
-  assert.strictEqual(telegramMessages.length, 2,
-    'A partial fibre-cut diagnosis must not send a router/ONU LOS alert');
+  assert.strictEqual(telegramMessages.length, 3,
+    'An explicit SmartOLT fibre-cut diagnosis must send one LOS alert');
+  assert.ok(telegramMessages.at(-1).text.includes('CORTE DE FIBRA CONFIRMADO'),
+    'The fibre-cut alert must identify the SmartOLT diagnosis explicitly');
 
-  // A sector-wide electrical outage must remain Power Fail and must never be
-  // relabelled as a fibre cut merely because the complete NAP is offline.
-  statuses = ['Online', 'Online', 'Offline', 'Online'];
+  // Power Fail becomes alertable at 60%. Here 2 of 3 actionable routers are
+  // electrically down (66.7%), while the third is still online.
+  statuses = ['Online', 'Online', 'Online', 'Online'];
   await runScanCycle();
-  statuses = ['Power fail', 'Power fail', 'Offline', 'Online'];
+  statuses = ['Power fail', 'Power fail', 'Online', 'Online'];
   await runScanCycle();
-  assert.strictEqual(telegramMessages.length, 3, 'A full-NAP electrical outage must send one consolidated alert');
-  const totalPowerMessage = telegramMessages[2].text;
+  assert.strictEqual(telegramMessages.length, 4, 'A 66.7% electrical outage must send one consolidated alert');
+  const totalPowerMessage = telegramMessages[3].text;
   assert.ok(totalPowerMessage.includes('Corte de energía'));
   assert.ok(!totalPowerMessage.includes('Pérdida de señal (LOS)'));
   assert.ok(totalPowerMessage.includes('Cliente 1') && totalPowerMessage.includes('Cliente 2'));
+  assert.ok(totalPowerMessage.includes('66.7%'), 'The power alert must show its 60%+ impact.');
   const scannerStatus = getScannerStatus();
   assert.ok(scannerStatus.lastSuccessAt, 'Scanner health must expose its latest successful Smart OLT query');
   assert.strictEqual(scannerStatus.totalOnus, 4);
   assert.strictEqual(scannerStatus.oltCount, 2, 'The radar must include each Smart OLT id in its status feed');
   assert.deepStrictEqual(scannerStatus.olts.map((olt) => olt.id), ['1', '2']);
   assert.strictEqual(scannerStatus.offlineOnus, 2);
-  assert.strictEqual(scannerStatus.ignoredOfflineOnus, 1);
+  assert.strictEqual(scannerStatus.ignoredOfflineOnus, 0);
   assert.strictEqual(scannerStatus.lastError, null);
 
   console.log('Smart OLT fallback delivery for total NAP LOS/Power Fail across multiple OLTs: PASS');
