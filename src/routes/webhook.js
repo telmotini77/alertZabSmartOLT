@@ -3017,6 +3017,18 @@ Comandos disponibles:
           }
         }
 
+        // A raw Zabbix message can arrive directly in this Telegram group.
+        // It is input for the bot, not authorization to echo an individual
+        // Power Fail/LOS notification back into the group. Apply exactly the
+        // same NAP policy used by webhooks and the radar before replying.
+        if (canSend && isProblem && ['power_fail', 'loss'].includes(category)) {
+          const eligibility = await isTelegramEligibleOperationalAlert(onu, category);
+          if (!eligibility.eligible) {
+            console.log(`[Telegram listener] Suppressing individual ${category} reply for ${sn}: ${eligibility.reason}.`);
+            canSend = false;
+          }
+        }
+
         if (canSend) {
           const eventTime = extractEventTime(text);
           const replyText = await generateNapReport(

@@ -738,7 +738,8 @@ try {
     process.exit(1);
   }
   
-  // Wait a short duration for the async message handler to query Smart OLT and send the reply
+  // Wait for the async handler. A raw Zabbix message for one ONU must not be
+  // echoed back as an individual Power Fail alert in the Telegram group.
   await new Promise(resolve => setTimeout(resolve, 500));
 
   console.log('Requests made during Telegram bot listener update:');
@@ -753,13 +754,10 @@ try {
   const smartOltReply = fetchLog.find(log => log.url.includes('/sendMessage') && log.body?.reply_to_message_id === 777);
   const hasTelegramReply = Boolean(smartOltReply);
 
-  if (hasSmartOltCallTg &&
-      hasTelegramReply &&
-      smartOltReply.body.text.includes('CORTE DE ENERGÍA') &&
-      !JSON.stringify(smartOltReply.body).includes('FHTT8C3A91BF')) {
-    console.log('✅ Bot listener prioritizes the Smart OLT cause over the Zabbix label: PASS');
+  if (hasSmartOltCallTg && !hasTelegramReply) {
+    console.log('✅ Bot listener suppresses individual Power Fail replies: PASS');
   } else {
-    console.error('❌ Bot listener did not use the Smart OLT cause: FAIL');
+    console.error('❌ Bot listener emitted an individual Power Fail reply: FAIL');
     process.exit(1);
   }
 
