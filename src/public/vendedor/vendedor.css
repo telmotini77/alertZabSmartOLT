@@ -215,6 +215,7 @@ select {
   transform: translateX(-50%);
   font-size: 12px;
 }
+.ruler-info[hidden] { display: none; }
 .ruler-info i { color: var(--blue); }
 .ruler-info button { min-height: 29px; padding: 0 8px; color: var(--text); background: rgba(148,163,184,.12); border-color: var(--line); }
 .ruler-info button:hover { background: rgba(148,163,184,.2); }
