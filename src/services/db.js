@@ -165,7 +165,7 @@ export async function initDb() {
     }
   }
   await runMigration();
-  await migrateNapStorageKeys();
+  const migratedNapStorageKeys = await migrateNapStorageKeys();
   // Some Render volumes still carry the obsolete JSON/SQLite fixture from an
   // old integration test. Remove its exact signature on every startup so it
   // cannot reappear in the operator's map history after a redeploy.
@@ -177,6 +177,7 @@ export async function initDb() {
   if (purgeResult.changes > 0) {
     console.log(`🧹 Removed ${purgeResult.changes} obsolete integration-test history record(s).`);
   }
+  return { migratedNapStorageKeys };
 }
 
 /**
@@ -202,6 +203,7 @@ async function migrateNapStorageKeys() {
     FROM naps
   `);
 
+  let migrated = 0;
   for (const row of rows) {
     const displayName = String(row.display_name || row.name || '').trim();
     if (!displayName) continue;
@@ -212,7 +214,9 @@ async function migrateNapStorageKeys() {
       'UPDATE naps SET name = ?, display_name = ? WHERE name = ?',
       [storageKey, displayName, row.name]
     );
+    migrated++;
   }
+  return migrated;
 }
 
 /**

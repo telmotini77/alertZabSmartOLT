@@ -316,7 +316,7 @@ export function findCachedOnuBySn(sn) {
 export async function initCache() {
   try {
     // 1. Initialize SQLite Database
-    await initDb();
+    const dbInitResult = await initDb();
 
     // 2. Load NAPs from database
     const storedNaps = await dbGetAllNaps();
@@ -326,10 +326,17 @@ export async function initCache() {
     const configuredAccountIds = getSmartOltAccounts().map((account) => account.id);
     const cachedAccountIds = new Set(cachedNaps.map((nap) => String(nap.smartolt_account_id || '').trim()));
     const needsAccountMetadata = configuredAccountIds.some((id) => !cachedAccountIds.has(id));
+    // Existing deployments previously stored one row per visible NAP code.
+    // Once that storage is migrated to account/OLT-aware keys, rebuild the
+    // inventory once so any formerly colliding codes are restored immediately.
+    const needsNapStorageRebuild = Number(dbInitResult?.migratedNapStorageKeys || 0) > 0;
+    const needsFullMetadataSync = cachedNaps.length === 0 || needsAccountMetadata || needsNapStorageRebuild;
     console.log(cachedNaps.length === 0
       ? '📦 No NAPs found in SQLite. Loading NAP metadata and GPS from Smart OLT...'
       : needsAccountMetadata
         ? '📦 New Smart OLT domain detected. Refreshing NAP metadata and GPS from Smart OLT...'
+        : needsNapStorageRebuild
+          ? '📦 Rebuilding NAP metadata after account/OLT storage migration...'
         : '📍 Refreshing NAP GPS from Smart OLT Splitters without querying the full ONU inventory...');
     try {
       // Splitter coordinates are a light, authoritative Smart OLT request.
@@ -340,7 +347,7 @@ export async function initCache() {
       // The full ONU inventory is static metadata and far more expensive. On
       // restart, use the persisted inventory plus fresh Splitter GPS; only a
       // blank cache/new domain needs an immediate full inventory request.
-      if (cachedNaps.length === 0 || needsAccountMetadata) {
+      if (needsFullMetadataSync) {
         await syncCacheWithSmartOlt();
       }
     } catch (syncErr) {
