@@ -107,6 +107,55 @@ function applySmartOltCoordinates(naps = []) {
   return summary;
 }
 
+function buildOdbCoordinateIndex(odbs = []) {
+  // ODB names must be unique within an account to be used safely. When a
+  // Smart OLT account has an ambiguous name, leave it unplaced rather than
+  // putting a NAP at another box with the same label.
+  const coordinates = new Map();
+  const ambiguous = new Set();
+  odbs.forEach((odb) => {
+    const key = getOdbSourceKey(odb);
+    const latitude = Number(odb?.latitude ?? odb?.gps_lat);
+    const longitude = Number(odb?.longitude ?? odb?.gps_lng);
+    if (!key || !hasValidCoordinates(latitude, longitude) || ambiguous.has(key)) return;
+    if (coordinates.has(key)) {
+      coordinates.delete(key);
+      ambiguous.add(key);
+      return;
+    }
+    coordinates.set(key, { latitude, longitude });
+  });
+  return coordinates;
+}
+
+/**
+ * Refresh NAP positions from Smart OLT Splitters without requesting the heavy
+ * ONU inventory. This keeps the map working even while the inventory endpoint
+ * is temporarily rate-limited.
+ */
+export async function refreshNapCoordinatesFromSmartOlt({ forceRefresh = false } = {}) {
+  const odbs = await fetchAllOdbs({ forceRefresh });
+  const odbCoordinates = buildOdbCoordinateIndex(odbs);
+  const updatedNaps = [];
+
+  cachedNaps.forEach((nap) => {
+    const coordinate = odbCoordinates.get(getOdbSourceKey(nap, nap.name));
+    if (!coordinate) return;
+    if (nap.latitude !== coordinate.latitude || nap.longitude !== coordinate.longitude || nap.coordinate_source !== 'smartolt_odb') {
+      nap.latitude = coordinate.latitude;
+      nap.longitude = coordinate.longitude;
+      nap.coordinate_source = 'smartolt_odb';
+      updatedNaps.push(nap);
+    }
+  });
+
+  if (updatedNaps.length > 0) {
+    await Promise.all(updatedNaps.map((nap) => dbSaveNap(nap)));
+  }
+  const located = cachedNaps.filter((nap) => nap.coordinate_source === 'smartolt_odb').length;
+  return { located, updated: updatedNaps.length, total: cachedNaps.length, odbs };
+}
+
 function getSmartOltFailureDetails(changes = []) {
   const offlineChanges = changes.filter((change) => !isOnlineStatus(change.newStatus));
   const source = offlineChanges.length > 0 ? offlineChanges : changes;
@@ -281,11 +330,19 @@ export async function initCache() {
       ? '📦 No NAPs found in SQLite. Loading NAP metadata and GPS from Smart OLT...'
       : needsAccountMetadata
         ? '📦 New Smart OLT domain detected. Refreshing NAP metadata and GPS from Smart OLT...'
-        : '📍 Refreshing NAP GPS exclusively from Smart OLT...');
+        : '📍 Refreshing NAP GPS from Smart OLT Splitters without querying the full ONU inventory...');
     try {
-      // This is intentionally done at every process start. Persisted GPS
-      // values therefore never appear after a restart, even momentarily.
-      await syncCacheWithSmartOlt();
+      // Splitter coordinates are a light, authoritative Smart OLT request.
+      // It must run before the full ONU inventory, which may be rate-limited.
+      const coordinateResult = await refreshNapCoordinatesFromSmartOlt();
+      console.log(`📍 Smart OLT Splitter GPS refreshed: ${coordinateResult.located}/${coordinateResult.total} active NAP(s) located.`);
+
+      // The full ONU inventory is static metadata and far more expensive. On
+      // restart, use the persisted inventory plus fresh Splitter GPS; only a
+      // blank cache/new domain needs an immediate full inventory request.
+      if (cachedNaps.length === 0 || needsAccountMetadata) {
+        await syncCacheWithSmartOlt();
+      }
     } catch (syncErr) {
       console.error('❌ Initial Smart OLT metadata/GPS sync failed:', syncErr.message);
     }
@@ -317,34 +374,34 @@ export async function initCache() {
  */
 export async function syncCacheWithSmartOlt({ forceRefresh = false } = {}) {
   try {
-    const onus = await fetchAllOnus({ forceRefresh });
     let odbs = [];
     try {
       odbs = await fetchAllOdbs({ forceRefresh });
+      // Make ODB GPS available immediately in the in-memory map. If the
+      // subsequent ONU inventory call is rate-limited, this coordinate refresh
+      // remains valid and visible instead of falling back to zero map points.
+      const odbCoordinates = buildOdbCoordinateIndex(odbs);
+      const updatedNaps = [];
+      cachedNaps.forEach((nap) => {
+        const coordinate = odbCoordinates.get(getOdbSourceKey(nap, nap.name));
+        if (!coordinate) return;
+        if (nap.latitude !== coordinate.latitude || nap.longitude !== coordinate.longitude || nap.coordinate_source !== 'smartolt_odb') {
+          nap.latitude = coordinate.latitude;
+          nap.longitude = coordinate.longitude;
+          nap.coordinate_source = 'smartolt_odb';
+          updatedNaps.push(nap);
+        }
+      });
+      if (updatedNaps.length > 0) await Promise.all(updatedNaps.map((nap) => dbSaveNap(nap)));
     } catch (odbError) {
       // Keep status/alert monitoring available if Smart OLT temporarily
       // denies the metadata endpoint. The next slow metadata sync retries it.
       console.error('⚠️ Smart OLT ODB GPS sync failed; using ONU GPS only for this cycle:', odbError.message);
     }
+    const onus = await fetchAllOnus({ forceRefresh });
     console.log(`Smart OLT returned ${onus.length} ONUs. Processing NAPs...`);
 
-    // A splitter is the physical NAP box. Its Smart OLT coordinates are more
-    // accurate than an average of the individual customer ONUs. Do not assign
-    // an ODB coordinate when the same name is ambiguous within one account.
-    const odbCoordinates = new Map();
-    const ambiguousOdbCoordinates = new Set();
-    odbs.forEach((odb) => {
-      const key = getOdbSourceKey(odb);
-      const latitude = Number(odb?.latitude ?? odb?.gps_lat);
-      const longitude = Number(odb?.longitude ?? odb?.gps_lng);
-      if (!key || !hasValidCoordinates(latitude, longitude) || ambiguousOdbCoordinates.has(key)) return;
-      if (odbCoordinates.has(key)) {
-        odbCoordinates.delete(key);
-        ambiguousOdbCoordinates.add(key);
-        return;
-      }
-      odbCoordinates.set(key, { latitude, longitude });
-    });
+    const odbCoordinates = buildOdbCoordinateIndex(odbs);
 
     const napMap = {};
 

@@ -64,6 +64,7 @@ let mockOdbs = [
   { name: 'NAP-04-A', latitude: '-12.0500', longitude: '-77.0600' },
   { name: 'NAP-04-B', latitude: '-12.0800', longitude: '-77.0500' }
 ];
+let fullOnuRequestCount = 0;
 
 // Set process env variables
 process.env.SMARTOLT_SUBDOMAIN = 'testcompany';
@@ -80,6 +81,7 @@ globalThis.fetch = async (url) => {
     };
   }
   if (url.includes('/onu/get_all_onus_details')) {
+    fullOnuRequestCount++;
     return {
       ok: true,
       status: 200,
@@ -95,7 +97,7 @@ globalThis.fetch = async (url) => {
 console.log('--- STARTING MAP AND CACHE UNIT TESTS ---');
 
 // Load cache service after configuring the isolated test cache path.
-const { getCachedNaps, getStatusHistory, updateOnuStatusInCache, syncCacheWithSmartOlt, applyOnuStatusSnapshot } =
+const { getCachedNaps, getStatusHistory, updateOnuStatusInCache, syncCacheWithSmartOlt, refreshNapCoordinatesFromSmartOlt, applyOnuStatusSnapshot } =
   await import('./services/cache.js');
 
 async function runTests() {
@@ -176,6 +178,8 @@ async function runTests() {
       'A NAP without Smart OLT GPS must not reuse an old stored coordinate');
     assert.strictEqual(napBWithoutSmartOltGps.longitude, null,
       'A NAP without Smart OLT GPS must not reuse an old stored coordinate');
+    assert.strictEqual(napBWithoutSmartOltGps.coordinate_source, null,
+      'A NAP without Smart OLT GPS must not identify a local coordinate source');
     mockOnus[3].gps_lat = savedNapBCoordinates.gps_lat;
     mockOnus[3].gps_lng = savedNapBCoordinates.gps_lng;
     mockOdbs[1] = savedOdbBCoordinates;
@@ -183,10 +187,22 @@ async function runTests() {
     const refreshedNapB = getCachedNaps().find(n => n.name === 'NAP-04-B');
     assert.strictEqual(refreshedNapB.latitude, -12.0800, 'NAP GPS must be restored from Smart OLT');
     assert.strictEqual(refreshedNapB.longitude, -77.0500, 'NAP GPS must be restored from Smart OLT');
-
-    assert.strictEqual(napBWithoutSmartOltGps.coordinate_source, null,
-      'A NAP without Smart OLT GPS must not identify a local coordinate source');
     console.log('✅ Smart OLT-only GPS policy: PASS');
+
+    // A process restart must be able to refresh ODB locations without making
+    // another full ONU inventory request (Smart OLT rate-limits that endpoint).
+    console.log('\n[4.1] Refreshing Splitter GPS without a full ONU inventory...');
+    const onuRequestsBeforeGpsRefresh = fullOnuRequestCount;
+    mockOdbs[0] = { ...mockOdbs[0], latitude: '-12.0510', longitude: '-77.0610' };
+    await refreshNapCoordinatesFromSmartOlt({ forceRefresh: true });
+    const napAAfterOdbOnlyRefresh = getCachedNaps().find(n => n.name === 'NAP-04-A');
+    assert.strictEqual(fullOnuRequestCount, onuRequestsBeforeGpsRefresh,
+      'ODB coordinate refresh must not call the rate-limited full ONU inventory');
+    assert.strictEqual(napAAfterOdbOnlyRefresh.latitude, -12.0510,
+      'Cached NAP GPS must update from the ODB-only Smart OLT request');
+    assert.strictEqual(napAAfterOdbOnlyRefresh.coordinate_source, 'smartolt_odb');
+    mockOdbs[0] = { ...mockOdbs[0], latitude: '-12.0500', longitude: '-77.0600' };
+    console.log('✅ Splitter-only GPS refresh avoids the full ONU inventory: PASS');
 
     // 5. A full OLT snapshot must be applied before deciding whether a NAP
     // has lost signal completely.
