@@ -153,9 +153,9 @@ async function runTests() {
     
     console.log('✅ Cache status updates (Total Fall): PASS');
 
-    // 4. Smart OLT GPS has priority. A NAP without it may use a matching,
-    // scoped system backup; an unmatched NAP must not reuse arbitrary GPS.
-    console.log('\n[4] Testing Smart OLT GPS priority and system fallback...');
+    // 4. NAP GPS comes exclusively from Smart OLT. A NAP without GPS in the
+    // inventory must not reuse a stored or CSV position.
+    console.log('\n[4] Testing Smart OLT-only GPS policy...');
     const savedNapBCoordinates = { gps_lat: mockOnus[3].gps_lat, gps_lng: mockOnus[3].gps_lng };
     mockOnus[3].gps_lat = '0.0';
     mockOnus[3].gps_lng = '0.0';
@@ -172,30 +172,9 @@ async function runTests() {
     assert.strictEqual(refreshedNapB.latitude, -12.0800, 'NAP GPS must be restored from Smart OLT');
     assert.strictEqual(refreshedNapB.longitude, -77.0500, 'NAP GPS must be restored from Smart OLT');
 
-    const savedOnuMetadata = {
-      odb: mockOnus[3].odb,
-      olt_name: mockOnus[3].olt_name,
-      board: mockOnus[3].board,
-      port: mockOnus[3].port,
-      gps_lat: mockOnus[3].gps_lat,
-      gps_lng: mockOnus[3].gps_lng
-    };
-    Object.assign(mockOnus[3], {
-      odb: 'SM7038-1',
-      olt_name: 'ROUTER-FTTH',
-      board: '2',
-      port: '10',
-      gps_lat: '0.0',
-      gps_lng: '0.0'
-    });
-    await syncCacheWithSmartOlt({ forceRefresh: true });
-    const fallbackNap = getCachedNaps().find(n => n.name === 'SM7038-1');
-    assert.strictEqual(fallbackNap.latitude, -2.911048, 'A scoped system backup must locate a NAP without Smart OLT GPS');
-    assert.strictEqual(fallbackNap.longitude, -78.966561, 'A scoped system backup must locate a NAP without Smart OLT GPS');
-    assert.strictEqual(fallbackNap.coordinate_source, 'system_backup', 'The map must identify the fallback source');
-    Object.assign(mockOnus[3], savedOnuMetadata);
-    await syncCacheWithSmartOlt({ forceRefresh: true });
-    console.log('✅ Smart OLT GPS priority and system fallback: PASS');
+    assert.strictEqual(napBWithoutSmartOltGps.coordinate_source, null,
+      'A NAP without Smart OLT GPS must not identify a local coordinate source');
+    console.log('✅ Smart OLT-only GPS policy: PASS');
 
     // 5. A full OLT snapshot must be applied before deciding whether a NAP
     // has lost signal completely.

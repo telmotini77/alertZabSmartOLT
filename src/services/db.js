@@ -188,7 +188,7 @@ async function runMigration() {
     // entered/CSV GPS data; NAP inventory and locations now come only from
     // Smart OLT during cache initialization.
     if (fs.existsSync(cacheFile)) {
-      console.log('📍 Not importing legacy nap_cache.json into SQLite; its verified locations are used only as a Smart OLT fallback on the map.');
+      console.log('📍 Not importing legacy nap_cache.json into SQLite; NAP locations come exclusively from Smart OLT.');
     }
 
     // 2. Migrate Status History
